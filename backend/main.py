@@ -152,6 +152,28 @@ async def state():
         return {"ok": False, "code": -1, "message": f"读取状态异常：{e}"}
 
 
+@app.get("/api/card/plan")
+async def card_plan(max_plans: int = 10):
+    """生成「现在可以炼什么」的推荐（素材在手、目标未收集），不消耗任何资源。"""
+    if err := _require_login():
+        return err
+    try:
+        return await _session.get_refine_plan(max_plans=max_plans)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"生成方案异常：{e}"}
+
+
+@app.post("/api/card/refine")
+async def card_refine(target: int):
+    """开始炼卡：消耗三张素材卡合成目标卡。会真实消耗素材，谨慎调用。"""
+    if err := _require_login():
+        return err
+    try:
+        return await _session.refine(target)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"炼卡请求异常：{e}"}
+
+
 @app.get("/api/card/mainpage")
 async def card_mainpage(method: str = "get"):
     """主页面/卡箱入口。magicCard 用 POST，也提供 GET 变体便于对比。"""

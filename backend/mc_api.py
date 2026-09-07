@@ -114,6 +114,35 @@ class LoginSession:
                     "message": r.get("message", ""), "raw": r.get("raw", "")[:200]}
         return parse_state(r.get("raw", ""))
 
+    async def refine(self, target: int, **extra) -> dict:
+        """开始炼卡。参数由 card_plan 构造，调用方负责核素材/炉位。"""
+        from .card_plan import build_refine_payload
+
+        mp = await self.post(EP_MAINPAGE, code="")
+        if mp.get("code") != 0:
+            return {"ok": False, "message": f"读取卡箱失败 code={mp.get('code')}"}
+        payload = build_refine_payload(target, mp.get("raw", ""))
+        if payload is None:
+            return {"ok": False, "message": "素材不足（需要的三张素材卡不在换卡箱/保险箱）"}
+        payload.update(extra)
+        if self.uin:
+            payload.setdefault("opuin", self.uin)
+        r = await self.post(EP_REFINE, **payload)
+        r["ok"] = r.get("code") == 0
+        r["sent_target"] = target
+        return r
+
+    async def get_refine_plan(self, max_plans: int = 10) -> dict:
+        """生成「现在可以炼什么」的推荐方案。"""
+        from .card_plan import plan_refines
+
+        mp = await self.post(EP_MAINPAGE, code="")
+        if mp.get("code") != 0:
+            return {"ok": False, "message": f"读取卡箱失败 code={mp.get('code')}"}
+        plans = plan_refines(mp.get("raw", ""), max_plans=max_plans)
+        plans["ok"] = True
+        return plans
+
     async def probe_api(self) -> dict:
         """探测魔法卡片真实接口域名与可用端点（card.show.qq.com 已死，需现探）。"""
         out: dict = {"uin": self.uin, "hosts_found": [], "tests": []}
