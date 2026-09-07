@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>魔法卡片助手</title>
+<style>
+  :root{
+    --qq-blue:#12b7f5; --qq-blue-d:#0a9bd4; --bg:#f3f4f8; --line:#e6e8ee;
+    --text:#222; --muted:#8a909c; --ok:#2ecc71; --warn:#f5a623; --err:#e74c3c;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--text);display:flex;justify-content:center;
+    align-items:flex-start;min-height:100vh;padding:24px 12px}
+  .card{width:360px;background:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.08);
+    overflow:hidden}
+  .head{background:linear-gradient(135deg,var(--qq-blue),var(--qq-blue-d));
+    color:#fff;padding:16px;text-align:center;font-size:17px;font-weight:600}
+  .tabs{display:flex;border-bottom:1px solid var(--line)}
+  .tab{flex:1;padding:12px;background:none;border:none;font-size:14px;color:var(--muted);
+    cursor:pointer;border-bottom:2px solid transparent}
+  .tab.active{color:var(--qq-blue);border-bottom-color:var(--qq-blue);font-weight:600}
+  .panel{padding:20px 22px 22px;text-align:center}
+  .panel.hidden{display:none}
+  .qr-box{width:180px;height:180px;margin:0 auto 14px;border:1px solid var(--line);
+    border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fafbfc}
+  .qr-box img{width:160px;height:160px;display:block}
+  .status{font-size:13px;color:var(--muted);margin-bottom:12px;min-height:18px}
+  .status.ok{color:var(--ok)} .status.warn{color:var(--warn)} .status.err{color:var(--err)}
+  .btn{width:100%;padding:10px;border:none;border-radius:6px;background:#eef1f6;color:var(--text);
+    font-size:14px;cursor:pointer;margin-top:6px}
+  .btn:hover{background:#e3e7ee}
+  .btn.primary{background:var(--qq-blue);color:#fff}
+  .btn.primary:hover{background:var(--qq-blue-d)}
+  .btn:disabled{opacity:.5;cursor:default}
+  .hint{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.5;text-align:left}
+  .dash{padding:18px 22px}
+  .dash-head{display:flex;justify-content:space-between;align-items:center;
+    padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:12px}
+  .dash-head b{color:var(--qq-blue)}
+  .dash-body p{font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:10px}
+  .spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--qq-blue);
+    border-radius:50%;display:inline-block;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* 操作日志 */
+  .log{margin-top:14px;border-top:1px dashed var(--line);padding-top:10px}
+  .log-title{font-size:12px;color:var(--muted);margin-bottom:6px}
+  #log{height:150px;overflow-y:auto;background:#0f1115;border-radius:8px;padding:8px 10px;
+    font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe;white-space:pre-wrap;word-break:break-all}
+  #log .t{color:#5b6b7a}
+  #log .ok{color:#5fd38a}
+  #log .warn{color:#ffcf6b}
+  #log .err{color:#ff7b7b}
+  #log .info{color:#9fd0ff}
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- 登录视图 -->
+  <div id="login-view" class="card">
+    <div class="head">魔法卡片助手 · 登录</div>
+    <div class="tabs">
+      <button class="tab active" data-tab="qr">二维码登录</button>
+      <button class="tab" data-tab="quick">快速登录</button>
+    </div>
+
+    <div id="tab-qr" class="panel">
+      <div class="qr-box"><img id="qr-img" alt="扫码登录"></div>
+      <div id="qr-status" class="status">请使用手机 QQ 扫码</div>
+      <button id="qr-refresh" class="btn">刷新二维码</button>
+    </div>
+
+    <div id="tab-quick" class="panel hidden">
+      <div id="quick-info" class="status"><span class="spinner"></span>正在检测本机 QQ…</div>
+      <button id="quick-launch" class="btn primary hidden">唤起本机 QQ</button>
+      <div class="hint">若未检测到本机 QQ 的一键登录能力，请使用二维码登录。</div>
+    </div>
+
+    <div class="log">
+      <div class="log-title">操作日志</div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <!-- 登录后视图 -->
+  <div id="dash-view" class="card hidden">
+    <div class="head">魔法卡片助手</div>
+    <div class="dash">
+      <div class="dash-head">
+        <span>已登录：<b id="dash-uin"></b></span>
+        <button id="logout" class="btn" style="width:auto;margin:0;padding:6px 14px">退出</button>
+      </div>
+      <div class="dash-body">
+        <p>登录态已捕获， Cookie 保存在本机后端内存中。下一步：探测魔法卡片真实接口域名与端点（老域名 card.show.qq.com 已停用）。</p>
+        <button id="probe-btn" class="btn primary">探测真实接口</button>
+        <div class="log">
+          <div class="log-title">操作日志</div>
+          <div id="log-dash"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
