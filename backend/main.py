@@ -134,6 +134,14 @@ async def game_login():
     return await _session.enter_game()
 
 
+@app.get("/api/state")
+async def state():
+    """游戏全量状态（主页面解析后），前端主面板直接渲染。每次实时请求。"""
+    if err := _require_login():
+        return err
+    return await _session.get_state()
+
+
 @app.get("/api/card/mainpage")
 async def card_mainpage(method: str = "get"):
     """主页面/卡箱入口。magicCard 用 POST，也提供 GET 变体便于对比。"""

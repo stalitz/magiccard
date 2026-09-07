@@ -26,6 +26,9 @@ function showDash(uin) {
   $("dash-view").classList.remove("hidden");
   $("dash-uin").textContent = uin || "(未知)";
   log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
+  loadState();
+  if (stateTimer) clearInterval(stateTimer);
+  if ($("auto-refresh").checked) stateTimer = setInterval(loadState, 60000);
 }
 
 // ---------- 二维码登录 ----------
@@ -131,6 +134,56 @@ $("logout").onclick = async () => {
   location.reload();
 };
 
+// ---------- 游戏状态 ----------
+let stateTimer = null;
+
+function fmtLeft(sec) {
+  if (sec <= 0) return "已完成";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h > 0 ? `${h}小时${m}分` : `${m}分${s}秒`;
+}
+
+async function loadState() {
+  const box = $("state-box");
+  try {
+    const d = await (await fetch("/api/state")).json();
+    if (!d.ok) {
+      box.innerHTML = `<div class="err">读取失败：code=${d.code ?? "?"} ${d.message || ""}</div>`;
+      log(`读取游戏状态失败：code=${d.code ?? "?"} ${d.message || ""}`, "err");
+      return;
+    }
+    const u = d.user || {};
+    const sb = d.stovebox || {}, cb = d.changebox || {}, st = d.storebox || {};
+    const slots = (sb.cards || []).map((c) => {
+      const cls = c.id === 0 ? "empty" : (c.flag === 2 ? "done" : "busy");
+      const txt = c.id === 0 ? "空位" : (c.flag === 2 ? "可取卡" : `炼制中 ${fmtLeft(c.left)}`);
+      return `<span class="slot ${cls}">炉位${c.slot}：${txt}</span>`;
+    }).join("") || '<span class="slot empty">无炼卡位数据</span>';
+
+    box.innerHTML = `
+      <div class="row"><span class="k">昵称 / QQ</span><span class="v">${u.nick || "-"}（${u.uin || "-"}）</span></div>
+      <div class="row"><span class="k">金币 / 经验</span><span class="v">${(u.money || 0).toLocaleString()} / ${(u.exp || 0).toLocaleString()}</span></div>
+      <div class="row"><span class="k">抽卡机会</span><span class="v">${u.randchance || 0} 次</span></div>
+      <h4>炼卡炉（${(d.stoves || []).length} 个）</h4>
+      <div>${slots}</div>
+      <h4>卡箱</h4>
+      <div class="row"><span class="k">换卡箱</span><span class="v">${cb.filled ?? 0} / ${cb.max || 0}</span></div>
+      <div class="row"><span class="k">保险箱</span><span class="v">${st.filled ?? 0} / ${st.max || 0}</span></div>
+      <div class="row"><span class="k">炼卡位</span><span class="v">${sb.cur || 0} / ${sb.max || 0}</span></div>`;
+    log("游戏状态已刷新", "ok");
+  } catch (e) {
+    box.innerHTML = `<div class="err">请求失败：${e}</div>`;
+    log("读取游戏状态异常：" + e, "err");
+  }
+}
+
+$("refresh-btn").onclick = loadState;
+$("auto-refresh").onchange = (e) => {
+  if (stateTimer) { clearInterval(stateTimer); stateTimer = null; }
+  if (e.target.checked) stateTimer = setInterval(loadState, 60000);
+  log(e.target.checked ? "已开启自动刷新（60 秒）" : "已关闭自动刷新", "info");
+};
+
 // ---------- 探测真实接口 ----------
 $("probe-btn").onclick = async () => {
   const btn = $("probe-btn");
@@ -150,27 +203,6 @@ $("probe-btn").onclick = async () => {
     log("探测请求失败：" + e, "err");
   } finally {
     btn.disabled = false; btn.textContent = "探测真实接口";
-  }
-};
-
-// ---------- 进入游戏（空间游戏授权握手，尝试拿到游戏会话）----------
-$("enter-game-btn").onclick = async () => {
-  const btn = $("enter-game-btn");
-  btn.disabled = true; btn.textContent = "进入游戏中…";
-  log("开始空间游戏授权握手（mapp_addAuthorize → ticket）…", "info");
-  try {
-    const d = await (await fetch("/api/game/login")).json();
-    if (d.error) { log("进入游戏失败：" + d.error, "err"); return; }
-    if (d.ticket) log("拿到 ticket：" + d.ticket, "ok");
-    if (d.card_test) {
-      const t = d.card_test;
-      log(`card.show.qq.com 测试 → HTTP ${t.status} code=${t.code} ${t.message || ""}`, t.code === 0 ? "ok" : "warn");
-    }
-    log(d.note || "握手完成，详见上方。若仍 -1100，说明还缺游戏侧会话凭据。", "info");
-  } catch (e) {
-    log("进入游戏请求失败：" + e, "err");
-  } finally {
-    btn.disabled = false; btn.textContent = "进入游戏(拿游戏会话)";
   }
 };
 

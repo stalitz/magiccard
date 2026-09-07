@@ -57,6 +57,22 @@
   #log .err{color:#ff7b7b}
   #log .info{color:#9fd0ff}
 </style>
+<style>
+  .state-box{background:#f7f9fb;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:13px;line-height:1.9}
+  .state-box .row{display:flex;justify-content:space-between;border-bottom:1px dashed #e8edf3;padding:2px 0}
+  .state-box .row:last-child{border-bottom:none}
+  .state-box .k{color:#5a6b7f}
+  .state-box .v{font-weight:600;color:#1f2d3d}
+  .state-box h4{margin:10px 0 4px;font-size:13px;color:#2b6cb0}
+  .state-box .slot{display:inline-block;min-width:150px;margin:2px 8px 2px 0;padding:3px 8px;border-radius:5px;background:#eef4fb;font-size:12px}
+  .state-box .done{background:#e6ffed;color:#1a7f37}
+  .state-box .busy{background:#fff5e6;color:#a15c00}
+  .state-box .empty{background:#f1f3f5;color:#868e96}
+  .dash-actions{display:flex;align-items:center;gap:12px;margin:12px 0}
+  .dash-actions .btn{width:auto;margin:0;padding:7px 16px}
+  .auto{font-size:12px;color:#5a6b7f;display:flex;align-items:center;gap:4px}
+  .err{color:#c0392b}
+</style>
 </head>
 <body>
 <div class="app">
@@ -90,9 +106,14 @@
           <button id="logout" class="btn" style="width:auto;margin:0;padding:6px 14px">退出</button>
         </div>
         <div class="dash-body">
-          <p>登录态已捕获。卡片游戏的接口域名 <b>card.show.qq.com</b> 活着，但当前返回 -1100（未登录到该应用），需拿到游戏侧会话凭据才能调用。</p>
-          <button id="probe-btn" class="btn primary">探测真实接口</button>
-          <button id="enter-game-btn" class="btn">进入游戏(拿游戏会话)</button>
+          <div id="state-box" class="state-box">
+            <span class="spinner"></span>正在读取游戏数据…
+          </div>
+          <div class="dash-actions">
+            <button id="refresh-btn" class="btn primary">刷新状态</button>
+            <label class="auto"><input type="checkbox" id="auto-refresh" checked> 每 60 秒自动刷新</label>
+          </div>
+          <button id="probe-btn" class="btn">探测接口（调试）</button>
         </div>
       </div>
     </div>

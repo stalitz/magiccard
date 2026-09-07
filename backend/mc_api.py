@@ -14,7 +14,7 @@ from typing import Optional
 
 import httpx
 
-from .constants import MC_BASE_URL, calc_gtk, err_msg
+from .constants import MC_BASE_URL, EP_MAINPAGE, calc_gtk, err_msg
 
 SESSION_FILE = Path("/tmp/mc_session.json")
 
@@ -105,6 +105,14 @@ class LoginSession:
             MC_BASE_URL + endpoint, data=data, cookies=self._inject_qq_cookies()
         )
         return parse_response(resp.text)
+
+    async def get_state(self) -> dict:
+        """读取主页面并解析成结构化游戏状态（供前端渲染）。"""
+        r = await self.post(EP_MAINPAGE, code="")
+        if r.get("code") != 0:
+            return {"ok": False, "code": r.get("code"),
+                    "message": r.get("message", ""), "raw": r.get("raw", "")[:200]}
+        return parse_state(r.get("raw", ""))
 
     async def probe_api(self) -> dict:
         """探测魔法卡片真实接口域名与可用端点（card.show.qq.com 已死，需现探）。"""
@@ -209,3 +217,70 @@ def parse_response(xml_text: str) -> dict:
         "cards": cards,
         "raw": xml_text,
     }
+
+
+def _i(v, default=0):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_state(xml_text: str) -> dict:
+    """把 card_user_mainpage 的 XML 解析成前端可直接渲染的结构。
+
+    结构见 docs/magicCard-源码解读.md 第 5 节。
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {"ok": False, "message": "XML 解析失败"}
+
+    out: dict = {"ok": _i(root.get("code"), -1) == 0}
+
+    u = root.find("user")
+    if u is not None:
+        out["user"] = {
+            "nick": u.get("nick", ""),
+            "uin": u.get("uin", ""),
+            "money": _i(u.get("money")),
+            "exp": _i(u.get("exp")),
+            "randchance": _i(u.get("randchance")),   # 剩余抽卡机会
+        }
+
+    hello = root.find("hello")
+    now = _i(hello.get("time")) if hello is not None else 0
+    out["now"] = now
+
+    out["stoves"] = [
+        {"id": _i(s.get("id")), "endtime": _i(s.get("endtime")), "lv": _i(s.get("lv"))}
+        for s in root.iter("stove")
+    ]
+
+    def box(name: str) -> dict:
+        b = root.find(name)
+        if b is None:
+            return {"cur": 0, "max": 0, "cards": []}
+        cards = [{k: c.get(k) for k in c.attrib} for c in b.iter("card")]
+        return {"cur": _i(b.get("cur")), "max": _i(b.get("max")), "cards": cards}
+
+    sb = box("stovebox")
+    out["stovebox"] = {
+        "cur": sb["cur"], "max": sb["max"],
+        "cards": [
+            {
+                "slot": _i(c.get("slot")),
+                "id": _i(c.get("id")),
+                "flag": _i(c.get("flag")),      # 2 = 炼制完成可取卡
+                "left": _i(c.get("btime")) + _i(c.get("locktime")) - now,
+            }
+            for c in sb["cards"]
+        ],
+    }
+
+    for key in ("changebox", "storebox"):
+        b = box(key)
+        filled = sum(1 for c in b["cards"] if _i(c.get("id")) > 0)
+        out[key] = {"cur": b["cur"], "max": b["max"], "filled": filled}
+
+    return out
