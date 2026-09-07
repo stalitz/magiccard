@@ -363,7 +363,7 @@ async def exchange_scan(body: dict):
             _session, theme_id, peers,
             price=int(body.get("price") or 0),
             card_id=int(body.get("card_id") or 0),
-            concurrency=int(body.get("concurrency") or 8))
+            concurrency=int(body.get("concurrency") or 5))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"扫描异常：{e}"}
 

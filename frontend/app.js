@@ -269,6 +269,7 @@ const exState = {
   manualText: "",
   results: null,       // 最近一次扫描结果
 };
+let scanTimer = null;  // 扫描进行中的计时器
 
 async function initExchangeOnce() {
   if (exState.inited) return;
@@ -291,7 +292,7 @@ function bindExchangeEvents() {
     if (e.key === "Enter") doScan();
   });
   $("ex-peers-btn").onclick = fetchPeers;
-  $("ex-scan-btn").onclick = doScan;
+  $("ex-scan-btn").onclick = () => doScan(false);
   $("ex-reset").onclick = clearResults;
 }
 
@@ -341,7 +342,30 @@ function selectTargetTheme(tid, name) {
   $("ex-target").textContent = `目标：${name}（#${tid}）`;
   $("ex-cnt").textContent = "";
   $("ex-theme-cands").classList.add("hidden");
+  hideAutoPeers();
   exMsg(`目标套卡已设为「${name}」。点「找该套卡友」拉取玩家列表。`, "ok");
+}
+
+function hideAutoPeers() {
+  const w = $("ex-auto-wrap");
+  if (w) { w.classList.add("hidden"); w.innerHTML = ""; }
+}
+
+function renderAutoPeers(list) {
+  const w = $("ex-auto-wrap");
+  if (!list || !list.length) { hideAutoPeers(); return; }
+  w.classList.remove("hidden");
+  const first = list.slice(0, 12);
+  const more = list.length - first.length;
+  w.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);margin:2px 0 4px">
+      <b style="color:var(--text)">自动卡友（${list.length} 人）</b>
+      <span>正在玩该套，可直接扫描；也可复制下面 QQ 到上方手动名单长期留存</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;line-height:1.9">
+      ${first.map((u) => `<span class="chip" style="cursor:default;font-size:12px;padding:1px 9px">${u}</span>`).join("")}
+      ${more > 0 ? `<span style="font-size:12px;color:var(--muted);align-self:center">…等 ${more} 人</span>` : ""}
+    </div>`;
 }
 
 async function fetchPeers() {
@@ -354,6 +378,7 @@ async function fetchPeers() {
     exState.apiPeers = d.api_peers || [];
     exState.manualPeers = d.manual_peers || [];
     renderManualPeers();
+    renderAutoPeers(exState.apiPeers);
     const auto = exState.apiPeers.length;
     const man = exState.manualPeers.length;
     $("ex-cnt").textContent = `自动卡友 ${auto} 人 + 手动 ${man} 人`;
@@ -422,12 +447,25 @@ function peersForScan(manualOnly = false) {
 async function doScan(manualOnly = false) {
   if (!exState.themeTid) { exMsg("请先搜并选定想收的套卡", "err"); return; }
   const { api, manual } = peersForScan(manualOnly);
+  // 非仅扫手动：后端 use_api=true 会自动重新拉该套卡友，无需前端先存名单。
+  // 仅扫手动：必须至少有一个手动 QQ。
+  if (manualOnly && !manual.length) {
+    exMsg("手动名单为空：先在下方填写卡友 QQ 并点「保存名单」", "err");
+    return;
+  }
   const peers = [...api, ...manual];
-  if (!peers.length) { exMsg("没有可扫描的卡友：先「找该套卡友」，或在下方补充手动 QQ", "err"); return; }
   const btn = $("ex-scan-btn");
   btn.disabled = true;
-  btn.textContent = `扫描 ${peers.length} 人…`;
-  exMsg(`开始扫描 ${peers.length} 个卡友的换卡箱（自动卡友 ${api.length} + 手动 ${manual.length}），约需 ${Math.max(5, Math.round(peers.length / 6))} 秒…`, "info");
+  btn.textContent = manualOnly ? "扫描中…" : `扫描中（自动拉取该套卡友）…`;
+  exMsg(manualOnly
+    ? `开始扫描 ${manual.length} 个手动卡友的换卡箱，约需 ${Math.max(3, Math.round(manual.length / 6))} 秒…`
+    : "开始扫描：自动拉取该套在玩玩家并逐个读取换卡箱。服务器限流约 15 人/10 秒，扫满 80 人约需 1~2 分钟，请稍候…", "info");
+  const t0 = Date.now();
+  if (scanTimer) clearInterval(scanTimer);
+  scanTimer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    $("ex-cnt").textContent = `扫描中…已 ${s} 秒（限流保护，勿重复点击）`;
+  }, 1000);
   try {
     const d = await (await fetch("/api/exchange/scan", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -437,13 +475,15 @@ async function doScan(manualOnly = false) {
         peers: manualOnly ? manual : [],
         use_api: !manualOnly,
         manual_peers: manual,
-        concurrency: 8,
+        concurrency: 5,
       }),
     })).json();
+    if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     if (!d.ok) throw new Error(d.message || "扫描失败");
     exState.results = d;
     renderScan(d);
   } catch (e) {
+    if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     exMsg("扫描失败：" + (e.message || e), "err");
   } finally {
     btn.disabled = false;

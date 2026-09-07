@@ -163,15 +163,34 @@ def parse_my_boxes(xml_text: str) -> dict:
 # ---------- 扫描 ----------
 
 async def _scan_one(session, opuin, theme_id, price, card_id, my_payable,
-                    idx, theme_names, sem) -> dict:
-    """扫一个卡友，返回命中 dst 及其可付出的 src 候选。"""
-    async with sem:
+                    idx, theme_names, stats) -> dict:
+    """扫一个卡友，返回命中 dst 及其可付出的 src 候选。
+
+    服务器限流铁律（实测 2026-09-07）：读他人主页约 15 次/窗口（窗口 ~10s）
+    后开始返回 -3001，冷却 ~15s 恢复。因此本函数不做并发，由调用方以
+    受控速率逐个调用；-3001 时按指数退避重试。
+    """
+    p = None
+    for attempt in range(4):  # 最多 4 次尝试
         try:
             p = await fetch_peer_box(session, opuin)
         except Exception:  # noqa: BLE001
-            return {"uin": opuin, "error": "请求失败"}
-    if not p.get("ok"):
-        return {"uin": opuin, "error": p.get("message", "读取失败")}
+            p = None
+        if p and p.get("ok"):
+            return _hit_from_box(p, opuin, theme_id, price, card_id,
+                                 my_payable, idx, theme_names)
+        code = (p or {}).get("code") if p else None
+        is_limit = (code == -3001) or p is None
+        if not is_limit:
+            break  # 其它错误码（如封禁/无卡主页）不重试
+        stats["retries"] = stats.get("retries", 0) + 1
+        await asyncio.sleep(6 * (attempt + 1))  # 6s/12s/18s 退避
+    return {"uin": opuin, "error": (p or {}).get("message", "请求失败")}
+
+
+def _hit_from_box(p, opuin, theme_id, price, card_id, my_payable,
+                  idx, theme_names):
+    """从已读取的卡友换卡箱挑出目标套卡的命中。"""
     hits = []
     want_theme = next((x for x in p.get("exch", []) if x), 0)
     for card in p.get("cards", []):
@@ -218,8 +237,12 @@ async def _scan_one(session, opuin, theme_id, price, card_id, my_payable,
 
 async def scan_peers(session, theme_id: int, peers: list[str],
                      price: int = 0, card_id: int = 0,
-                     concurrency: int = 8) -> dict:
-    """并发扫描卡友，返回所有「对方换卡箱里有目标套卡且未锁」的命中。"""
+                     concurrency: int = 1) -> dict:
+    """受控速率扫描卡友，返回所有「对方换卡箱里有目标套卡且未锁」的命中。
+
+    实测服务器约 15 人/10s 窗口限流（-3001），故采用串行 + 0.7s 间隔，
+    触限后由 _scan_one 退避重试。80 人约 1~2 分钟。
+    """
     idx = indexes()
     theme_names = {th["tid"]: th["name"] for th in idx["themes"]}
     # 我方可付出的卡 = 保险箱全部（storebox 无锁概念，可直接换出）
@@ -229,12 +252,18 @@ async def scan_peers(session, theme_id: int, peers: list[str],
         {**c, "theme_name": theme_names.get(c.get("theme_id", 0), "")}
         for c in my.get("storebox", []) if c["id"] > 0
     ]
-    sem = asyncio.Semaphore(concurrency)
+    stats: dict = {"retries": 0}
     t0 = time.time()
-    tasks = [_scan_one(session, u, theme_id, price, card_id, my_payable, idx,
-                       theme_names, sem)
-             for u in peers]
-    results = await asyncio.gather(*tasks)
+    results: list = []
+    for i, u in enumerate(peers):
+        results.append(await _scan_one(
+            session, u, theme_id, price, card_id, my_payable, idx,
+            theme_names, stats))
+        # 触限退避后，给服务器多留恢复时间
+        if stats.get("retries") and i % 3 == 2:
+            await asyncio.sleep(2)
+        else:
+            await asyncio.sleep(0.7)
     rows, errors, ok_n = [], [], 0
     for r in results:
         if r is None:
