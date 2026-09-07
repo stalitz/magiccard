@@ -43,8 +43,13 @@ class LoginSession:
             pass
 
     def _session_key(self) -> str:
-        """空间接口优先用 p_skey（qzs.qq.com）算 g_tk；缺则退回 skey。"""
-        return self.client.cookies.get("p_skey") or self.client.cookies.get("skey") or ""
+        """g_tk 用 skey 算。
+
+        证据：sxyy/magicCard 的 getUrl() 遍历 cookie jar 取 name=='skey' 再
+        Tea.getGTK(skey)，其 card.show.qq.com 各端点 URL 只带 g_tk，不使用 p_skey。
+        （此前「需 p_skey」的推测已被该代码证据推翻。）
+        """
+        return self.client.cookies.get("skey") or ""
 
     def _inject_qq_cookies(self) -> dict:
         """手动把空间 skey 注入请求（card.show.qq.com 不会自动带 qzs.qq.com 的 p_skey）。"""

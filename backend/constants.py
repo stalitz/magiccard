@@ -11,16 +11,40 @@ QZONE_APPID = "549000929"
 # ptlogin 扫码用的 appid（TODO: 抓包确认是否为游戏专属 appid）
 PTLOGIN_APPID = "549000929"
 
-# ---- 魔法卡片接口端点（来自 mfkp/js/page/*，2014 参考）----
-EP_REFINE       = "card_stove_refine"            # TODO 抓包确认：开始炼卡（素材卡放入炉子）
+# ---- 魔法卡片接口端点 ----
+# 主来源：sxyy/magicCard (2016) commonlib/constant.py 的真实字符串常量
+# （该项目是可真正炼卡的 Python 实现，端点名比 mfkp 2014 更完整、可信）
+EP_MAINPAGE     = "card_user_mainpage"           # 主页面/卡箱入口：POST code='' uin=<uin>
+EP_REGISTER     = "card_user_register"           # 开通魔法卡片（未开通时须先调，见 -1005）
+EP_REFINE       = "card_stove_refine"            # 开始炼卡（素材卡放入炉子）★ 已由 magicCard 确认
 EP_REFINED_GET  = "card_stove_refinedcard_get"   # 取炼制完成的卡
 EP_CANCEL       = "card_stove_cancel"            # 取消炼卡
 EP_FLASH_FIRE   = "card_elf_flash_fire"          # 秒卡（立即完成）
 EP_ACCELERATE   = "card_stove_accelerate"        # 加速炼卡
-EP_RANDOM_GET   = "card_user_random_get"         # 抽机会卡 type=1单抽 / type=2全抽
-EP_SELL         = "card_market_npc_sell"          # 卖卡
-EP_MOVE         = "card_user_storage_exchange"    # 移动卡（换卡箱 <-> 保险箱）
-EP_STOVE_BOX    = "card_stove_box"               # TODO 抓包确认：查询炉子状态
+EP_STEAL_GET    = "card_stove_stealcard_get"     # 查询可偷卡
+EP_STEAL        = "card_stove_steal"             # 偷卡
+EP_RANDOM_GET   = "card_user_random_get"         # 抽机会卡 POST type=2
+EP_SELL         = "card_market_npc_sell"         # 卖卡
+EP_BUY          = "card_market_npc_buy"          # 买卡
+EP_MOVE         = "card_user_storage_exchange"   # 移动卡（换卡箱 <-> 保险箱）
+EP_THEME_LIST   = "card_user_theme_list"         # 套卡主题列表
+EP_COLLECTION_ADD = "card_collection_add"        # 卡片放入集卡册
+EP_EXCHANGE_CARD  = "card_user_exchangecard"     # 变卡（换卡）
+EP_TRANSFER     = "card_user_transfer_card"      # 赠卡
+EP_MONEY_DRAW   = "card_user_money_draw"         # 每日登陆礼包
+EP_PAI_OPEN     = "card_pai_open"                # 翻牌
+EP_MISSION_COMPLETE = "card_mission_complete"    # 完成任务
+EP_GUIDE_REPORT = "card_user_guide_report"       # 新手引导上报
+EP_LEVELUP_BONUS = "card_user_levelup_bonus"     # 升级奖励
+EP_TASK_ACTIVITY  = "card_task_activity"         # 活动任务
+EP_ACT_GIFTS    = "card_act_get_gifts"           # 活动领奖
+EP_ACT_FREE     = "card_act_get_free"            # 活动免费次数
+EP_ACT_PAY      = "card_act_pay"                 # 活动付费
+EP_ACT_DIG      = "card_act_dig"                 # 挖宝
+EP_SPIRITE      = "card_user_spirite"            # 宠物探险
+EP_ZCG          = "card_user_zcg"                # 种子罐/杂物柜
+EP_SHARE_INFO   = "card_user_share_info"         # 分享信息
+EP_SHARE_GET    = "card_user_share_get"          # 分享领奖
 
 
 def calc_gtk(skey: str) -> int:
@@ -35,6 +59,11 @@ def calc_gtk(skey: str) -> int:
 ERR_CODES = {
     -1001: "请重新登陆！",
     -1002: "系统繁忙，请稍后再试!",
+    -1005: "用户未开通魔法卡片（需先调 card_user_register 开通）",
+    # -1100：magicCard/mfkp 的错误码表均未收录。实测现象：带有效 skey + 正确 g_tk
+    # 调用仍返回它。当前推测为「未开通/未初始化该应用」，待用 card_user_register
+    # 开通后复测确认（尚未验证，勿当定论）。
+    -1100: "未开通或未初始化该应用（推测，待 register 后复测）",
     -32001: "您的消耗卡面值低于目标卡，请重新选择消耗卡。",
     -32002: "找不到相应的记录。",
     -33004: "箱子满了！",
