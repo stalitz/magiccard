@@ -66,7 +66,7 @@ async def me():
     return {"logged_in": _session.logged_in, "uin": _session.uin}
 
 
-@app.get("/api/logout")
+@app.api_route("/api/logout", methods=["GET", "POST"])
 async def logout():
     _session.clear()
     return {"ok": True}

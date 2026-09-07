@@ -42,12 +42,26 @@ class LoginSession:
         except Exception:  # noqa: BLE001
             pass
 
+    def _session_key(self) -> str:
+        """空间接口优先用 p_skey（qzs.qq.com）算 g_tk；缺则退回 skey。"""
+        return self.client.cookies.get("p_skey") or self.client.cookies.get("skey") or ""
+
+    def _inject_qq_cookies(self) -> dict:
+        """手动把空间 skey 注入请求（card.show.qq.com 不会自动带 qzs.qq.com 的 p_skey）。"""
+        out = {}
+        for name in ("p_skey", "skey", "uin", "p_uin"):
+            v = self.client.cookies.get(name)
+            if v:
+                out[name] = v
+        return out
+
     def restore(self) -> bool:
         """从本地文件恢复登录态（重启后端不丢登录）。"""
         try:
             if SESSION_FILE.exists():
                 d = json.loads(SESSION_FILE.read_text())
-                self.client.cookies.update(d.get("cookies", {}))
+                for k, v in d.get("cookies", {}).items():
+                    self.client.cookies.set(k, v, domain=".qq.com")
                 raw = d.get("uin", "")
                 self.uin = raw[1:] if raw.startswith("o") else raw
                 self.logged_in = bool(d.get("cookies", {}).get("skey"))
@@ -64,10 +78,12 @@ class LoginSession:
             pass
 
     async def get(self, endpoint: str, **params) -> dict:
-        params.setdefault("g_tk", calc_gtk(self.client.cookies.get("skey", "")))
+        params.setdefault("g_tk", calc_gtk(self._session_key()))
         if self.uin:
             params.setdefault("uin", self.uin)
-        resp = await self.client.get(MC_BASE_URL + endpoint, params=params)
+        resp = await self.client.get(
+            MC_BASE_URL + endpoint, params=params, cookies=self._inject_qq_cookies()
+        )
         return parse_response(resp.text)
 
     async def probe_api(self) -> dict:
@@ -85,7 +101,7 @@ class LoginSession:
         except Exception as e:  # noqa: BLE001
             out["page_error"] = repr(e)
         # 2) 对候选 host 试一个已知端点，看哪个还活着
-        g_tk = calc_gtk(self.client.cookies.get("skey", ""))
+        g_tk = calc_gtk(self._session_key())
         for base in [
             "https://card.show.qq.com/cgi-bin/",
             "https://appimg.qq.com/cgi-bin/",
@@ -131,8 +147,9 @@ class LoginSession:
         try:
             rr = await c.get(
                 MC_BASE_URL + "card_user_random_get",
-                params={"g_tk": calc_gtk(c.cookies.get("skey", "")),
+                params={"g_tk": calc_gtk(self._session_key()),
                         "uin": self.uin or "", "type": 1},
+                cookies=self._inject_qq_cookies(),
             )
             txt = rr.text
             import re as _re2
