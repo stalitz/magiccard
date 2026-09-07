@@ -11,6 +11,7 @@ import base64
 import time
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -139,7 +140,16 @@ async def state():
     """游戏全量状态（主页面解析后），前端主面板直接渲染。每次实时请求。"""
     if err := _require_login():
         return err
-    return await _session.get_state()
+    try:
+        return await _session.get_state()
+    except httpx.ConnectError:
+        return {"ok": False, "code": -1,
+                "message": "连接腾讯服务器失败（网络抖动），请稍后点击刷新重试"}
+    except httpx.TimeoutException:
+        return {"ok": False, "code": -1,
+                "message": "连接腾讯服务器超时，请稍后点击刷新重试"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "code": -1, "message": f"读取状态异常：{e}"}
 
 
 @app.get("/api/card/mainpage")
