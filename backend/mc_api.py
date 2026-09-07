@@ -1,6 +1,10 @@
 """魔法卡片接口层：封装请求、g_tk 签名、XML 解析。
 
-端点和基址来自 2014 年 mfkp 逆向参考值，2026 年真实接口需抓包确认。
+2026 实测要点（已用真实登录态验证）：
+  * 基址 https://card.show.qq.com/cgi-bin/ 仍然可用
+  * 所有接口必须 **POST** 表单；用 GET 一律返回 -1100
+  * 多数接口需要 ver=1、code='' 等参数，缺失会返回 "versionError"
+  * 登录态用 qq.com 的 skey 算 g_tk（与 magicCard(2016) 源码一致）
 """
 import json
 import re
@@ -191,7 +195,12 @@ def parse_response(xml_text: str) -> dict:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return {"code": -1, "message": "XML 解析失败", "raw": xml_text[:500]}
-    code = int(root.get("code", -1))
+    # 有些失败响应 code 不是数字（如 "versionError"），必须容错
+    raw_code = root.get("code", -1)
+    try:
+        code = int(raw_code)
+    except (TypeError, ValueError):
+        code = -1
     message = root.get("message", "")
     cards = [{k: c.get(k) for k in c.attrib} for c in root.iter("card")]
     return {
