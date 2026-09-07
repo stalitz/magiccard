@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from .auth_qr import QRLogin
 from .mc_api import LoginSession
+from . import card_query as cq
 from .constants import EP_MAINPAGE, EP_REGISTER, EP_RANDOM_GET
 
 app = FastAPI(title="魔法卡片助手")
@@ -189,6 +190,93 @@ async def card_register():
     if err := _require_login():
         return err
     return await _session.get(EP_REGISTER)
+
+
+# ---- 卡库查询（静态卡库 + 实时持有数）----
+# 持有快照 8 秒内复用，避免每次点击都打一次 mainpage
+_inv_cache: dict = {"ts": 0.0, "data": None}
+INV_TTL = 8.0
+
+
+async def _owned_snapshot() -> dict | None:
+    """实时读取一次卡箱，返回 {card_id: 持有数} 与炉内目标。失败返回 None。"""
+    import time as _t
+    from .card_plan import parse_user_cards
+
+    now = _t.time()
+    if _inv_cache["data"] and now - _inv_cache["ts"] < INV_TTL:
+        return _inv_cache["data"]
+    try:
+        r = await _session.post(EP_MAINPAGE, code="")
+        if r.get("code") != 0:
+            return None
+        u = parse_user_cards(r.get("raw", ""))
+        avail: dict[int, int] = {}
+        for bname in ("changebox", "storebox"):
+            for _slot, cid in u[bname]:
+                if cid > 0:
+                    avail[cid] = avail.get(cid, 0) + 1
+        _inv_cache["data"] = {
+            "avail": avail,
+            "furnace": [cid for _s, cid in u["stovebox"] if cid > 0],
+        }
+        _inv_cache["ts"] = now
+        return _inv_cache["data"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+@app.get("/api/cards/q")
+async def cards_q(price: int = 0, kw: str = "", star: int = 0,
+                  flash: int = -1, offline: int = -1,
+                  owned_only: int = 0, limit: int = 300):
+    """按面值/关键词全库查卡（含持有数、可炼、素材）。只读。"""
+    if err := _require_login():
+        return err
+    inv = await _owned_snapshot() or {"avail": {}}
+    out = cq.query_cards(
+        price=price, q=kw, star=star, flash=flash, offline=offline,
+        owned_only=owned_only, owned=inv["avail"], limit=min(limit, 500))
+    out["ok"] = True
+    out["furnace"] = inv.get("furnace", [])
+    return out
+
+
+@app.get("/api/cards/themes")
+async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
+                       offline: int = -1, limit: int = 500):
+    """套卡目录（星级/闪卡/关键词过滤），按上架时间倒序。只读。"""
+    if err := _require_login():
+        return err
+    return cq.list_themes(q=q, star=star, flash=flash, offline=offline,
+                          limit=min(limit, 800))
+
+
+@app.get("/api/cards/theme/{tid}")
+async def cards_theme(tid: int):
+    """某套卡全部卡：名称/面值/持有/配方(素材+耗时)/被用作哪些卡素材。"""
+    if err := _require_login():
+        return err
+    inv = await _owned_snapshot() or {"avail": {}}
+    d = cq.theme_detail(tid, owned=inv["avail"])
+    if d is None:
+        return {"ok": False, "message": f"未找到主题 {tid}"}
+    d["ok"] = True
+    return d
+
+
+@app.get("/api/cards/card/{cid}")
+async def cards_card(cid: int):
+    """单卡合成路径（本卡←素材←素材…到基础卡）。"""
+    if err := _require_login():
+        return err
+    return {"ok": True, "chain": cq.card_chain(cid)}
+
+
+@app.get("/api/cards/prices")
+async def cards_prices():
+    """常见面值及其卡数（快捷筛选）。"""
+    return {"ok": True, "prices": cq.price_stats()}
 
 
 @app.get("/api/card/diagnose")
