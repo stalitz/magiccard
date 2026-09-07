@@ -157,10 +157,12 @@ function switchPane(pane) {
     b.classList.toggle("active", b.dataset.pane === pane));
   $("pane-overview").classList.toggle("hidden", pane !== "overview");
   $("pane-lib").classList.toggle("hidden", pane !== "lib");
+  $("pane-exchange").classList.toggle("hidden", pane !== "exchange");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
   if (pane === "lib") initLibOnce();
+  if (pane === "exchange") initExchangeOnce();
 }
 document.querySelectorAll(".subnav .btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
@@ -253,6 +255,318 @@ $("probe-btn").onclick = async () => {
     btn.disabled = false; btn.textContent = "探测接口（调试）";
   }
 };
+
+// ============================================================
+// 换卡（手动模式）
+// ============================================================
+const exState = {
+  inited: false,
+  themeTid: 0,
+  themeName: "",
+  price: "",
+  apiPeers: [],        // 服务器按主题搜到的卡友
+  manualPeers: [],     // 手动补充（持久化在服务端）
+  manualText: "",
+  results: null,       // 最近一次扫描结果
+};
+
+async function initExchangeOnce() {
+  if (exState.inited) return;
+  exState.inited = true;
+  bindExchangeEvents();
+  // 拉一次已有手动名单
+  try {
+    const d = await (await fetch("/api/exchange/peers?tid=0")).json();
+    if (d.ok) exState.manualPeers = d.manual_peers || [];
+  } catch {}
+  renderManualPeers();
+}
+
+function bindExchangeEvents() {
+  $("ex-theme-search").onclick = searchThemes;
+  $("ex-theme-kw").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") searchThemes();
+  });
+  $("ex-price").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") doScan();
+  });
+  $("ex-peers-btn").onclick = fetchPeers;
+  $("ex-scan-btn").onclick = doScan;
+  $("ex-reset").onclick = clearResults;
+}
+
+function exMsg(text, cls = "warn") {
+  const body = $("ex-body");
+  const m = document.createElement("div");
+  m.className = `ex-msg ${cls}`;
+  m.textContent = text;
+  body.insertBefore(m, body.firstChild);
+  log(`[换卡] ${text}`, cls === "ok" ? "ok" : (cls === "err" ? "err" : "info"));
+}
+
+async function searchThemes() {
+  const kw = ($("ex-theme-kw").value || "").trim();
+  if (!kw) return;
+  const box = $("ex-theme-cands");
+  box.classList.remove("hidden");
+  box.innerHTML = '<span class="chip" style="cursor:default">搜索中…</span>';
+  try {
+    const d = await (await fetch(`/api/cards/themes?q=${encodeURIComponent(kw)}&limit=60`)).json();
+    if (!d.themes || !d.themes.length) {
+      box.innerHTML = '<span style="color:var(--muted);font-size:12.5px">没有匹配的套卡</span>';
+      return;
+    }
+    box.innerHTML = d.themes.map((t) => {
+      const tags = [t.flash ? '<span class="tag flash">闪</span>' : "",
+                    t.offline ? '<span class="tag off">已下架</span>' : ""].join("");
+      return `<span class="chip" data-tid="${t.tid}" data-name="${esc(t.name)}">${esc(t.name)} ${tags}</span>`;
+    }).join("");
+    box.querySelectorAll(".chip[data-tid]").forEach((c) => {
+      c.onclick = () => {
+        box.querySelectorAll(".chip").forEach((x) => x.classList.remove("active"));
+        c.classList.add("active");
+        selectTargetTheme(Number(c.dataset.tid), c.dataset.name);
+      };
+    });
+  } catch (e) {
+    box.innerHTML = `<span style="color:var(--err)">搜索失败：${esc(e.message || e)}</span>`;
+  }
+}
+
+function selectTargetTheme(tid, name) {
+  exState.themeTid = tid;
+  exState.themeName = name;
+  exState.apiPeers = [];
+  clearResults();
+  $("ex-target").textContent = `目标：${name}（#${tid}）`;
+  $("ex-cnt").textContent = "";
+  $("ex-theme-cands").classList.add("hidden");
+  exMsg(`目标套卡已设为「${name}」。点「找该套卡友」拉取玩家列表。`, "ok");
+}
+
+async function fetchPeers() {
+  if (!exState.themeTid) { exMsg("请先搜并选定想收的套卡", "err"); return; }
+  const btn = $("ex-peers-btn");
+  btn.disabled = true; btn.textContent = "拉取中…";
+  try {
+    const d = await (await fetch(`/api/exchange/peers?tid=${exState.themeTid}`)).json();
+    if (!d.ok) throw new Error(d.message || "拉取失败");
+    exState.apiPeers = d.api_peers || [];
+    exState.manualPeers = d.manual_peers || [];
+    renderManualPeers();
+    const auto = exState.apiPeers.length;
+    const man = exState.manualPeers.length;
+    $("ex-cnt").textContent = `自动卡友 ${auto} 人 + 手动 ${man} 人`;
+    exMsg(`找到 ${auto} 个正在玩「${exState.themeName}」的卡友${man ? `，加手动名单共 ${auto + man} 人` : ""}。点「扫描卡友换卡箱」开始扫描。`, "ok");
+  } catch (e) {
+    exMsg("拉取卡友失败：" + (e.message || e), "err");
+  } finally {
+    btn.disabled = false; btn.textContent = "找该套卡友";
+  }
+}
+
+function renderManualPeers() {
+  const wrap = $("ex-friends-wrap");
+  wrap.classList.remove("hidden");
+  wrap.style.width = "100%";
+  // 若已有输入框，先取回当前值，避免重建丢输入
+  const cur = $("ex-manual-ta");
+  if (cur) exState.manualText = cur.value;
+  const list = [...exState.manualPeers];
+  // 编辑状态：简单文本框（每行一个 QQ）+ 保存按钮
+  if (exState.manualText === null) exState.manualText = list.join("\n");
+  wrap.innerHTML = `
+    <div class="ex-mh" style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);margin:2px 0 8px">
+      <b style="color:var(--text)">手动卡友 QQ</b>
+      <span>每行一个（可留空：仅用自动卡友）</span>
+    </div>
+    <div class="ex-mrow" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;width:100%">
+      <textarea id="ex-manual-ta" rows="3"
+        style="flex:1 1 320px;min-width:280px;border:1px solid var(--line);border-radius:8px;padding:8px 10px;
+               font-size:13px;font-family:ui-monospace,Menlo,monospace;resize:vertical"
+        placeholder="例如：&#10;10001&#10;20002"></textarea>
+      <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 auto">
+        <button id="ex-manual-save" class="btn sm">保存名单</button>
+        <button id="ex-manual-scan" class="btn sm ghost">仅扫手动</button>
+      </div>
+    </div>`;
+  $("ex-manual-ta").value = exState.manualText;
+  $("ex-manual-save").onclick = async () => {
+    const lines = ($("ex-manual-ta").value || "").split("\n").map((s) => s.trim()).filter(Boolean);
+    try {
+      const d = await (await fetch("/api/exchange/manual", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ peers: lines }),
+      })).json();
+      if (d.ok) {
+        exState.manualPeers = d.manual_peers || [];
+        exState.manualText = exState.manualPeers.join("\n");
+        exMsg(`手动卡友名单已保存：${exState.manualPeers.length} 人`, "ok");
+        $("ex-cnt").textContent = `自动卡友 ${exState.apiPeers.length} 人 + 手动 ${exState.manualPeers.length} 人`;
+      }
+    } catch (e) {
+      exMsg("保存失败：" + (e.message || e), "err");
+    }
+  };
+  $("ex-manual-scan").onclick = () => doScan(true);
+}
+
+function peersForScan(manualOnly = false) {
+  const lines = exState.manualText !== null && $("ex-manual-ta")
+    ? ($("ex-manual-ta").value || "").split("\n").map((s) => s.trim()).filter(Boolean)
+    : exState.manualPeers;
+  const manual = lines.filter((s) => /^\d+$/.test(s));
+  return { api: manualOnly ? [] : exState.apiPeers, manual };
+}
+
+async function doScan(manualOnly = false) {
+  if (!exState.themeTid) { exMsg("请先搜并选定想收的套卡", "err"); return; }
+  const { api, manual } = peersForScan(manualOnly);
+  const peers = [...api, ...manual];
+  if (!peers.length) { exMsg("没有可扫描的卡友：先「找该套卡友」，或在下方补充手动 QQ", "err"); return; }
+  const btn = $("ex-scan-btn");
+  btn.disabled = true;
+  btn.textContent = `扫描 ${peers.length} 人…`;
+  exMsg(`开始扫描 ${peers.length} 个卡友的换卡箱（自动卡友 ${api.length} + 手动 ${manual.length}），约需 ${Math.max(5, Math.round(peers.length / 6))} 秒…`, "info");
+  try {
+    const d = await (await fetch("/api/exchange/scan", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        theme_id: exState.themeTid,
+        price: Number(exState.price) || 0,
+        peers: manualOnly ? manual : [],
+        use_api: !manualOnly,
+        manual_peers: manual,
+        concurrency: 8,
+      }),
+    })).json();
+    if (!d.ok) throw new Error(d.message || "扫描失败");
+    exState.results = d;
+    renderScan(d);
+  } catch (e) {
+    exMsg("扫描失败：" + (e.message || e), "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "扫描卡友换卡箱";
+  }
+}
+
+function clearResults() {
+  exState.results = null;
+  $("ex-cnt").textContent = "";
+  $("ex-empty").classList.remove("hidden");
+  $("ex-reset").classList.add("hidden");
+  const old = $("ex-result-list");
+  if (old) old.remove();
+}
+
+function renderScan(d) {
+  $("ex-empty").classList.add("hidden");
+  $("ex-reset").classList.remove("hidden");
+  const old = $("ex-result-list");
+  if (old) old.remove();
+  const list = document.createElement("div");
+  list.id = "ex-result-list";
+  list.style.display = "flex";
+  list.style.flexDirection = "column";
+  list.style.gap = "10px";
+  $("ex-body").appendChild(list);
+
+  let html = "";
+  const priceTxt = d.price ? `面值 ${d.price} 的` : "全部面值的";
+  $("ex-cnt").textContent =
+    `「${d.target_name}」${priceTxt}卡：扫 ${d.scanned}/${d.peers_total} 人，${d.hit_users} 人有货` +
+    (d.errors_n ? `，${d.errors_n} 人读取失败` : "") + `（${d.elapsed}s）`;
+
+  if (d.errors_n) {
+    html += `<div class="ex-msg warn">${d.errors_n} 个卡友主页读取失败（可能对方未开卡主页/网络抖动）。<br>${d.errors.slice(0, 8).map((e) => `QQ ${e.uin}：${esc(e.error)}`).join("<br>")}</div>`;
+  }
+  if (!d.rows || !d.rows.length) {
+    html += `<div class="empty-tip" style="padding:30px 16px">${d.errors_n ? "" : "扫描完成，但"}没人在换卡箱放出「${d.target_name}」的${priceTxt}卡。<br>换个时间再扫（换卡箱里的卡会被换走/上锁），或补充手动卡友。${d.my_exch && d.my_exch[0] ? "" : ""}</div>`;
+    list.innerHTML = html;
+    return;
+  }
+
+  const myExch = (d.my_exch || []).filter((x) => x);
+  const myExchTxt = myExch.length
+    ? `我的换卡设置：想收 ${myExch.join(",")}`
+    : "";
+  if (myExchTxt) html += `<div class="ex-msg ok">${esc(myExchTxt)}（别人来我家时按此给我套卡）</div>`;
+  html += `<div class="ex-msg info" style="background:#eef4fa;color:#2b6cb0">换卡规则（实测）：对方换卡箱里未上锁的卡才能换；<b>我付出的卡必须是“对方想收的套”里的同面值卡</b>（下方「需付出」列出）。对方若未设想收套（灰显）则无法交换。目标套若是已下架套，同理也可选。</div>`;
+
+  list.innerHTML = html;
+
+  d.rows.forEach((row) => {
+    const peerEl = document.createElement("div");
+    peerEl.className = "ex-peer";
+    // 该卡友所有命中（含未开放交换的）
+    const hitHtml = row.hits.map((h) => {
+      const wantOk = h.want_theme_id ? true : false;
+      const lockedNow = h.unlock > Math.floor(Date.now() / 1000);
+      const srcOpts = h.srcs.length
+        ? `<select data-friend="${row.uin}" data-dst="${h.id}_${h.slot}" data-src="">
+             <option value="">选择付出的卡…</option>
+             ${h.srcs.map((s) => `<option value="${s.id}_${s.slot}_1">${esc(s.name)}（面值 ${s.price}，${esc(s.theme_name)}）</option>`).join("")}
+           </select>
+           <button class="btn sm primary ex-swap" data-friend="${row.uin}"
+                   data-dst-id="${h.id}" data-dst-slot="${h.slot}">交换</button>`
+        : "";
+      const note = [];
+      if (!wantOk) note.push('<span class="tag off" style="background:#f0f2f5;color:#7a8699">对方未设想收套 · 不可换</span>');
+      if (lockedNow) note.push('<span class="tag off">对方上锁至 ' + new Date(h.unlock * 1000).toLocaleTimeString("zh-CN", { hour12: false }) + '</span>');
+      return `<div class="ex-hit">
+        <span class="cnm">${esc(h.name)} <span class="v-badge" style="background:#eef4fa;color:#66738a">面值 ${h.price}</span></span>
+        <span class="pay" style="font-size:12px">${h.want_theme_id ? `需付出：${esc(h.want_theme_name)}·${h.price}面值` : ""}${srcOpts ? "" : (wantOk ? '<span class="ex-nopay">（你没有该套卡，无法换）</span>' : "")}</span>
+        ${note.join(" ")}
+        ${srcOpts}
+      </div>`;
+    }).join("");
+
+    peerEl.innerHTML = `<div class="ph">
+        <span class="nick">${esc(row.nick)}</span>
+        <span class="qq">QQ ${row.uin}</span>
+        <span class="want">他想要的套：${row.hits[0].want_theme_id ? esc(row.hits[0].want_theme_name) : "未设置"}</span>
+        <span style="margin-left:auto;color:var(--muted);font-size:12px">${row.hits.length} 张可换目标</span>
+      </div>
+      <div class="hits">${hitHtml}</div>`;
+    list.appendChild(peerEl);
+  });
+
+  // 交换事件
+  list.querySelectorAll(".ex-swap").forEach((btn) => {
+    btn.onclick = () => {
+      const hit = btn.closest(".ex-hit");
+      const sel = hit.querySelector("select");
+      if (!sel || !sel.value) { exMsg("请先选择要付出的卡", "err"); return; }
+      const [srcId, srcSlot] = sel.value.split("_");
+      if (!confirm(`确认用这张卡交换？\n付出：${sel.options[sel.selectedIndex].text}\n换入：${hit.querySelector(".cnm").textContent.trim()}\n\n交换会真实消耗付出卡。`)) return;
+      doSwap(btn.dataset.friend, Number(btn.dataset.dstId), Number(btn.dataset.dstSlot),
+             Number(srcId), Number(srcSlot));
+    };
+  });
+}
+
+async function doSwap(friend, dstId, dstSlot, srcId, srcSlot) {
+  exMsg(`正在与 QQ ${friend} 交换…`, "info");
+  try {
+    const d = await (await fetch("/api/exchange/do", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ friend, dst_slot: dstSlot, dst_id: dstId,
+                             src_slot: srcSlot, src_id: srcId, src_type: 1 }),
+    })).json();
+    if (d.code === 0) {
+      exMsg(`✅ 交换成功！换入 ${dstId}`, "ok");
+      log(`换卡成功：与 ${friend} 交换卡 ${dstId}`, "ok");
+    } else {
+      exMsg(`交换失败：${d.message || ("code=" + d.code)}`, "err");
+      log(`换卡失败（${friend}，dst=${dstId}）：${d.message || d.code}`, "err");
+    }
+    return d;
+  } catch (e) {
+    exMsg("交换请求异常：" + (e.message || e), "err");
+    return null;
+  }
+}
 
 // ============================================================
 // 卡库查询
@@ -515,6 +829,11 @@ function renderChain(node) {
     if (me.logged_in) {
       log(`检测到已有登录态（${me.uin}）`, "ok");
       showDash(me.uin);
+      // 支持 URL hash 直接打开某个子页（默认 #overview）
+      const hp = (location.hash || "").replace("#", "");
+      if (hp && ["overview", "lib", "exchange"].includes(hp)) {
+        setTimeout(() => switchPane(hp), 50);
+      }
       return;
     }
   } catch {}

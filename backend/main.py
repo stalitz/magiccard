@@ -314,4 +314,76 @@ async def card_diagnose():
     return out
 
 
+# ---- 换卡（手动模式：设定目标套 → 搜卡友 → 扫换卡箱 → 手动换）----
+
+@app.get("/api/exchange/peers")
+async def exchange_peers(tid: int = 0):
+    """按主题搜「在玩该主题的卡友」（下架套也能搜），并列出手动名单。只读。"""
+    if err := _require_login():
+        return err
+    from . import exchange as ex
+    api = await ex.theme_peers(_session, tid) if tid else []
+    manual = ex.load_manual_peers()
+    return {"ok": True, "tid": tid, "api_peers": api,
+            "manual_peers": manual, "api_n": len(api), "manual_n": len(manual)}
+
+
+@app.post("/api/exchange/manual")
+async def exchange_manual(body: dict):
+    """保存手动卡友 QQ 名单（持久化）。body: {"peers": ["qq", ...]}"""
+    if err := _require_login():
+        return err
+    from . import exchange as ex
+    peers = ex.save_manual_peers(body.get("peers") or [])
+    return {"ok": True, "manual_peers": peers}
+
+
+@app.post("/api/exchange/scan")
+async def exchange_scan(body: dict):
+    """扫描卡友换卡箱，找「目标套卡」中对方未锁的卡，并匹配我方应付出的同面值卡。
+
+    body: {theme_id, price?, card_id?, peers?:[qq..], use_api?:bool, manual_peers?:[qq..]}
+    会并发请求多个卡友主页，耗时随卡友数线性增长（80 人约 10~30 秒）。
+    """
+    if err := _require_login():
+        return err
+    from . import exchange as ex
+    theme_id = int(body.get("theme_id") or 0)
+    peers = [str(p) for p in (body.get("peers") or []) if str(p).isdigit()]
+    if not theme_id:
+        return {"ok": False, "message": "请先选择目标套卡"}
+    if body.get("use_api", True):
+        peers += await ex.theme_peers(_session, theme_id)
+    peers += [str(u) for u in (body.get("manual_peers") or []) if str(u).isdigit()]
+    peers = list(dict.fromkeys(peers))
+    if not peers:
+        return {"ok": False, "message": "没有可扫描的卡友（主题无人玩或名单为空）"}
+    try:
+        return await ex.scan_peers(
+            _session, theme_id, peers,
+            price=int(body.get("price") or 0),
+            card_id=int(body.get("card_id") or 0),
+            concurrency=int(body.get("concurrency") or 8))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"扫描异常：{e}"}
+
+
+@app.post("/api/exchange/do")
+async def exchange_do(body: dict):
+    """执行一次换卡（手动确认后调用）。会真实消耗 src 卡、换入 dst 卡。
+
+    body: {friend, dst_slot, dst_id, src_slot, src_id, src_type?}
+    """
+    if err := _require_login():
+        return err
+    from . import exchange as ex
+    try:
+        return await ex.do_exchange(
+            _session, str(body["friend"]), int(body["dst_slot"]),
+            int(body["dst_id"]), int(body["src_slot"]), int(body["src_id"]),
+            int(body.get("src_type") or 1))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"换卡请求异常：{e}"}
+
+
 app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="static")

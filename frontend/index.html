@@ -169,6 +169,30 @@
   .mini-btn.chain-on{background:#d5e8f7}
 
   .hidden{display:none!important}
+
+  /* ===== 换卡页 ===== */
+  .ex-peer{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .ex-peer .ph{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 12px;
+    background:#f8fafc;border-bottom:1px solid var(--line);font-size:13px}
+  .ex-peer .ph .nick{font-weight:600}
+  .ex-peer .ph .qq{color:var(--muted);font-size:12px}
+  .ex-peer .ph .want{font-size:12px;color:var(--warn);background:#fdf3e2;padding:2px 8px;border-radius:10px}
+  .ex-peer .hits{padding:4px}
+  .ex-hit{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 12px;
+    border-bottom:1px dashed var(--line)}
+  .ex-hit:last-child{border-bottom:none}
+  .ex-hit .cnm{font-weight:600;font-size:13.5px;min-width:150px}
+  .ex-hit .pay{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+  .ex-hit select{border:1px solid var(--line);border-radius:6px;padding:4px 6px;font-size:12.5px;
+    max-width:240px;background:#fff;color:var(--text)}
+  .ex-nopay{font-size:12px;color:var(--err)}
+  .ex-msg{padding:8px 12px;border-radius:8px;font-size:12.5px;margin:4px 0}
+  .ex-msg.ok{background:#e5f8ec;color:#146b3a}
+  .ex-msg.err{background:#fdeeee;color:#c0392b}
+  .ex-msg.warn{background:#fdf3e2;color:#9a5b00}
+  .ex-log{font:12px/1.6 ui-monospace,Menlo,monospace;background:#f6f8fb;border:1px solid var(--line);
+    border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap;max-height:180px;overflow-y:auto}
+
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
     .console{max-width:none;min-width:0;height:260px}
@@ -214,6 +238,7 @@
         <div class="subnav">
           <button class="btn sm ghost active" data-pane="overview">总览</button>
           <button class="btn sm ghost" data-pane="lib">卡库查询</button>
+          <button class="btn sm ghost" data-pane="exchange">换卡</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
         <span class="spacer"></span>
@@ -286,6 +311,44 @@
                 <div class="spacer"></div>
               </div>
               <div class="lst" id="lib-detail"><div class="empty-tip">在左侧点一张卡 / 一套卡，这里显示它的面值与合成路径。</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 子页：换卡（手动） -->
+      <div id="pane-exchange" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:8px">
+            <span style="font-weight:600;font-size:13.5px">想收的套：</span>
+            <input type="text" id="ex-theme-kw" placeholder="搜套卡名（支持已下架）">
+            <button id="ex-theme-search" class="btn sm">搜套</button>
+            <span class="sep"></span>
+            <span id="ex-target" class="own-badge" style="font-weight:600">未选目标套</span>
+            <span style="color:var(--muted);font-size:12px">面值</span>
+            <input type="text" id="ex-price" class="num" placeholder="全部" style="width:70px">
+            <span class="spacer" style="flex:1"></span>
+            <button id="ex-peers-btn" class="btn sm">找该套卡友</button>
+            <button id="ex-scan-btn" class="btn sm primary">扫描卡友换卡箱</button>
+          </div>
+          <div class="chiprow hidden" id="ex-theme-cands" style="padding:0 4px"></div>
+
+          <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
+            <!-- 操作区 -->
+            <div class="lpanel">
+              <div class="lp-head">
+                <span class="t">卡友与结果</span>
+                <span class="cnt" id="ex-cnt"></span>
+                <div class="spacer"></div>
+                <button id="ex-reset" class="btn sm ghost hidden">清空结果</button>
+              </div>
+              <div class="lst" style="display:flex;flex-direction:column;gap:10px" id="ex-body">
+                <div class="empty-tip" id="ex-empty">① 上方搜并选定「想收的套」（下架/绝版套也能选）。<br>
+                  ② 点「找该套卡友」→ 从服务器拉取正在玩该套的玩家，也可在下方补充自己的卡友 QQ。<br>
+                  ③ 点「扫描卡友换卡箱」→ 列出谁换卡箱里有该套的卡、卡是否上锁、以及你能否付出对方想要的同面值卡。<br>
+                  ④ 选中「我付出的卡」点「交换」完成一次换卡。</div>
+                <div id="ex-friends-wrap" class="hidden"></div>
+              </div>
             </div>
           </div>
         </div>
