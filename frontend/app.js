@@ -3,9 +3,9 @@ const $ = (id) => document.getElementById(id);
 let pollTimer = null;
 let loggedIn = false;
 
-// ---------- 操作日志 ----------
-function log(msg, cls = "info", where = "login") {
-  const box = $(where === "dash" ? "log-dash" : "log");
+// ---------- 操作日志（统一写到右侧面板 #log）----------
+function log(msg, cls = "info") {
+  const box = $("log");
   if (!box) return;
   const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
   const line = document.createElement("div");
@@ -25,7 +25,7 @@ function showDash(uin) {
   $("login-view").classList.add("hidden");
   $("dash-view").classList.remove("hidden");
   $("dash-uin").textContent = uin || "(未知)";
-  log(`已进入主面板，当前账号 ${uin || ""}`, "ok", "dash");
+  log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
 }
 
 // ---------- 二维码登录 ----------
@@ -75,15 +75,13 @@ async function pollOnce() {
     setQrStatus("二维码已失效，请点击刷新", "warn");
     log("二维码已失效，请点「刷新二维码」", "warn");
   }
-  // waiting / error：静默继续轮询
 }
 
-// 切回前台时保证轮询在跑（修复后台标签被节流的问题）
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && !loggedIn && !pollTimer) startPoll();
 });
 
-// ---------- 快速登录（本机 QQ） ----------
+// ---------- 快速登录（本机 QQ）----------
 async function checkQuick() {
   const info = $("quick-info");
   const btn = $("quick-launch");
@@ -136,26 +134,43 @@ $("logout").onclick = async () => {
 // ---------- 探测真实接口 ----------
 $("probe-btn").onclick = async () => {
   const btn = $("probe-btn");
-  btn.disabled = true;
-  btn.textContent = "探测中…";
-  log("开始探测魔法卡片真实接口…", "info", "dash");
+  btn.disabled = true; btn.textContent = "探测中…";
+  log("开始探测魔法卡片真实接口…", "info");
   try {
-    const r = await fetch("/api/probe");
-    const d = await r.json();
+    const d = await (await fetch("/api/probe")).json();
     if (d.hosts_found && d.hosts_found.length)
-      log("入口页出现的主机：" + d.hosts_found.join("、"), "info", "dash");
-    else if (d.page_error)
-      log("拉取入口页失败：" + d.page_error, "err", "dash");
+      log("入口页出现的主机：" + d.hosts_found.join("、"), "info");
+    else if (d.page_error) log("拉取入口页失败：" + d.page_error, "err");
     (d.tests || []).forEach((t) => {
-      if (t.error) log(`${t.base} → 错误：${t.error}`, "err", "dash");
-      else log(`${t.base} → HTTP ${t.status}　${t.head.replace(/\s+/g, " ").slice(0, 80)}`, t.status === 200 ? "ok" : "warn", "dash");
+      if (t.error) log(`${t.base} → 错误：${t.error}`, "err");
+      else log(`${t.base} → HTTP ${t.status}　${(t.head || "").replace(/\s+/g, " ").slice(0, 70)}`, t.status === 200 ? "ok" : "warn");
     });
-    log("探测完成，详见上方结果", "ok", "dash");
+    log("探测完成：card.show.qq.com 活着，返回标准 XML；appimg 302 / qzs 404 已死。", "ok");
   } catch (e) {
-    log("探测请求失败：" + e, "err", "dash");
+    log("探测请求失败：" + e, "err");
   } finally {
-    btn.disabled = false;
-    btn.textContent = "探测真实接口";
+    btn.disabled = false; btn.textContent = "探测真实接口";
+  }
+};
+
+// ---------- 进入游戏（玩吧票据握手，尝试拿到游戏会话）----------
+$("enter-game-btn").onclick = async () => {
+  const btn = $("enter-game-btn");
+  btn.disabled = true; btn.textContent = "进入游戏中…";
+  log("开始玩吧登录握手（mapp_addAuthorize → ticket）…", "info");
+  try {
+    const d = await (await fetch("/api/game/login")).json();
+    if (d.error) { log("进入游戏失败：" + d.error, "err"); return; }
+    if (d.ticket) log("拿到 ticket：" + d.ticket, "ok");
+    if (d.card_test) {
+      const t = d.card_test;
+      log(`card.show.qq.com 测试 → HTTP ${t.status} code=${t.code} ${t.message || ""}`, t.code === 0 ? "ok" : "warn");
+    }
+    log(d.note || "握手完成，详见上方。若仍 -1100，说明需要浏览器内玩吧登录（下一步用无头浏览器拿会话）。", "info");
+  } catch (e) {
+    log("进入游戏请求失败：" + e, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = "进入游戏(拿玩吧会话)";
   }
 };
 

@@ -116,4 +116,12 @@ async def probe():
     return await _session.probe_api()
 
 
+@app.get("/api/game/login")
+async def game_login():
+    """玩吧登录握手：拿游戏票据 ticket（进一步会话需浏览器内登录）。"""
+    if err := _require_login():
+        return err
+    return await _session.enter_game()
+
+
 app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="static")

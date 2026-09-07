@@ -2,9 +2,9 @@
 # 来源：开源项目 mfkp (2014) 逆向参考值。
 # 警告：2026 年真实域名/端点大概率已迁移，上线前必须抓包确认。
 
-# 接口基址（2014 参考：http://card.show.qq.com/cgi-bin/）
-# TODO: 抓包确认 2026 真实域名（可能已迁到 qzs.qq.com 或 https）
-MC_BASE_URL = "http://card.show.qq.com/cgi-bin/"
+# 接口基址（探测确认：https://card.show.qq.com/cgi-bin/ 在 2026 仍存活，返回标准 <QQHOME> XML）
+# 注意：该接口需要「玩吧(wanba)游戏会话」，仅用空间 skey 会返回 -1100（未登录到该应用）。
+MC_BASE_URL = "https://card.show.qq.com/cgi-bin/"
 
 # 你提供的登录链接里的空间 appid
 QZONE_APPID = "549000929"

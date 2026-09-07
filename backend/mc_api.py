@@ -104,6 +104,53 @@ class LoginSession:
                 out["tests"].append({"base": base, "error": repr(e)[:160]})
         return out
 
+    async def enter_game(self) -> dict:
+        """玩吧(wanba)登录握手：用空间登录态换取游戏票据 ticket。
+
+        流程：mapp_addAuthorize.cgi?appid=1104735529 → 302 带 ticket 跳到
+        urlshare.cn/home?ticket=... 。该 ticket 是游戏的授权票据，但 card.show.qq.com
+        的真实会话仍需进一步登录（裸客户端拿不到），此处先把票据拿到并复测接口。
+        """
+        out: dict = {"uin": self.uin}
+        c = self.client  # 复用同一 client，自动带 cookie
+        try:
+            r = await c.get(
+                "http://mobile.qzone.qq.com/mapp/mapp_addAuthorize.cgi",
+                params={"appid": "1104735529", "platform": "wanba",
+                        "via": "qrcodegamebar", "ext_args": "platform=1"},
+                follow_redirects=True,
+            )
+            import re as _re
+            m = _re.search(r"ticket=([0-9]+)", str(r.url))
+            out["ticket"] = m.group(1) if m else None
+            out["final_url"] = str(r.url)
+        except Exception as e:  # noqa: BLE001
+            out["error"] = repr(e)
+            return out
+        # 复测接口：看握手后是否仍 -1100
+        try:
+            rr = await c.get(
+                MC_BASE_URL + "card_user_random_get",
+                params={"g_tk": calc_gtk(c.cookies.get("skey", "")),
+                        "uin": self.uin or "", "type": 1},
+            )
+            txt = rr.text
+            import re as _re2
+            cm = _re2.search(r'code="(-?\d+)"(?:\s+message="([^"]*)")?', txt)
+            out["card_test"] = {
+                "status": rr.status_code,
+                "code": int(cm.group(1)) if cm else None,
+                "message": cm.group(2) if cm and cm.group(2) else "",
+            }
+        except Exception as e:  # noqa: BLE001
+            out["card_test"] = {"error": repr(e)}
+        out["note"] = (
+            "已拿到玩吧票据 ticket；但 card.show.qq.com 仍返回 -1100，"
+            "说明需要浏览器内的玩吧登录（jsbridge 用原生 QQ 完成会话）。"
+            "下一步：用无头浏览器加载游戏页完成登录，再抽取 card.show.qq.com 的会话 cookie。"
+        )
+        return out
+
 
 def parse_response(xml_text: str) -> dict:
     """解析 <QQHOME code=.. message=..><card .../></QQHOME> 结构。"""
