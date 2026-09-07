@@ -8,6 +8,7 @@
 不使用任何 Web 框架的重量级特性，仅 FastAPI + StaticFiles。
 """
 import base64
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse
 
 from .auth_qr import QRLogin
 from .mc_api import LoginSession
+from .constants import EP_MAINPAGE, EP_REGISTER, EP_RANDOM_GET
 
 app = FastAPI(title="魔法卡片助手")
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
@@ -26,12 +28,20 @@ _session = LoginSession()
 _session.restore()
 
 
+# 二维码缓存：100s 内复用同一张码，避免页面刷新/多端取码互相作废
+_qr_cache: dict = {"b64": "", "ts": 0.0}
+QR_TTL = 100.0
+
+
 @app.get("/api/login/qr")
-async def login_qr():
-    """取/刷新二维码（每次调用生成新码，重置 qrsig）。"""
-    png = await _qr.get_qr()
-    b64 = base64.b64encode(png).decode()
-    return {"qr": f"data:image/png;base64,{b64}"}
+async def login_qr(force: int = 0):
+    """取二维码。默认 100s 内复用（force=1 强制刷新）。"""
+    now = time.time()
+    if force or not _qr_cache["b64"] or now - _qr_cache["ts"] > QR_TTL:
+        png = await _qr.get_qr()
+        _qr_cache["b64"] = base64.b64encode(png).decode()
+        _qr_cache["ts"] = now
+    return {"qr": f"data:image/png;base64,{_qr_cache['b64']}", "age": round(now - _qr_cache["ts"], 1)}
 
 
 @app.get("/api/login/poll")
@@ -122,6 +132,58 @@ async def game_login():
     if err := _require_login():
         return err
     return await _session.enter_game()
+
+
+@app.get("/api/card/mainpage")
+async def card_mainpage(method: str = "get"):
+    """主页面/卡箱入口。magicCard 用 POST，也提供 GET 变体便于对比。"""
+    if err := _require_login():
+        return err
+    fn = _session.post if method == "post" else _session.get
+    return await fn(EP_MAINPAGE, code="")
+
+
+@app.get("/api/card/register")
+async def card_register():
+    """开通魔法卡片（未开通时接口一律拒绝）。"""
+    if err := _require_login():
+        return err
+    return await _session.get(EP_REGISTER)
+
+
+@app.get("/api/card/diagnose")
+async def card_diagnose():
+    """一键诊断：主页面 → 抽卡；若 -1100/-1005 自动开通后复测。"""
+    if err := _require_login():
+        return err
+    out: dict = {"uin": _session.uin, "steps": []}
+
+    async def call(label, fn, **kw):
+        try:
+            r = await fn(**kw) if kw else await fn()
+        except Exception as e:  # 网络/解析异常不中断整条链
+            r = {"code": -999, "message": f"异常: {e}"}
+        out["steps"].append({"step": label, **r})
+        return r
+
+    r1 = await call("mainpage(GET)", _session.get, endpoint=EP_MAINPAGE, code="")
+    out["mainpage_code"] = r1.get("code")
+    if r1.get("code") not in (0,):
+        r1b = await call("mainpage(POST)", _session.post, endpoint=EP_MAINPAGE, code="")
+        out["mainpage_post_code"] = r1b.get("code")
+
+    codes = {s["code"] for s in out["steps"]}
+    if codes & {-1100, -1005, -1006}:
+        reg = await call("register(开通)", _session.get, endpoint=EP_REGISTER)
+        out["register_code"] = reg.get("code")
+        r2 = await call("mainpage after register", _session.get,
+                        endpoint=EP_MAINPAGE, code="")
+        out["mainpage_after_register"] = r2.get("code")
+
+    await call("random_get(抽卡)", _session.get, endpoint=EP_RANDOM_GET, type=1)
+    out["ok"] = any(s.get("code") not in (-1100, -1005, -1006, -999)
+                    for s in out["steps"])
+    return out
 
 
 app.mount("/", StaticFiles(directory=str(FRONTEND), html=True), name="static")

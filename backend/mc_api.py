@@ -91,6 +91,17 @@ class LoginSession:
         )
         return parse_response(resp.text)
 
+    async def post(self, endpoint: str, **params) -> dict:
+        """部分空间应用接口（如主页面）要求 POST 表单。"""
+        data = dict(params)
+        data.setdefault("g_tk", calc_gtk(self._session_key()))
+        if self.uin:
+            data.setdefault("uin", self.uin)
+        resp = await self.client.post(
+            MC_BASE_URL + endpoint, data=data, cookies=self._inject_qq_cookies()
+        )
+        return parse_response(resp.text)
+
     async def probe_api(self) -> dict:
         """探测魔法卡片真实接口域名与可用端点（card.show.qq.com 已死，需现探）。"""
         out: dict = {"uin": self.uin, "hosts_found": [], "tests": []}
