@@ -153,11 +153,11 @@ $("probe-btn").onclick = async () => {
   }
 };
 
-// ---------- 进入游戏（玩吧票据握手，尝试拿到游戏会话）----------
+// ---------- 进入游戏（空间游戏授权握手，尝试拿到游戏会话）----------
 $("enter-game-btn").onclick = async () => {
   const btn = $("enter-game-btn");
   btn.disabled = true; btn.textContent = "进入游戏中…";
-  log("开始玩吧登录握手（mapp_addAuthorize → ticket）…", "info");
+  log("开始空间游戏授权握手（mapp_addAuthorize → ticket）…", "info");
   try {
     const d = await (await fetch("/api/game/login")).json();
     if (d.error) { log("进入游戏失败：" + d.error, "err"); return; }
@@ -166,11 +166,11 @@ $("enter-game-btn").onclick = async () => {
       const t = d.card_test;
       log(`card.show.qq.com 测试 → HTTP ${t.status} code=${t.code} ${t.message || ""}`, t.code === 0 ? "ok" : "warn");
     }
-    log(d.note || "握手完成，详见上方。若仍 -1100，说明需要浏览器内玩吧登录（下一步用无头浏览器拿会话）。", "info");
+    log(d.note || "握手完成，详见上方。若仍 -1100，说明还缺游戏侧会话凭据。", "info");
   } catch (e) {
     log("进入游戏请求失败：" + e, "err");
   } finally {
-    btn.disabled = false; btn.textContent = "进入游戏(拿玩吧会话)";
+    btn.disabled = false; btn.textContent = "进入游戏(拿游戏会话)";
   }
 };
 

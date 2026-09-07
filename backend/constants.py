@@ -3,7 +3,7 @@
 # 警告：2026 年真实域名/端点大概率已迁移，上线前必须抓包确认。
 
 # 接口基址（探测确认：https://card.show.qq.com/cgi-bin/ 在 2026 仍存活，返回标准 <QQHOME> XML）
-# 注意：该接口需要「玩吧(wanba)游戏会话」，仅用空间 skey 会返回 -1100（未登录到该应用）。
+# 注意：该接口需要游戏侧会话；仅用 qq.com 的 skey 会返回 -1100（未登录到该应用）。
 MC_BASE_URL = "https://card.show.qq.com/cgi-bin/"
 
 # 你提供的登录链接里的空间 appid

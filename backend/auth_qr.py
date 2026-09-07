@@ -15,9 +15,10 @@ from .constants import PTLOGIN_APPID
 
 PT_QRSHOW = "https://ssl.ptlogin2.qq.com/ptqrshow"
 PT_QRLOGIN = "https://ssl.ptlogin2.qq.com/ptqrlogin"
-# 登录回跳改为空间主页：check_sig 跳到 qzs.qq.com/qzone/ 时会签发空间的 p_skey
-# （农场/卡片等空间应用要的是 qzs.qq.com 的 p_skey，而非 qq.com 的 skey）
-U1 = "https://qzs.qq.com/qzone/"
+# 登录回跳用你验证过能登录的官方地址（gamebar）。
+# 注意：gamebar 是静态移动壳，check_sig 跳到它不会签发空间的 p_skey，
+# 所以 p_skey 需在登录成功后另想办法拿（不能靠改这里解决，改了会导致登录失败）。
+U1 = "https://qzs.qq.com/qzone/hybrid/page/gamebar/direct.html?appid=1104735529"
 
 
 def hash33(s: str) -> int:

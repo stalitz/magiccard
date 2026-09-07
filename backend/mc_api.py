@@ -121,7 +121,7 @@ class LoginSession:
         return out
 
     async def enter_game(self) -> dict:
-        """玩吧(wanba)登录握手：用空间登录态换取游戏票据 ticket。
+        """空间游戏授权握手：用登录态换取游戏票据 ticket。
 
         流程：mapp_addAuthorize.cgi?appid=1104735529 → 302 带 ticket 跳到
         urlshare.cn/home?ticket=... 。该 ticket 是游戏的授权票据，但 card.show.qq.com
@@ -162,9 +162,9 @@ class LoginSession:
         except Exception as e:  # noqa: BLE001
             out["card_test"] = {"error": repr(e)}
         out["note"] = (
-            "已拿到玩吧票据 ticket；但 card.show.qq.com 仍返回 -1100，"
-            "说明需要浏览器内的玩吧登录（jsbridge 用原生 QQ 完成会话）。"
-            "下一步：用无头浏览器加载游戏页完成登录，再抽取 card.show.qq.com 的会话 cookie。"
+            "已拿到授权票据 ticket；但 card.show.qq.com 仍返回 -1100，"
+            "说明还缺游戏侧会话凭据（空间 skey 不足以调用该应用接口）。"
+            "下一步：定位游戏侧会话的获取方式（不引入重型浏览器依赖）。"
         )
         return out
 

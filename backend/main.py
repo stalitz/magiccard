@@ -118,7 +118,7 @@ async def probe():
 
 @app.get("/api/game/login")
 async def game_login():
-    """玩吧登录握手：拿游戏票据 ticket（进一步会话需浏览器内登录）。"""
+    """空间游戏授权握手：拿游戏票据 ticket（真实会话仍需进一步定位）。"""
     if err := _require_login():
         return err
     return await _session.enter_game()
