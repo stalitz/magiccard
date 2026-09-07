@@ -1,9 +1,10 @@
 const $ = (id) => document.getElementById(id);
 
 let pollTimer = null;
+let stateTimer = null;
 let loggedIn = false;
 
-// ---------- 操作日志（统一写到右侧面板 #log）----------
+// ---------- 操作日志（右侧控制台 #log）----------
 function log(msg, cls = "info") {
   const box = $("log");
   if (!box) return;
@@ -18,6 +19,7 @@ function log(msg, cls = "info") {
 function showLogin() {
   $("login-view").classList.remove("hidden");
   $("dash-view").classList.add("hidden");
+  $("top-user").textContent = "";
 }
 function showDash(uin) {
   loggedIn = true;
@@ -25,6 +27,7 @@ function showDash(uin) {
   $("login-view").classList.add("hidden");
   $("dash-view").classList.remove("hidden");
   $("dash-uin").textContent = uin || "(未知)";
+  $("top-user").textContent = uin ? `QQ ${uin}` : "";
   log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
   loadState();
   if (stateTimer) clearInterval(stateTimer);
@@ -135,12 +138,14 @@ $("logout").onclick = async () => {
 };
 
 // ---------- 游戏状态 ----------
-let stateTimer = null;
-
 function fmtLeft(sec) {
   if (sec <= 0) return "已完成";
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  return h > 0 ? `${h}小时${m}分` : `${m}分${s}秒`;
+  return h > 0 ? `${h}小时${m}分` : (m > 0 ? `${m}分${s}秒` : `${s}秒`);
+}
+
+function chip(k, v, small = "") {
+  return `<div class="stat-chip"><span class="k">${k}</span><span class="v">${v}${small ? `<small>${small}</small>` : ""}</span></div>`;
 }
 
 async function loadState() {
@@ -148,31 +153,51 @@ async function loadState() {
   try {
     const d = await (await fetch("/api/state")).json();
     if (!d.ok) {
-      box.innerHTML = `<div class="err">读取失败：code=${d.code ?? "?"} ${d.message || ""}</div>`;
+      box.innerHTML = `<div class="err" style="grid-column:1/-1">读取失败：code=${d.code ?? "?"} ${d.message || ""}</div>`;
       log(`读取游戏状态失败：code=${d.code ?? "?"} ${d.message || ""}`, "err");
       return;
     }
     const u = d.user || {};
     const sb = d.stovebox || {}, cb = d.changebox || {}, st = d.storebox || {};
+
     const slots = (sb.cards || []).map((c) => {
       const cls = c.id === 0 ? "empty" : (c.flag === 2 ? "done" : "busy");
       const txt = c.id === 0 ? "空位" : (c.flag === 2 ? "可取卡" : `炼制中 ${fmtLeft(c.left)}`);
-      return `<span class="slot ${cls}">炉位${c.slot}：${txt}</span>`;
+      return `<span class="slot ${cls}"><span class="sname">炉位 ${c.slot}</span>${txt}</span>`;
     }).join("") || '<span class="slot empty">无炼卡位数据</span>';
 
-    box.innerHTML = `
-      <div class="row"><span class="k">昵称 / QQ</span><span class="v">${u.nick || "-"}（${u.uin || "-"}）</span></div>
-      <div class="row"><span class="k">金币 / 经验</span><span class="v">${(u.money || 0).toLocaleString()} / ${(u.exp || 0).toLocaleString()}</span></div>
-      <div class="row"><span class="k">抽卡机会</span><span class="v">${u.randchance || 0} 次</span></div>
-      <h4>炼卡炉（${(d.stoves || []).length} 个）</h4>
-      <div>${slots}</div>
-      <h4>卡箱</h4>
-      <div class="row"><span class="k">换卡箱</span><span class="v">${cb.filled ?? 0} / ${cb.max || 0}</span></div>
-      <div class="row"><span class="k">保险箱</span><span class="v">${st.filled ?? 0} / ${st.max || 0}</span></div>
-      <div class="row"><span class="k">炼卡位</span><span class="v">${sb.cur || 0} / ${sb.max || 0}</span></div>`;
-    log("游戏状态已刷新", "ok");
+    // 炼炉状态摘要
+    const stoves = (d.stoves || []).map((s) => {
+      const left = s.endtime - d.now;
+      const state = left <= 0 ? "空闲" : `炼制中 ${fmtLeft(left)}`;
+      return { id: s.id, state };
+    });
+    const busyN = stoves.filter((s) => s.state !== "空闲").length;
+    const stoveTxt = stoves.length
+      ? `炼炉 ${stoves.map((s) => `#${s.id} ${s.state}`).join("、")}`
+      : "无炼炉数据";
+
+    const doneSlots = (sb.cards || []).filter((c) => c.id !== 0 && c.flag === 2).length;
+
+    box.innerHTML =
+      chip("昵称", u.nick || "-", `QQ ${u.uin || "-"}`) +
+      chip("金币", (u.money || 0).toLocaleString()) +
+      chip("经验", (u.exp || 0).toLocaleString()) +
+      chip("抽卡机会", `${u.randchance || 0} 次`) +
+      chip("炼卡位", `${sb.cur || 0} / ${sb.max || 0}`, doneSlots ? `${doneSlots} 位可取` : "") +
+      chip("换卡箱", `${cb.filled ?? 0} / ${cb.max || 0}`) +
+      chip("保险箱", `${st.filled ?? 0} / ${st.max || 0}`) +
+      chip("炼炉", busyN ? `${busyN} 个炼制中` : "全部空闲") +
+      `<div class="stat-chip" style="grid-column:1/-1">
+         <span class="k">炼卡位明细</span>
+         <div class="slot-list">${slots}</div>
+       </div>` +
+      `<div class="stat-chip" style="grid-column:1/-1">
+         <span class="k">${stoveTxt}</span>
+       </div>`;
+    log(`状态已刷新：${u.nick || ""} 金币 ${(u.money || 0).toLocaleString()}${busyN ? ` / ${busyN} 炉炼制中` : ""}`, "ok");
   } catch (e) {
-    box.innerHTML = `<div class="err">请求失败：${e}</div>`;
+    box.innerHTML = `<div class="err" style="grid-column:1/-1">请求失败：${e}</div>`;
     log("读取游戏状态异常：" + e, "err");
   }
 }
@@ -202,7 +227,7 @@ $("probe-btn").onclick = async () => {
   } catch (e) {
     log("探测请求失败：" + e, "err");
   } finally {
-    btn.disabled = false; btn.textContent = "探测真实接口";
+    btn.disabled = false; btn.textContent = "探测接口（调试）";
   }
 };
 

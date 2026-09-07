@@ -6,123 +6,176 @@
 <title>魔法卡片助手</title>
 <style>
   :root{
-    --qq-blue:#12b7f5; --qq-blue-d:#0a9bd4; --bg:#f3f4f8; --line:#e6e8ee;
-    --text:#222; --muted:#8a909c; --ok:#2ecc71; --warn:#f5a623; --err:#e74c3c;
+    --qq-blue:#12b7f5; --qq-blue-d:#0a9bd4; --bg:#eef1f6; --panel:#fff; --line:#e2e6ee;
+    --text:#1f2d3d; --muted:#66738a; --ok:#1a9c5a; --warn:#c77700; --err:#d64541;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
   body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
-    background:var(--bg);color:var(--text);display:flex;justify-content:center;
-    align-items:flex-start;min-height:100vh;padding:28px 16px}
-  .app{display:flex;gap:16px;align-items:stretch;flex-wrap:wrap;max-width:880px;width:100%}
-  .main{flex:1 1 360px;min-width:320px;display:flex;flex-direction:column}
-  .side{flex:1 1 380px;min-width:320px;background:#fff;border-radius:12px;
-    box-shadow:0 6px 24px rgba(0,0,0,.08);display:flex;flex-direction:column;overflow:hidden}
-  .card{background:#fff;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,.08);overflow:hidden}
-  .head{background:linear-gradient(135deg,var(--qq-blue),var(--qq-blue-d));
-    color:#fff;padding:16px 18px;font-size:17px;font-weight:600}
+    background:var(--bg);color:var(--text);font-size:14px}
+  .app{display:flex;flex-direction:column;height:100vh}
+
+  /* ===== 顶部通栏 ===== */
+  .topbar{flex:0 0 auto;display:flex;align-items:center;gap:16px;
+    background:linear-gradient(135deg,var(--qq-blue),var(--qq-blue-d));color:#fff;
+    padding:0 24px;height:54px}
+  .topbar .brand{font-size:17px;font-weight:700;letter-spacing:.5px}
+  .topbar .sub{font-size:12px;opacity:.85}
+  .topbar .spacer{flex:1}
+  .topbar .who{font-size:13px;opacity:.95}
+
+  /* ===== 主内容区 ===== */
+  .content{flex:1 1 auto;min-height:0;display:flex;gap:14px;padding:14px 24px 18px}
+  .main-col{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:14px;overflow-y:auto}
+
+  /* ===== 登录卡（居中，非竖条）===== */
+  .login-holder{flex:1;display:flex;align-items:flex-start;justify-content:center;
+    padding-top:7vh;min-width:0}
+  .login-card{width:min(460px,100%);background:var(--panel);border-radius:12px;
+    box-shadow:0 8px 30px rgba(20,40,80,.10);overflow:hidden}
+  .login-card .head{padding:18px 22px;font-size:16px;font-weight:600;color:var(--text);
+    border-bottom:1px solid var(--line)}
   .tabs{display:flex;border-bottom:1px solid var(--line)}
   .tab{flex:1;padding:12px;background:none;border:none;font-size:14px;color:var(--muted);
     cursor:pointer;border-bottom:2px solid transparent}
   .tab.active{color:var(--qq-blue);border-bottom-color:var(--qq-blue);font-weight:600}
-  .panel{padding:22px;display:flex;flex-direction:column;align-items:center}
+  .panel{padding:26px 22px;display:flex;flex-direction:column;align-items:center}
   .panel.hidden{display:none}
-  .qr-box{width:180px;height:180px;margin:0 auto 14px;border:1px solid var(--line);
-    border-radius:8px;display:flex;align-items:center;justify-content:center;background:#fafbfc}
-  .qr-box img{width:160px;height:160px;display:block}
+  .qr-box{width:200px;height:200px;margin:0 auto 16px;border:1px solid var(--line);
+    border-radius:10px;display:flex;align-items:center;justify-content:center;background:#fafbfc}
+  .qr-box img{width:180px;height:180px;display:block}
   .status{font-size:13px;color:var(--muted);margin-bottom:12px;min-height:18px;text-align:center}
   .status.ok{color:var(--ok)} .status.warn{color:var(--warn)} .status.err{color:var(--err)}
-  .btn{width:100%;padding:10px;border:none;border-radius:6px;background:#eef1f6;color:var(--text);
-    font-size:14px;cursor:pointer;margin-top:6px}
-  .btn:hover{background:#e3e7ee}
+  .btn{padding:9px 18px;border:none;border-radius:6px;background:#e8ecf3;color:var(--text);
+    font-size:14px;cursor:pointer}
+  .btn:hover{background:#dde3ec}
   .btn.primary{background:var(--qq-blue);color:#fff}
   .btn.primary:hover{background:var(--qq-blue-d)}
   .btn:disabled{opacity:.5;cursor:default}
-  .hint{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.5}
-  .dash{padding:20px 22px}
-  .dash-head{display:flex;justify-content:space-between;align-items:center;
-    padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:12px}
-  .dash-head b{color:var(--qq-blue)}
-  .dash-body p{font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:10px}
+  .btn.sm{padding:5px 12px;font-size:13px}
+  .btn.block{width:100%;margin-top:8px}
+  .hint{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.6}
   .spinner{width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--qq-blue);
     border-radius:50%;display:inline-block;vertical-align:-2px;margin-right:6px;animation:spin .8s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
-  /* 操作日志 */
-  .side .log-title{padding:14px 16px 10px;font-size:13px;color:var(--muted);
-    border-bottom:1px solid var(--line)}
-  #log{height:430px;overflow-y:auto;padding:10px 12px;
-    font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe;white-space:pre-wrap;word-break:break-all;background:#0f1115}
+
+  /* ===== 主面板（桌面仪表盘）===== */
+  .dash{flex:1;display:flex;flex-direction:column;min-height:0}
+  .dash-bar{flex:0 0 auto;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    background:var(--panel);border-radius:10px;padding:10px 16px;margin-bottom:14px;
+    box-shadow:0 2px 10px rgba(20,40,80,.06)}
+  .dash-bar .who{font-size:14px}
+  .dash-bar .who b{color:var(--qq-blue)}
+  .dash-bar .spacer{flex:1}
+  .cards-grid{flex:1 1 auto;min-height:0;display:grid;
+    grid-template-columns:minmax(0,1fr) 400px;gap:14px}
+  .stat-card{background:var(--panel);border-radius:12px;box-shadow:0 2px 10px rgba(20,40,80,.06);
+    padding:18px 20px;overflow-y:auto;min-height:0}
+  .stat-card h3{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:12px;
+    text-transform:uppercase;letter-spacing:.4px}
+  .stat-card h3 b{color:var(--qq-blue)}
+
+  /* 状态数据块 */
+  .state-box{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+  .stat-chip{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .stat-chip .k{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+  .stat-chip .v{font-size:15px;font-weight:700;color:var(--text)}
+  .stat-chip .v small{font-weight:400;color:var(--muted);font-size:12px;margin-left:4px}
+  .slot-list{margin-top:4px;display:flex;flex-wrap:wrap;gap:8px}
+  .slot{display:inline-block;padding:5px 10px;border-radius:6px;background:#edf2f9;
+    font-size:12.5px;color:var(--text);white-space:nowrap}
+  .slot .sname{color:var(--muted);margin-right:6px}
+  .slot.done{background:#e5f8ec;color:#146b3a;border:1px solid #bdebd0}
+  .slot.busy{background:#fdf3e2;color:#9a5b00;border:1px solid #f3ddb4}
+  .slot.empty{background:#f2f4f7;color:#8a93a3;border:1px dashed #d5dae3}
+  .err{color:var(--err)}
+  .section-title{margin:6px 0 2px;font-size:13px;font-weight:600;color:#2b6cb0}
+  .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}
+
+  /* ===== 右侧日志控制台 ===== */
+  .console{flex:1 1 400px;max-width:420px;min-width:320px;background:#0f1115;
+    border-radius:10px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .console .log-title{flex:0 0 auto;padding:10px 14px;font-size:12px;color:#9aa5b5;
+    background:#16191f;border-bottom:1px solid #262b33}
+  #log{flex:1 1 auto;overflow-y:auto;padding:10px 12px;min-height:0;
+    font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe;white-space:pre-wrap;word-break:break-all}
   #log .t{color:#5b6b7a}
   #log .ok{color:#5fd38a}
   #log .warn{color:#ffcf6b}
   #log .err{color:#ff7b7b}
   #log .info{color:#9fd0ff}
-</style>
-<style>
-  .state-box{background:#f7f9fb;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:13px;line-height:1.9}
-  .state-box .row{display:flex;justify-content:space-between;border-bottom:1px dashed #e8edf3;padding:2px 0}
-  .state-box .row:last-child{border-bottom:none}
-  .state-box .k{color:#5a6b7f}
-  .state-box .v{font-weight:600;color:#1f2d3d}
-  .state-box h4{margin:10px 0 4px;font-size:13px;color:#2b6cb0}
-  .state-box .slot{display:inline-block;min-width:150px;margin:2px 8px 2px 0;padding:3px 8px;border-radius:5px;background:#eef4fb;font-size:12px}
-  .state-box .done{background:#e6ffed;color:#1a7f37}
-  .state-box .busy{background:#fff5e6;color:#a15c00}
-  .state-box .empty{background:#f1f3f5;color:#868e96}
-  .dash-actions{display:flex;align-items:center;gap:12px;margin:12px 0}
-  .dash-actions .btn{width:auto;margin:0;padding:7px 16px}
-  .auto{font-size:12px;color:#5a6b7f;display:flex;align-items:center;gap:4px}
-  .err{color:#c0392b}
+
+  .hidden{display:none!important}
+
+  /* 窄窗口：自动降为上下单列 */
+  @media (max-width:1080px){
+    .cards-grid{grid-template-columns:minmax(0,1fr)}
+    .console{max-width:none;min-width:0;height:260px}
+  }
 </style>
 </head>
 <body>
 <div class="app">
-  <!-- 左：操作区 -->
-  <div class="main">
-    <!-- 登录视图 -->
-    <div id="login-view" class="card">
-      <div class="head">魔法卡片助手 · 登录</div>
-      <div class="tabs">
-        <button class="tab active" data-tab="qr">二维码登录</button>
-        <button class="tab" data-tab="quick">快速登录</button>
-      </div>
-      <div id="tab-qr" class="panel">
-        <div class="qr-box"><img id="qr-img" alt="扫码登录"></div>
-        <div id="qr-status" class="status">请使用手机 QQ 扫码</div>
-        <button id="qr-refresh" class="btn">刷新二维码</button>
-      </div>
-      <div id="tab-quick" class="panel hidden">
-        <div id="quick-info" class="status"><span class="spinner"></span>正在检测本机 QQ…</div>
-        <button id="quick-launch" class="btn primary hidden">唤起本机 QQ</button>
-        <div class="hint">若未检测到本机 QQ 的一键登录能力，请使用二维码登录。</div>
+  <header class="topbar">
+    <span class="brand">魔法卡片助手</span>
+    <span class="sub">自动练卡</span>
+    <div class="spacer"></div>
+    <span class="who" id="top-user"></span>
+  </header>
+
+  <div class="content">
+    <!-- 登录视图：居中卡片 -->
+    <div id="login-view" class="login-holder hidden">
+      <div class="login-card">
+        <div class="head">登录</div>
+        <div class="tabs">
+          <button class="tab active" data-tab="qr">二维码登录</button>
+          <button class="tab" data-tab="quick">快速登录</button>
+        </div>
+        <div id="tab-qr" class="panel">
+          <div class="qr-box"><img id="qr-img" alt="扫码登录"></div>
+          <div id="qr-status" class="status">请使用手机 QQ 扫码</div>
+          <button id="qr-refresh" class="btn block">刷新二维码</button>
+        </div>
+        <div id="tab-quick" class="panel hidden">
+          <div id="quick-info" class="status"><span class="spinner"></span>正在检测本机 QQ…</div>
+          <button id="quick-launch" class="btn primary block hidden">唤起本机 QQ</button>
+          <div class="hint">若未检测到本机 QQ 的一键登录能力，请使用二维码登录。</div>
+        </div>
       </div>
     </div>
 
-    <!-- 登录后视图 -->
-    <div id="dash-view" class="card hidden">
-      <div class="head">魔法卡片助手</div>
-      <div class="dash">
-        <div class="dash-head">
-          <span>已登录：<b id="dash-uin"></b></span>
-          <button id="logout" class="btn" style="width:auto;margin:0;padding:6px 14px">退出</button>
-        </div>
-        <div class="dash-body">
+    <!-- 主面板：桌面仪表盘 -->
+    <div id="dash-view" class="dash hidden">
+      <div class="dash-bar">
+        <span class="who">已登录：<b id="dash-uin"></b></span>
+        <span class="spacer"></span>
+        <button id="refresh-btn" class="btn sm primary">刷新状态</button>
+        <label class="auto sm" style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px">
+          <input type="checkbox" id="auto-refresh" checked> 60 秒自动刷新
+        </label>
+        <button id="logout" class="btn sm">退出</button>
+      </div>
+
+      <div class="cards-grid">
+        <!-- 左：游戏数据 -->
+        <div class="stat-card">
+          <h3>游戏数据</h3>
           <div id="state-box" class="state-box">
             <span class="spinner"></span>正在读取游戏数据…
           </div>
-          <div class="dash-actions">
-            <button id="refresh-btn" class="btn primary">刷新状态</button>
-            <label class="auto"><input type="checkbox" id="auto-refresh" checked> 每 60 秒自动刷新</label>
+          <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+            <button id="probe-btn" class="btn sm">探测接口（调试）</button>
           </div>
-          <button id="probe-btn" class="btn">探测接口（调试）</button>
+        </div>
+
+        <!-- 右：操作日志控制台 -->
+        <div class="console">
+          <div class="log-title">操作日志</div>
+          <div id="log"></div>
         </div>
       </div>
     </div>
-  </div>
-
-  <!-- 右：操作日志 -->
-  <div class="side">
-    <div class="log-title">操作日志</div>
-    <div id="log"></div>
   </div>
 </div>
 <script src="/app.js"></script>
