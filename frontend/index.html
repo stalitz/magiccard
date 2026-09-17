@@ -274,13 +274,52 @@
   .cb-gn{font-size:11px;font-weight:500;color:var(--muted);background:#fff;
     border:1px solid var(--line);border-radius:10px;padding:0 7px;margin-left:auto}
   .cb-card{border:1px solid var(--line);border-radius:8px;padding:8px 9px;background:#fff;
-    display:flex;flex-direction:column;gap:5px}
+    display:flex;flex-direction:column;gap:5px;cursor:pointer;transition:border-color .12s,box-shadow .12s}
+  .cb-card:hover{border-color:#2f7cf6;box-shadow:0 1px 6px rgba(47,124,246,.15)}
+  .cb-card .cbn{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .cb-card .cb-route{font-size:10.5px;color:#2f7cf6;margin-top:1px}
   .cb-card .cbn{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;
     text-overflow:ellipsis}
   .cb-card .cbm{font-size:11px;color:var(--muted);display:flex;gap:6px;flex-wrap:wrap}
   .cb-card .cbacts{display:flex;gap:5px;margin-top:2px}
   .cb-card .cbacts button{flex:1;font-size:11.5px;padding:3px 0}
   .cb-empty{padding:14px;color:var(--muted);font-size:12.5px}
+
+  /* ===== 合成路径弹窗 ===== */
+  .modal{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center}
+  .modal.hidden{display:none}
+  .modal-mask{position:absolute;inset:0;background:rgba(15,23,35,.45)}
+  .modal-box{position:relative;width:min(720px,94vw);max-height:86vh;display:flex;flex-direction:column;
+    background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.28);overflow:hidden}
+  .modal-head{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line);
+    font-weight:700;font-size:14.5px;background:#f7fafd}
+  .modal-head .spacer{flex:1}
+  .modal-body{padding:14px 16px;overflow-y:auto}
+  .synth-theme{font-size:14px;font-weight:700;color:var(--text)}
+  .synth-sub{font-size:12px;color:var(--muted);margin:4px 0 12px;line-height:1.5}
+  .syn-node{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:#fbfdff}
+  .syn-node.on{border-color:#2f7cf6;box-shadow:0 0 0 2px rgba(47,124,246,.12)}
+  .syn-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .syn-name{font-weight:700;font-size:13.5px}
+  .syn-pr{font-size:11px;color:var(--muted);background:#eef2f7;border-radius:8px;padding:0 7px}
+  .syn-secs{font-size:11px;color:var(--muted)}
+  .tag{font-size:11px;border-radius:8px;padding:0 7px;font-weight:600}
+  .tag.ok{background:#e6f7ec;color:#1a8a4a}
+  .tag.no{background:#fdeeee;color:#c0392b}
+  .syn-refine{margin-left:auto;padding:3px 12px}
+  .syn-mats{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;display:flex;flex-direction:column;gap:5px}
+  .syn-mat{display:flex;align-items:center;gap:7px;font-size:12.5px}
+  .syn-mat .dot{width:8px;height:8px;border-radius:50%;background:#cdd6e2;flex:0 0 auto}
+  .syn-mat.has .dot{background:#1a8a4a}
+  .syn-mat.miss .dot{background:#c0392b}
+  .syn-mat .mp{font-size:11px;color:var(--muted)}
+  .syn-mat .cnt{font-size:11px;font-weight:600;margin-left:auto}
+  .syn-mat.has .cnt{color:#1a8a4a}
+  .syn-mat.miss .cnt{color:#c0392b}
+  .syn-children{margin:5px 0 2px 16px;padding-left:10px;border-left:2px solid var(--line);
+    display:flex;flex-direction:column;gap:4px}
+  .syn-empty{color:var(--muted);font-size:12.5px;padding:8px 2px}
 
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
@@ -705,6 +744,19 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260917a"></script>
+<script src="/app.js?v=20260917b"></script>
+
+<!-- 合成路径弹窗 -->
+<div id="synth-modal" class="modal hidden">
+  <div class="modal-mask" onclick="closeSynth()"></div>
+  <div class="modal-box">
+    <div class="modal-head">
+      <span>🔗 合成路径</span>
+      <span class="spacer"></span>
+      <button class="btn sm ghost" onclick="closeSynth()">关闭</button>
+    </div>
+    <div id="synth-body" class="modal-body"></div>
+  </div>
+</div>
 </body>
 </html>

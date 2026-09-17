@@ -507,6 +507,23 @@ async def card_refine(target: int):
         return {"ok": False, "message": f"炼卡请求异常：{e}"}
 
 
+@app.get("/api/card/synthesis")
+async def card_synthesis(card_id: int):
+    """给定某张卡，返回其所属套卡的合成路径（配方树）+ 实时持有情况。
+
+    前端卡箱点开任意一张卡时调用：展示该套卡所有「可合成目标」及其下级卡，
+    标注每张下级卡是否已持有、目标卡当前能否直接炼（3 张下级卡齐全且有空炉）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        mp = await _session.post(EP_MAINPAGE, code="", opuin=_session.uin)
+        raw = mp.get("raw", "")
+        return card_plan.synthesis_for_card(card_id, raw)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"合成路径生成异常：{e}"}
+
+
 @app.post("/api/card/cancel")
 async def card_cancel(slot: int, stove: int = -1):
     """取消指定炉位的炼卡，素材卡退回卡箱。

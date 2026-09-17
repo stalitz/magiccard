@@ -233,3 +233,84 @@ def build_refine_payload(target: int, xml_text: str) -> dict | None:
         "bflash": 0, "ver": 1, "targettype": 1,
         "themeid": comp[0], "code": "",
     }
+
+
+def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
+    """给定一张卡，返回它所属套卡的合成路径（配方树）+ 实时持有情况。
+
+    - 结构：套卡内所有「可作为合成目标」的卡（theme_compose_list 的 target）。
+    - 每个目标卡列出其 3 张下级卡（mat1/2/3），并递归展开仍是本套目标的下级卡，
+      形成合成路径；递归深度上限避免过深。
+    - 实时持有：传入主页面 xml 时，统计换卡箱/保险箱各卡数量，标记每张下级卡
+      「有/无」，并给出该目标卡「可否炼」（3 张下级卡齐全）；同时统计空炉数。
+    """
+    lib = _load()
+    card_by_id = {int(c[0]): c for c in lib["card_list"]}
+    card = card_by_id.get(int(card_id))
+    if not card:
+        return {"ok": False, "message": f"卡库里找不到卡 {card_id}"}
+    theme_id = int(card[1])
+
+    tm = theme_meta()
+    theme = tm.get(theme_id, {})
+    theme_name = theme.get("name") or f"套卡{theme_id}"
+
+    # 该套所有配方：target -> (mats, secs)
+    recipes: dict[int, tuple] = {}
+    for c in lib["theme_compose_list"]:
+        if int(c[0]) == theme_id:
+            t = int(c[2])
+            mats = [int(c[3]), int(c[4]), int(c[5])]
+            secs = int(c[6])
+            recipes[t] = (mats, secs)
+
+    # 实时持有（仅换卡箱/保险箱，炉内不算素材）+ 空炉数
+    owned: dict[int, int] = {}
+    free_stoves = 0
+    if xml_text:
+        uc = parse_user_cards(xml_text)
+        now = uc.get("now", 0)
+        for bname in ("changebox", "storebox"):
+            for _, cid in uc[bname]:
+                if cid > 0:
+                    owned[cid] = owned.get(cid, 0) + 1
+        free_stoves = sum(1 for _, e in uc.get("stoves", []) if e <= now)
+
+    def mat_detail(m: int) -> dict:
+        mc = card_by_id.get(m)
+        nm = str(mc[2]) if mc else f"卡{m}"
+        pr = int(mc[3]) if mc else 0
+        cnt = owned.get(m, 0)
+        return {"card_id": m, "name": nm, "price": pr,
+                "owned": cnt > 0, "count": cnt, "children": []}
+
+    def build_node(t: int, depth: int) -> dict:
+        mats, secs = recipes[t]
+        real = [m for m in mats if m > 0]
+        mlist = []
+        ok = True
+        for m in real:
+            d = mat_detail(m)
+            if not d["owned"]:
+                ok = False
+            if depth < 3 and m in recipes:
+                d["children"] = [build_node(m, depth + 1)]
+            mlist.append(d)
+        return {
+            "card_id": t,
+            "name": card_name(t),
+            "price": int((card_by_id.get(t) or [None, None, None, 0])[3] or 0),
+            "secs": secs,
+            "materials": mlist,
+            "refinable": ok,
+        }
+
+    nodes = [build_node(t, 0) for t in recipes]
+    nodes.sort(key=lambda n: (not n["refinable"], n["secs"]))
+    return {
+        "ok": True,
+        "theme": {"id": theme_id, "name": theme_name},
+        "clicked_card_id": int(card_id),
+        "free_stoves": free_stoves,
+        "nodes": nodes,
+    }
