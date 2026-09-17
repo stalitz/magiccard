@@ -57,7 +57,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, err_msg)
+from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_USER_LIST, err_msg)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -372,6 +372,16 @@ class AutoRefine:
         self._pai_happened = False           # 上一 tick 是否翻过牌（决定是否记差分）
         self._rr = 0                         # 轮转起点
         self._task: asyncio.Task | None = None
+        # 偷炉（借好友空炉炼自己的卡）：用好友账号(opuin)发起 card_stove_refine，
+        # 卡落回自己炉内的「偷炉槽」(slottype=steal)，取卡走 card_stove_stealcard_get。
+        # 好友列表取 card_user_list（194 人，顺序=游戏界面顺序，非卡友）。
+        self.steal_enabled = True            # 偷炉总开关
+        self.steal_search_depth = 12         # 从最后一名好友往回找的深度
+        self._friends = None                 # 好友 uin 列表（缓存）
+        self._friend_cache: dict = {}         # uin -> (empty_count, ts)：好友炉空槽缓存
+        self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
+        self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
+        self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
         # 套间共享的素材保护：任一套的套内卡都要保底留 1 张
         self._keep: dict[int, int] = {}
         for p in self.plans.values():
@@ -578,6 +588,7 @@ class AutoRefine:
             for tid in order:
                 if buckets[tid]:
                     seq.append((tid, buckets[tid].pop(0)))
+        taken: set = set()                    # 本 tick 已被主炉/偷炉占用的目标，防重复提交
         for tid, target in seq:
             if free_stove <= 0:
                 break
@@ -631,9 +642,41 @@ class AutoRefine:
                 st["cap"]["change"]["used"] = max(
                     0, used - sum(1 for _sl, _st in picked if _st == 0))
                 pending[target] += 1
+                taken.add(target)
             self._log("炼卡", ok, f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}")
             steps.append({"action": "炼卡", "ok": ok,
                           "detail": f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}"})
+
+        # ---------- 偷炉：用好友空炉再并行 1 张 ----------
+        # 条件：开启偷炉、偷炉槽空闲、未被全局冷却、尚有未提交的炉次。
+        free_steal = st["cap"].get("stove", {}).get("free_steal", 0)
+        if (self.steal_enabled and free_steal > 0
+                and self._steal_cooldown_until < time.time() and self.queue):
+            # 找一个「素材已齐、能立刻炼」的目标（偷炉不就地买卡，保持简单）
+            steal_cand = None
+            for tid, target in seq:
+                if target in taken:
+                    continue                        # 主炉已占，别在好友炉上重复炼同一张
+                plan = self.plans[tid]
+                comp = plan.comp[target]
+                mats = [int(m) for m in (comp[3], comp[4], comp[5]) if m]
+                nc = Counter(mats)
+                short = {m: n - stock.get(m, 0) for m, n in nc.items() if n > stock.get(m, 0)}
+                if any(m in plan.comp for m in short):
+                    continue
+                if sum(short.values()) > 0:
+                    continue
+                if any(stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)
+                       for m, n in nc.items()):
+                    continue
+                steal_cand = (tid, target, nc, plan)
+                break
+            if steal_cand:
+                tid, target, nc, plan = steal_cand
+                friend = await self._pick_steal_friend(st)
+                if friend:
+                    await self._refine_steal(st, tid, target, nc, plan, slots, friend,
+                                            stock, pending, steps)
 
     @staticmethod
     def _free_change(st: dict) -> int:
@@ -659,6 +702,97 @@ class AutoRefine:
         for c in st["stove"]:
             pending[c["id"]] += 1
         return st, stock, slots, pending
+
+    # ---------- 偷炉（借好友空炉炼自己的卡） ----------
+    async def _load_friends(self) -> list[str]:
+        """好友 uin 列表（card_user_list，194 人，顺序=游戏界面顺序，非卡友）。缓存。"""
+        if self._friends is not None:
+            return self._friends
+        try:
+            r = await self.s.post(EP_USER_LIST)
+        except Exception:
+            return []
+        self._friends = re.findall(r'<user\s+uin="(\d+)"', r.get("raw", ""))
+        return self._friends
+
+    async def _friend_stove_empty(self, opuin: str) -> int:
+        """好友炉空槽数（>0 = 有空炉可偷）。-1 = 查询失败/无法判定。
+        命中 5 分钟缓存，避免每 tick 反复打 mainpage(opuin)。"""
+        now = time.time()
+        c = self._friend_cache.get(opuin)
+        if c and now - c[1] < 300:
+            return c[0]
+        try:
+            mp = await self.s.post(EP_MAINPAGE, code="", opuin=opuin)
+            st = parse_full(mp.get("raw", ""))
+            fs = st.get("stove", [])
+            empty = sum(1 for x in fs if int(x.get("id", 0)) == 0)
+            self._friend_cache[opuin] = (empty, now)
+            return empty
+        except Exception:
+            return -1
+
+    async def _pick_steal_friend(self, st: dict) -> str | None:
+        """从最后一名好友往回找第一个可用的偷炉对象。
+        优先选「检测到有空炉」的；若检测盲区（都测不到空炉）则退而取最后一名，
+        交给服务端最终裁决（好友相关错误会被缓存、换下一名重试）。
+        排除：① 近期偷炉失败被缓存的好友；② 已在对方炉上挂着我自己未取回的卡的好友
+        （再偷会吃 -33084，等 tick 收卡后自然解除）。"""
+        friends = await self._load_friends()
+        if not friends:
+            return None
+        now = time.time()
+        busy = {str(c.get("opuin")) for c in st.get("stove", [])
+                if c.get("opuin") and str(c.get("opuin")) != str(self.s.uin)}
+        window = friends[-self.steal_search_depth:]
+        window.reverse()                      # 从最后往回
+        chosen = None
+        for uin in window:
+            if self._friend_fail.get(uin, 0) > now:
+                continue
+            if uin in busy:
+                continue
+            e = await self._friend_stove_empty(uin)
+            if e > 0:
+                return uin
+            chosen = uin                      # 退化候选：测不到空炉也尝试一次
+        return chosen
+
+    async def _refine_steal(self, st, tid, target, need_cnt, plan, slots, friend,
+                            stock: Counter, pending: Counter, steps) -> None:
+        """对好友 friend 的空炉发起一次偷炉炼卡（opuin=friend）。"""
+        res = self._payload(plan, target, need_cnt, slots)
+        if res is None:
+            return
+        payload, picked = res
+        payload["opuin"] = friend             # 关键：借好友账号炼自己的卡
+        r = await self.s.post(EP_REFINE, **payload)
+        code = r.get("code")
+        ok = code == 0
+        nm = plan.cname(target)
+        msg = r.get("message") or err_msg(code)
+        self.last_steal = {"friend": friend, "target": target, "name": nm,
+                           "code": code, "msg": msg, "ts": time.time()}
+        self._log("偷炉", ok, f"{nm}（{plan.name}）@{friend} {msg}")
+        steps.append({"action": "偷炉", "ok": ok,
+                      "detail": f"{nm}（{plan.name}）@{friend} {msg}"})
+        if ok:
+            self.stats["refined"] += 1
+            for m, n in need_cnt.items():
+                stock[m] -= n
+                for _ in range(n):
+                    if slots.get(m):
+                        slots[m].pop(0)
+            used = st["cap"].get("change", {}).get("used", 0)
+            st["cap"]["change"]["used"] = max(0, used - sum(1 for _s, _t in picked if _t == 0))
+            pending[target] += 1
+        else:
+            # 好友相关错误 → 缓存该好友换下一名；我炉满(-33003) → 全局冷却
+            now = time.time()
+            if code == -33003:
+                self._steal_cooldown_until = now + 600
+            elif friend:
+                self._friend_fail[friend] = now + 1800
 
     async def _buy_for(self, tid: int, target: int, short: dict, steps: list[dict]) -> bool:
         """就地为 (套 tid 的) target 这一炉补买缺的底卡。全成功返回 True。"""
@@ -797,4 +931,7 @@ class AutoRefine:
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,
+                "steal": {"enabled": self.steal_enabled,
+                           "last_steal": self.last_steal,
+                           "cooldown_until": self._steal_cooldown_until},
                 "log": self.log[-30:]}

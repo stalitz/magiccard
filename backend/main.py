@@ -1057,7 +1057,6 @@ async def players():
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"查询异常：{e}"}
 
-
 @app.post("/api/collection/progress")
 async def collection_progress():
     """集卡册进度（card_mini_get，只读）。
