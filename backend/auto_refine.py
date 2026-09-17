@@ -5,6 +5,8 @@
          -> code=0，返回 <card slot="1" id=...>，卡进换卡箱
   炼卡   card_stove_refine    POST targetid + slot1..3 / slottype1..3
          + bflash=0&ver=1&targettype=1&themeid=<套id>
+  偷炉   card_stove_steal     POST 参数同炼卡 + opuin=<好友uin>
+         ★ 必须用 steal 端点；用 refine+opuin 会被当成「在自己炉上炼」而误报 -33003（2026-09-17 抓包）
   取卡   card_stove_refinedcard_get（普通炉）/ card_stove_stealcard_get（偷炉，须带 opuin）
   上交   card_collection_add  POST theme=<套id>&themetype=0&cardtype=1&giftid=<idx9 首项>
          -32002「找不到相应的记录」= 卡没齐；成功返回「成功放入集卡册」
@@ -57,7 +59,8 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_USER_LIST, err_msg)
+from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_STEAL,
+                        EP_USER_LIST, err_msg)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -372,9 +375,11 @@ class AutoRefine:
         self._pai_happened = False           # 上一 tick 是否翻过牌（决定是否记差分）
         self._rr = 0                         # 轮转起点
         self._task: asyncio.Task | None = None
-        # 偷炉（借好友空炉炼自己的卡）：用好友账号(opuin)发起 card_stove_refine，
-        # 卡落回自己炉内的「偷炉槽」(slottype=steal)，取卡走 card_stove_stealcard_get。
-        # 好友列表取 card_user_list（194 人，顺序=游戏界面顺序，非卡友）。
+        # 偷炉（借好友空炉炼自己的卡）：用好友账号(opuin)发起 card_stove_steal。
+        # ★ 端点必须是 steal（refine+opuin 会被当成「在自己炉上炼」→ 误报 -33003）。
+        # 素材仍取我自己的卡箱槽位；炼成后卡挂在该好友炉上，取卡走
+        # card_stove_stealcard_get + opuin。好友列表取 card_user_list
+        # （194 人，顺序=游戏界面顺序，非卡友）。
         self.steal_enabled = True            # 偷炉总开关
         self.steal_search_depth = 12         # 从最后一名好友往回找的深度
         self._friends = None                 # 好友 uin 列表（缓存）
@@ -719,17 +724,23 @@ class AutoRefine:
         return self._friends
 
     async def _friend_stove_empty(self, opuin: str) -> int:
-        """好友炉空槽数（>0 = 有空炉可偷）。-1 = 查询失败/无法判定。
-        命中 5 分钟缓存，避免每 tick 反复打 mainpage(opuin)。"""
+        """好友的空**主**炉数（>0 = 可偷）。-1 = 查询失败。
+        命中 5 分钟缓存，避免每 tick 反复打 mainpage(opuin)。
+
+        ⚠️ 必须读 `cap.stove.free_main`：parse_full 只把 id>0 的卡放进 st["stove"]，
+        空槽（id=0）只体现在 cap 计数里。早期版本在 st["stove"] 里数 id==0
+        **永远得 0**，导致「扫 194 好友全都没空炉」的假结论（2026-09-17 定位修正）。
+        """
         now = time.time()
         c = self._friend_cache.get(opuin)
         if c and now - c[1] < 300:
             return c[0]
         try:
             mp = await self.s.post(EP_MAINPAGE, code="", opuin=opuin)
+            if mp.get("code") != 0:
+                return -1
             st = parse_full(mp.get("raw", ""))
-            fs = st.get("stove", [])
-            empty = sum(1 for x in fs if int(x.get("id", 0)) == 0)
+            empty = int(st.get("cap", {}).get("stove", {}).get("free_main", 0))
             self._friend_cache[opuin] = (empty, now)
             return empty
         except Exception:
@@ -747,10 +758,12 @@ class AutoRefine:
         now = time.time()
         busy = {str(c.get("opuin")) for c in st.get("stove", [])
                 if c.get("opuin") and str(c.get("opuin")) != str(self.s.uin)}
-        # 优先用「常去好友」：未被失败缓存、且其炉上没挂着我未取回的卡
+        # 优先用「常去好友」：未被失败缓存、其炉上没挂着我未取回的卡，且确实有空主炉
+        # （探测失败 -1 时仍交给服务端裁决，别因为探测抖动放弃常去好友）
         pref = self.preferred_steal_friend
         if pref and pref not in busy and self._friend_fail.get(pref, 0) <= now:
-            return pref
+            if await self._friend_stove_empty(pref) != 0:
+                return pref
         # 否则从最后一名好友往回找
         window = friends[-self.steal_search_depth:]
         window.reverse()                      # 从最后往回
@@ -768,13 +781,19 @@ class AutoRefine:
 
     async def _refine_steal(self, st, tid, target, need_cnt, plan, slots, friend,
                             stock: Counter, pending: Counter, steps) -> None:
-        """对好友 friend 的空炉发起一次偷炉炼卡（opuin=friend）。"""
+        """对好友 friend 的空炉发起一次偷炉炼卡。
+
+        **端点必须是 `card_stove_steal`，不是 `card_stove_refine`**（2026-09-17 真机抓包）：
+        用 refine+opuin 会被服务端当成「在我自己炉上炼」，我主炉满时直接吃 -33003 误导排查方向。
+        参数与普通炼卡同构，仅额外带 `opuin=好友uin`（素材仍取我自己的卡箱槽位）。
+        """
         res = self._payload(plan, target, need_cnt, slots)
         if res is None:
             return
         payload, picked = res
+        payload.pop("code", None)             # 抓包原文无 code 字段
         payload["opuin"] = friend             # 关键：借好友账号炼自己的卡
-        r = await self.s.post(EP_REFINE, **payload)
+        r = await self.s.post(EP_STEAL, **payload)
         code = r.get("code")
         ok = code == 0
         nm = plan.cname(target)
@@ -795,12 +814,17 @@ class AutoRefine:
             st["cap"]["change"]["used"] = max(0, used - sum(1 for _s, _t in picked if _t == 0))
             pending[target] += 1
         else:
-            # 好友相关错误 → 缓存该好友换下一名；我炉满(-33003) → 全局冷却
+            # 偷炉失败分两类（2026-09-17 真机实测）：
+            #   -33031「同时只能偷一个炉子」= 全局限制（我还有一炉在偷），与好友无关，
+            #          禁止拉黑好友，只做全局冷却，等那炉收取后自然恢复。
+            #   其它（好友炉满 / 挂着我未取的卡等）= 好友相关 → 拉黑换人。
             now = time.time()
-            if code == -33003:
-                self._steal_cooldown_until = now + 600
-            elif friend:
-                self._friend_fail[friend] = now + 1800
+            if code == -33031:
+                self._steal_cooldown_until = now + 120
+            else:
+                if friend:
+                    self._friend_fail[friend] = now + 1800
+                self._steal_cooldown_until = now + 120
 
     async def _buy_for(self, tid: int, target: int, short: dict, steps: list[dict]) -> bool:
         """就地为 (套 tid 的) target 这一炉补买缺的底卡。全成功返回 True。"""
