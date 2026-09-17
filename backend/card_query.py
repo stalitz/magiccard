@@ -245,6 +245,8 @@ def theme_detail(tid: int, owned: dict | None = None):
         "theme": {k: th[k] for k in
                   ("tid", "name", "star", "flash", "offline", "kind", "module",
                    "composable", "transferable", "publish", "n")},
+        # 套卡级「商店可买」标记：套内存在 10 面额基础卡 = 未下架在售套（buyable_themes 口径）
+        "theme_buyable": tid in buyable_themes(),
         "cards": cards,
     }
 

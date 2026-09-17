@@ -31,7 +31,7 @@ from . import prop_dict as pd
 from . import spirite_maps as spm
 from . import spirite_progress as spg
 from .auto_refine import AutoRefine, parse_full
-from .constants import (EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
+from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST)
 from .spirite_auto import SPIRITE_MAPS, get_engine, plain_uin
 
@@ -502,9 +502,30 @@ async def card_refine(target: int):
     if err := _require_login():
         return err
     try:
-        return await _session.refine(target)
+        r = await _session.refine(target)
+        code = r.get("code") if isinstance(r, dict) else None
+        if code == 0:
+            _inv_cache["data"] = None   # 炼卡消耗素材+入炉，立即使持有快照失效
+        return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"炼卡请求异常：{e}"}
+
+
+@app.post("/api/card/buy")
+async def card_buy(card_id: int, theme_id: int):
+    """从商店直接买卡（card_market_npc_buy）。会真实扣金币，谨慎调用。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await _session.post(EP_BUY, card_id=card_id, theme_id=theme_id)
+        code = r.get("code")
+        ok = code == 0
+        if ok:
+            _inv_cache["data"] = None   # 买卡后卡箱有变，立即使持有快照失效
+        return {"ok": ok, "code": code,
+                "message": r.get("message") or ("" if ok else f"错误码 {code}")}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"买卡请求异常：{e}"}
 
 
 @app.get("/api/card/synthesis")

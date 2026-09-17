@@ -1487,7 +1487,12 @@ async function openTheme(tid, focusCid = null) {
             <span class="v-badge">面值 ${c.price}</span>
             ${c.own ? `<span class="own-badge">持 ${c.own}</span>` : ""}
             ${c.recipe ? '<span class="tag refinable">可炼</span>' : '<span class="tag base">素材</span>'}
-            <span style="margin-left:auto"><button class="mini-btn ${libState.openChains.has(c.id) ? "chain-on" : ""}" data-act="chain">${libState.openChains.has(c.id) ? "收起路径" : "合成路径"}</button></span>
+            <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+              ${(c.price == 10 && d.theme_buyable)
+                ? `<button class="mini-btn buy-btn" data-act="buy">买</button>`
+                : ""}
+              <button class="mini-btn ${libState.openChains.has(c.id) ? "chain-on" : ""}" data-act="chain">${libState.openChains.has(c.id) ? "收起路径" : "合成路径"}</button>
+            </span>
           </div>
           ${rec}${used}
           <div class="chain-wrap"></div>
@@ -1499,6 +1504,10 @@ async function openTheme(tid, focusCid = null) {
         e.stopPropagation();
         const row = btn.closest(".card-row");
         const cid = Number(row.dataset.cid);
+        if (btn.dataset.act === "buy") {
+          doBuy(cid, t.tid, btn);
+          return;
+        }
         toggleChain(row, cid, btn);
       };
     });
@@ -1919,8 +1928,10 @@ async function openSynth(cardId) {
             ${n.price ? `<span class="syn-pr">${n.price}面额</span>` : ""}
             <span class="syn-secs">${fmtSynSecs(n.secs)}</span>
             ${n.refinable ? `<span class="tag ok">可炼</span>` : `<span class="tag no">缺料</span>`}
-            ${n.refinable && d.free_stoves > 0
-              ? `<button class="btn sm primary syn-refine" data-tid="${n.card_id}">炼卡</button>`
+            ${n.refinable
+              ? (d.free_stoves > 0
+                  ? `<button class="btn sm primary syn-refine" data-tid="${n.card_id}">炼卡</button>`
+                  : `<button class="btn sm primary syn-refine" data-tid="${n.card_id}" disabled title="当前炉位已满（自动炼卡占满主炉），腾出空炉后即可炼">炉满</button>`)
               : ""}
           </div>
           <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2)).join("")}</div>
@@ -1957,6 +1968,29 @@ async function doRefine(targetId, btn) {
     }
   } catch (e) {
     log("手动炼卡异常：" + e, "err");
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+async function doBuy(cardId, themeId, btn) {
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "购买中…";
+  try {
+    const r = await fetch(`/api/card/buy?card_id=${cardId}&theme_id=${themeId}`, { method: "POST" });
+    const d = await r.json();
+    if (d.ok) {
+      log(`买卡 ${cardId}（套${themeId}）：成功`, "ok");
+      // 刷新卡库持有数
+      if (libState.curThemeTid) openTheme(libState.curThemeTid);
+    } else {
+      log(`买卡 ${cardId}（套${themeId}）失败：${d.message || d.code || "未知错误"}`, "err");
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  } catch (e) {
+    log("买卡异常：" + e, "err");
     btn.disabled = false;
     btn.textContent = old;
   }
