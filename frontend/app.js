@@ -1821,16 +1821,11 @@ function cbCardHtml(c, boxType) {
   const style = theme
     ? ` style="border-left:4px solid hsl(${themeHue(theme)},55%,55%);background:hsl(${themeHue(theme)},72%,97%)"`
     : "";
-  // 面值 10 且所属套未下架在售 => 商店能买到，给个「买」按钮直接下单
-  const buyBtn = c.buyable
-    ? `<button class="btn sm buy" data-act="buy" data-id="${c.id}" data-tid="${c.theme_id || 0}">买</button>`
-    : "";
   return `<div class="cb-card" data-cid="${c.id}"${style}>
     <div class="cbn" title="${esc(c.name || "")}">${esc(c.name || ("卡#" + c.id))}</div>
     <div class="cbm"><span>面值 ${c.price ?? 0}</span>${theme ? `<span>${esc(theme)}</span>` : ""}${c.star ? `<span>${c.star}★</span>` : ""}</div>
     <div class="cb-route">点击查看合成路径 ▸</div>
     <div class="cbacts">
-      ${buyBtn}
       ${sellBtn}
       <button class="btn sm ghost" data-act="move" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}">${toName}</button>
     </div>
@@ -1870,15 +1865,6 @@ async function onCbAction(e) {
   const id = Number(b.dataset.id);
   b.disabled = true;
   try {
-    if (act === "buy") {
-      // 从商店再买一张同款（面值 10 且未下架在售的基础卡），直接扣金币
-      const tid = Number(b.dataset.tid || 0);
-      const d = await (await fetch(`/api/card/buy?card_id=${id}&theme_id=${tid}`, { method: "POST" })).json();
-      log(`买卡「${b.closest(".cb-card").querySelector(".cbn").textContent}」：${d.ok ? (d.message || "已购买") : "失败 " + (d.message || d.code)}`,
-          d.ok ? "ok" : "err");
-      await loadCardBox();
-      return;
-    }
     if (act === "sell") {
       const price = Number(b.dataset.price || 0);
       if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {

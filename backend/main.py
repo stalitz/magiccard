@@ -455,8 +455,6 @@ async def state():
             m = meta.get(c["id"]) if c.get("id") else None
             c["name"] = (m or {}).get("name", "")
             c["theme"] = (m or {}).get("theme", "")
-            c["theme_id"] = (m or {}).get("theme_id", 0)
-            c["buyable"] = (m or {}).get("buyable", 0)
             c["star"] = (m or {}).get("star", 0)
             c["price"] = (m or {}).get("price", 0)
             c["publish"] = (m or {}).get("publish", 0)
@@ -476,8 +474,6 @@ async def state():
                 c["name"] = (m or {}).get("name", "")
                 c["price"] = (m or {}).get("price", 0)
                 c["theme"] = (m or {}).get("theme", "")
-                c["theme_id"] = (m or {}).get("theme_id", 0)
-                c["buyable"] = (m or {}).get("buyable", 0)
                 c["star"] = (m or {}).get("star", 0)
                 c["publish"] = (m or {}).get("publish", 0)
     except Exception:  # noqa: BLE001

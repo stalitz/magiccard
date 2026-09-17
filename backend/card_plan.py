@@ -96,36 +96,26 @@ def theme_meta() -> dict[int, dict]:
 
 
 def card_details(cids) -> dict[int, dict]:
-    """批量取卡的展示元数据：卡名 / 套卡 / 星级 / 面值 / 上架日期 / 起炼素材。
-
-    buyable=1 表示「这张卡能直接在商店买到」= 面值 10 且所属套未下架在售
-    （buyable_themes 口径：套内含 10 面额基础卡）。
-    """
+    """批量取卡的展示元数据：卡名 / 套卡 / 星级 / 面值 / 上架日期 / 起炼素材。"""
     card_by_id = {int(c[0]): c for c in _load()["card_list"]}
     tm = theme_meta()
-    bt = buyable_themes()
     out: dict[int, dict] = {}
     for cid in cids:
         c = card_by_id.get(cid)
         if not c:
-            out[cid] = {"name": f"卡{cid}", "theme": "", "theme_id": 0, "star": 0,
-                        "price": 0, "publish": 0, "mats": [], "starter": 0,
-                        "flash": 0, "buyable": 0}
+            out[cid] = {"name": f"卡{cid}", "theme": "", "star": 0, "price": 0,
+                        "publish": 0, "mats": [], "starter": 0, "flash": 0}
             continue
-        tid = int(c[1])
-        price = int(c[3]) if c[3] is not None else 0
-        th = tm.get(tid, {})
+        th = tm.get(int(c[1]), {})
         out[cid] = {
             "name": str(c[2]),
             "theme": th.get("name", ""),
-            "theme_id": tid,
             "star": int(th.get("star") or 0),
-            "price": price,
+            "price": int(c[3]) if c[3] is not None else 0,
             "publish": int(th.get("publish") or 0),
             "mats": th.get("mats", []),
             "starter": 1 if th.get("starter") else 0,
             "flash": 1 if th.get("flash") else 0,
-            "buyable": 1 if (price == 10 and tid in bt) else 0,
         }
     return out
 
