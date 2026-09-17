@@ -5,14 +5,22 @@
 
   card_list          [card_id, theme_id, CardName, Price(面值), Type, ...]
   theme_card_list    [theme_id, theme_name, 难度星级, 上架时间, ..., [card ids],
-                      theme_type(9=闪卡), version, time, 下线时间(offtime), ...]
+                      theme_type(类型值), version, time, 下线时间(offtime), ...]
   theme_compose_list [theme_id, state, target, mat1, mat2, mat3, 耗时秒]
 
-分类标签：
+分类标签（对齐游戏 UI「发行/绝版/闪卡」tab 实测计数，权威）：
   - 星级  = 主题难度字段（1-5 星，0 表示活动挖地等无星卡）
-  - 闪卡  = theme_type==9（与主题名带(闪)完全一致，13 套）
-  - 下线  = 主题 suffix 第 4 字段 > 0（限时活动套已下架时间戳；仅作参考标记，
-            与游戏内「绝版/可变」口径是否一致待用户校准）
+  - theme_type 是【类型值】不是位掩码。主卡箱三类（游戏实测 419/1171/13）：
+        发行(在售) = type ∈ {0, 2}   （419 = 399 + 20）
+        闪卡       = type == 9        （13，名字均带"(闪)"）
+        下架(绝版) = type ∈ {1,5} 且非挖地非特殊（1171 = 215 + 992 − 34 − 2）
+  - 独立模块（有独立卡册/卡箱，不在主卡箱显示，前端单独列表）：
+        挖地      = idx18 == 1              （34 套，2026-09-09 已 35）
+        猫咪旅行  = type6「一起去旅行」       （25 套）
+        猫咪探险·西游记 / 三国战役 = type10/11（8 / 9 套，每日比赛子模块）
+        特殊      = 道具卡(tid111) / 入学记(tid152)，非可收集卡册（2 套）
+        合计 78 套 → 1681 − 78 = 1603 = 419 + 1171 + 13 ✓
+  - 旧口径（位掩码 bit0=下架/bit3=闪卡）已被实测计数推翻：会得 444/1207/30。
   - 可炼  = 该卡在合成配方表中作为目标出现（有 recipe 就能炼；否则是基础素材卡
             或只能通过获得渠道取得）
 """
@@ -33,26 +41,102 @@ def load():
 
 
 @lru_cache(maxsize=1)
+def buyable_themes() -> frozenset[int]:
+    """「商店能买到的套卡」集合 = 套卡内存在 10 面额基础卡的主题 tid。
+
+    用户 2026-09-10 两次纠正后的判据：能否在商店买到是**套卡级**属性 —— 看这套里
+    有没有 10 面额基础卡，与具体某张卡的自身面额无关。
+    换卡时该限制只作用于这类套卡：换出它们的卡，其主题必须在对方「想收主题」(exch) 里；
+    整套都没有 10 面额基础卡的（下架/绝版套，如纸寿千年、名家）商店买不到，
+    **不受 exch 限制，同面额即可换**。
+
+    手动换卡（exchange.py）与自动换卡（auto_exchange.py）共用本函数，
+    避免两条链路的规则再次漂移。
+    """
+    idx = indexes()
+    s: set[int] = set()
+    for t in idx["themes"]:
+        for cid in t["cards"]:
+            ci = idx["card_by_id"].get(cid)
+            if ci and int(ci[3]) == 10:
+                s.add(t["tid"])
+                break
+    return frozenset(s)
+
+
+@lru_cache(maxsize=1)
 def indexes():
     """构建静态索引（进程内缓存一次）。"""
     lib = load()
+    card_by_id: dict[int, list] = {}
+    for c in lib["card_list"]:
+        card_by_id[int(c[0])] = c
+
+    def _cards_sorted(t) -> list[int]:
+        """套卡内的卡按「面额降序」排列（2026-09-10 用户确认的展示规则）。
+
+        原始数据 t[11] 只是「card id 降序」。对绝大多数套卡，id 是当年按层次连号
+        录入的（150 终卡 → 40 中卡 → 10 基础卡），所以 id 降序碰巧等于面额降序；
+        但后期追加过卡的套装会把 10 面额新卡插到最前面（典型：时尚男/女套装
+        theme 40/45 追加了 id 64-69 的配饰卡），顺序就乱了。这里统一按
+        (price 降序, id 降序) 重排，保证展示稳定符合游戏内习惯。
+        """
+        ids = [int(c) for c in t[11]] if isinstance(t[11], list) else []
+        return sorted(
+            ids,
+            key=lambda cid: (-int(card_by_id.get(cid, [0, 0, "", 0])[3] or 0), -cid),
+        )
+
     themes = []
     for t in lib["theme_card_list"]:
         suf = t[12:] or [0]
         name = str(t[1]).strip()
+        ty = int(suf[0])
+        tid = int(t[0])
+        flag18 = int(suf[6]) if len(suf) > 6 and suf[6] is not None else 0
+        # 独立模块（有独立卡册/卡箱，不在主卡箱显示，用户 2026-09-09 确认）
+        #   挖地      = idx18 == 1（34 套，今日已 35）
+        #   猫咪旅行  = type6「一起去旅行」（25 套）
+        #   猫咪探险·西游记 / 三国战役 = type10 / type11（8/9 套，每日比赛子模块）
+        #   特殊      = 道具卡(111) / 入学记(152)，非可收集卡册
+        if flag18 == 1:
+            module = "挖地"
+        elif ty == 6:
+            module = "猫咪旅行"
+        elif ty == 10:
+            module = "猫咪探险·西游记"
+        elif ty == 11:
+            module = "猫咪探险·三国战役"
+        elif tid in (111, 152):
+            module = "特殊"
+        else:
+            module = ""
+        if module:
+            kind = module
+            flash = False
+            offline = False
+        else:
+            # 主卡箱 发行/下架/闪卡 —— 对齐游戏 tab 实测 419/1171/13
+            flash = ty == 9
+            offline = ty not in (0, 2, 9)
+            if flash:
+                kind = "闪卡"
+            elif offline:
+                kind = "绝版"
+            else:
+                kind = "在售"
         themes.append({
             "tid": int(t[0]),
             "name": name,
             "star": int(t[2]) if t[2] is not None else 0,
             "publish": int(t[3]) if t[3] is not None else 0,
-            "flash": int(suf[0]) == 9,
-            "offline": int(suf[3]) > 0 if len(suf) >= 4 else 0,
-            "type": int(suf[0]),
-            "cards": [int(c) for c in t[11]] if isinstance(t[11], list) else [],
+            "flash": flash,
+            "offline": offline,
+            "kind": kind,
+            "module": module,
+            "type": ty,
+            "cards": _cards_sorted(t),
         })
-    card_by_id: dict[int, list] = {}
-    for c in lib["card_list"]:
-        card_by_id[int(c[0])] = c
     # 主题内配方: theme -> {target: [theme, state, target, m1, m2, m3, secs]}
     comp_by_theme: dict[int, dict[int, list]] = {}
     # 全库配方: target -> row
@@ -62,13 +146,18 @@ def indexes():
         tid, target = int(tid), int(target)
         comp_by_theme.setdefault(tid, {})[target] = row
         comp_by_target.setdefault(target, row)
-    # 主题卡面值区间
+    # 主题卡面值区间 + 可合成/可变标记
     for th in themes:
         prices = [card_by_id[c][3] for c in th["cards"]
                   if c in card_by_id and card_by_id[c][3] is not None]
         th["n"] = len(prices)
         th["pmin"] = min(prices) if prices else 0
         th["pmax"] = max(prices) if prices else 0
+        # 可合成 = 该套在合成配方表(theme_compose_list)里有配方，能从炉子一层层炼出来；
+        #          无配方 = 免合成，只能抽卡/收集/变卡/交换（实测与"全套面额相同"吻合 991/992）
+        th["composable"] = len(comp_by_theme.get(th["tid"], {})) > 0
+        # 可变 = 可以通过变卡得到（游戏源码 mfkp base.js: checkCanTransfer = !(theme[12]&0x04)）
+        th["transferable"] = not (th["type"] & 4)
     themes.sort(key=lambda x: (-x["publish"], x["tid"]))
     return {
         "themes": themes,
@@ -89,28 +178,36 @@ def cprice(idx, cid):
 
 
 def list_themes(q: str = "", star: int = 0, flash: int = -1,
-                offline: int = -1, limit: int = 400):
+                offline: int = -1, module: str = "", limit: int = 400):
+    """套卡目录。
+
+    module: "" = 全部；"main" = 仅主卡箱(module=="")；其他 = 具体独立模块名
+            （挖地 / 猫咪旅行 / 猫咪探险·西游记 / 猫咪探险·三国战役 / 特殊）。
+    """
     idx = indexes()
     q = (q or "").strip().lower()
-    out = []
+    matches = []
     for th in idx["themes"]:
         if q and q not in th["name"].lower():
             continue
         if star and th["star"] != star:
             continue
+        if module:
+            want = "" if module == "main" else module
+            if th["module"] != want:
+                continue
         if flash in (0, 1) and th["flash"] != bool(flash):
             continue
         if offline in (0, 1) and th["offline"] != bool(offline):
             continue
-        out.append(th)
-        if len(out) >= limit:
-            break
+        matches.append(th)
+    out = matches[:limit]
     return {
-        "total": len(idx["themes"]),
+        "total": len(matches),
         "shown": len(out),
         "themes": [{k: th[k] for k in
-                    ("tid", "name", "star", "flash", "offline",
-                     "n", "pmin", "pmax", "publish")} for th in out],
+                    ("tid", "name", "star", "flash", "offline", "kind", "module",
+                     "composable", "transferable", "n", "pmin", "pmax", "publish")} for th in out],
     }
 
 
@@ -146,7 +243,8 @@ def theme_detail(tid: int, owned: dict | None = None):
         })
     return {
         "theme": {k: th[k] for k in
-                  ("tid", "name", "star", "flash", "offline", "publish", "n")},
+                  ("tid", "name", "star", "flash", "offline", "kind", "module",
+                   "composable", "transferable", "publish", "n")},
         "cards": cards,
     }
 
@@ -209,6 +307,10 @@ def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
             "star": th["star"],
             "flash": th["flash"],
             "offline": th["offline"],
+            "kind": th["kind"],
+            "module": th["module"],
+            "composable": th["composable"],
+            "transferable": th["transferable"],
             "own": int(owned.get(cid, 0)) if owned else 0,
             "refinable": row is not None,
             "recipe": ({

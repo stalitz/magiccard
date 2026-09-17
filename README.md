@@ -51,3 +51,29 @@ uvicorn backend.main:app --port 8000 --reload
 - ✅ 接口层结构（g_tk 算法 + XML 解析 + 错误码）
 - ✅ 文字 / 列表 / 按钮前端骨架
 - 🚧 开始炼卡、取卡等接口待抓包填真实端点后联调
+
+## 奖励编号格式（2026-09-16 定案）
+
+游戏里所有奖励串（翻牌 `card_pai_open` 的 `content`、灵宠关卡 `register_gift`、
+活动礼包 `package`、猫咪旅行 `giftInfo`）都是同一个三段式：
+
+```
+大类id _ 类内编号id _ 数量        例：92_32_1 = 猫咪旅行类第32号 ×1 = 红宝石×1
+```
+
+**第 1 段是玩法/品类 id，不是道具 id**（所以「翻牌能出气球」并不矛盾——
+气球是 `48_1415`，大类 48 = 通用/活动道具）。名字表与实证链见
+`backend/item_dict.py`。
+
+## 数据文件（`data/` 不入库，需联网重建）
+
+`data/` 被 `.gitignore` 忽略，新环境需重建这几个文件：
+
+| 文件 | 重建方式 |
+|---|---|
+| `data/item_dict.json` | `python -m backend.item_dict`（拉官方静态配置，约 470 条） |
+| `data/prop_dict.json` `data/card_lib.json` | 见各自模块注释 |
+
+官方静态配置都在 `appimg2.qq.com/card/...`，**免登录直取**；版本号会随游戏更新，
+最新地址可用登录态调一次 `card_run_base` 的 `version_list` 取（见
+`item_dict.parse_version_list`）。

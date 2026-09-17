@@ -25,11 +25,96 @@ def _load() -> dict:
     return _lib
 
 
+_name_idx: dict[int, str] | None = None
+
+
+def _names() -> dict[int, str]:
+    global _name_idx
+    if _name_idx is None:
+        _name_idx = {c[0]: str(c[2]) for c in _load()["card_list"]}
+    return _name_idx
+
+
 def card_name(cid: int) -> str:
-    for c in _load()["card_list"]:
-        if c[0] == cid:
-            return str(c[2])
-    return f"卡{cid}"
+    return _names().get(cid) or f"卡{cid}"
+
+
+def card_names(cids) -> dict[int, str]:
+    idx = _names()
+    return {c: (idx.get(c) or f"卡{c}") for c in cids}
+
+
+_theme_meta: dict[int, dict] | None = None
+
+
+def theme_meta() -> dict[int, dict]:
+    """主题的「能不能从零获得」相关元数据。
+
+    theme_card_list 字段（19 项）实测语义:
+      0 theme_id / 1 name / 2 star / 3 上架时间戳(publish，可能是未来=未上架)
+      9 起炼素材: "cardId#n_x|cardId|..."，即炼这套需要的 4 张**外套**素材卡
+     12 theme_type（9=闪卡）
+
+    注意: 库里**没有**权威的「下架」字段。早先用的 suf[3]（t[15]）实测恒为 0，
+    判定从未生效。改用可验证的代理指标 starter：起炼素材是否全为 10 面值基础卡
+    ——这正是玩家口径里「商店能直接买 10 面额基础卡」的那一档。
+    """
+    global _theme_meta
+    if _theme_meta is not None:
+        return _theme_meta
+    lib = _load()
+    card_by_id = {int(c[0]): c for c in lib["card_list"]}
+    out: dict[int, dict] = {}
+    for t in lib["theme_card_list"]:
+        tid = int(t[0])
+        mats: list[int] = []
+        for x in str(t[9] or "").split("|"):
+            x = x.strip()
+            if not x:
+                continue
+            try:
+                cid = int(x.split("#")[0])
+            except ValueError:
+                continue
+            c = card_by_id.get(cid)
+            if c:
+                mats.append(int(c[3]) if c[3] is not None else 0)
+        out[tid] = {
+            "name": str(t[1]).strip(),
+            "star": int(t[2]) if t[2] is not None else 0,
+            "publish": int(t[3]) if t[3] is not None else 0,
+            "mats": mats,
+            # 起炼素材全是 10 面值基础卡 => 商店能直接买，可从零起步
+            "starter": bool(mats) and all(p == 10 for p in mats),
+            "flash": int(t[12]) == 9,
+        }
+    _theme_meta = out
+    return out
+
+
+def card_details(cids) -> dict[int, dict]:
+    """批量取卡的展示元数据：卡名 / 套卡 / 星级 / 面值 / 上架日期 / 起炼素材。"""
+    card_by_id = {int(c[0]): c for c in _load()["card_list"]}
+    tm = theme_meta()
+    out: dict[int, dict] = {}
+    for cid in cids:
+        c = card_by_id.get(cid)
+        if not c:
+            out[cid] = {"name": f"卡{cid}", "theme": "", "star": 0, "price": 0,
+                        "publish": 0, "mats": [], "starter": 0, "flash": 0}
+            continue
+        th = tm.get(int(c[1]), {})
+        out[cid] = {
+            "name": str(c[2]),
+            "theme": th.get("name", ""),
+            "star": int(th.get("star") or 0),
+            "price": int(c[3]) if c[3] is not None else 0,
+            "publish": int(th.get("publish") or 0),
+            "mats": th.get("mats", []),
+            "starter": 1 if th.get("starter") else 0,
+            "flash": 1 if th.get("flash") else 0,
+        }
+    return out
 
 
 def build_indexes():

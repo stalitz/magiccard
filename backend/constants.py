@@ -46,6 +46,19 @@ EP_ZCG          = "card_user_zcg"                # 种子罐/杂物柜
 EP_SHARE_INFO   = "card_user_share_info"         # 分享信息
 EP_SHARE_GET    = "card_user_share_get"          # 分享领奖
 
+# ---- 2026-09-14 新探明端点 ----
+EP_USER_LIST    = "card_user_list"               # **好友列表**（uin/nick/exp/vip）
+                                                 # 不是「全服」：固定返回 194 人＝登录者的 QQ 好友中
+                                                 # 玩过本游戏的人（含自己 + 若干 exp=0 的僵尸号），
+                                                 # 忽略分页参数、与请求者参数无关；可作换卡补充池
+EP_MINI_GET     = "card_mini_get"                # 集卡册进度：<Node theme_id num lv>，覆盖全库套卡
+EP_PROPS_INFO   = "card_market_props_info"       # 道具持有清单（2026-09-15 抓包发现）
+                                                 # 返回 <prop type="1" subtype="N" count="X">，
+                                                 # subtype 即道具卡 id（见 propCard_v_26.xml）
+                                                 # 主界面加载时必调，无参数即可
+# 注：EP_SPIRITE（精灵/猫咪探险）的 act 是"操作码"而非活动号：
+#   act=1 查询（可带 opuin）｜act=3 提交探险（section_id+ids+pass_id 必须齐全）｜act=4 收获宝箱
+
 
 def calc_gtk(skey: str) -> int:
     """腾讯 g_tk 标准算法（来自 mfkp base.js hash(skey)），十年未变。"""
