@@ -13,6 +13,9 @@ import json
 import re
 from pathlib import Path
 
+# 「商店能买到的套卡」判据只此一处（card_query.buyable_themes），避免规则漂移
+from .card_query import buyable_themes
+
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 _lib: dict | None = None
@@ -93,26 +96,36 @@ def theme_meta() -> dict[int, dict]:
 
 
 def card_details(cids) -> dict[int, dict]:
-    """批量取卡的展示元数据：卡名 / 套卡 / 星级 / 面值 / 上架日期 / 起炼素材。"""
+    """批量取卡的展示元数据：卡名 / 套卡 / 星级 / 面值 / 上架日期 / 起炼素材。
+
+    buyable=1 表示「这张卡能直接在商店买到」= 面值 10 且所属套未下架在售
+    （buyable_themes 口径：套内含 10 面额基础卡）。
+    """
     card_by_id = {int(c[0]): c for c in _load()["card_list"]}
     tm = theme_meta()
+    bt = buyable_themes()
     out: dict[int, dict] = {}
     for cid in cids:
         c = card_by_id.get(cid)
         if not c:
-            out[cid] = {"name": f"卡{cid}", "theme": "", "star": 0, "price": 0,
-                        "publish": 0, "mats": [], "starter": 0, "flash": 0}
+            out[cid] = {"name": f"卡{cid}", "theme": "", "theme_id": 0, "star": 0,
+                        "price": 0, "publish": 0, "mats": [], "starter": 0,
+                        "flash": 0, "buyable": 0}
             continue
-        th = tm.get(int(c[1]), {})
+        tid = int(c[1])
+        price = int(c[3]) if c[3] is not None else 0
+        th = tm.get(tid, {})
         out[cid] = {
             "name": str(c[2]),
             "theme": th.get("name", ""),
+            "theme_id": tid,
             "star": int(th.get("star") or 0),
-            "price": int(c[3]) if c[3] is not None else 0,
+            "price": price,
             "publish": int(th.get("publish") or 0),
             "mats": th.get("mats", []),
             "starter": 1 if th.get("starter") else 0,
             "flash": 1 if th.get("flash") else 0,
+            "buyable": 1 if (price == 10 and tid in bt) else 0,
         }
     return out
 
@@ -254,6 +267,7 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
     tm = theme_meta()
     theme = tm.get(theme_id, {})
     theme_name = theme.get("name") or f"套卡{theme_id}"
+    bt = buyable_themes()
 
     # 该套所有配方：target -> (mats, secs)
     recipes: dict[int, tuple] = {}
@@ -281,8 +295,10 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
         nm = str(mc[2]) if mc else f"卡{m}"
         pr = int(mc[3]) if mc else 0
         cnt = owned.get(m, 0)
+        # 缺料 + 面值 10 + 该套未下架在售 => 可从商店直接买来补齐
         return {"card_id": m, "name": nm, "price": pr,
-                "owned": cnt > 0, "count": cnt, "children": []}
+                "owned": cnt > 0, "count": cnt, "children": [],
+                "buyable": 1 if (pr == 10 and theme_id in bt and cnt == 0) else 0}
 
     def build_node(t: int, depth: int) -> dict:
         mats, secs = recipes[t]
@@ -310,6 +326,7 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
     return {
         "ok": True,
         "theme": {"id": theme_id, "name": theme_name},
+        "theme_buyable": theme_id in bt,
         "clicked_card_id": int(card_id),
         "free_stoves": free_stoves,
         "nodes": nodes,

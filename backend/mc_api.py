@@ -660,7 +660,8 @@ def parse_response(xml_text: str) -> dict:
     cards = [{k: c.get(k) for k in c.attrib} for c in root.iter("card")]
     return {
         "code": code,
-        "message": message or err_msg(code),
+        # code==0 表示成功，此时无 message 属正常，不能填「未知错误码 0」误导前端
+        "message": message or (err_msg(code) if code else ""),
         "cards": cards,
         "raw": xml_text,
     }

@@ -280,6 +280,7 @@ def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
     idx = indexes()
     q = (q or "").strip().lower()
     themes_by_id = {t["tid"]: t for t in idx["themes"]}
+    bt = buyable_themes()
     rows = []
     for c in idx["card_by_id"].values():
         cid = int(c[0])
@@ -314,6 +315,7 @@ def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
             "composable": th["composable"],
             "transferable": th["transferable"],
             "own": int(owned.get(cid, 0)) if owned else 0,
+            "theme_buyable": th["tid"] in bt,
             "refinable": row is not None,
             "recipe": ({
                 "mats": [cname(idx, int(m)) for m in row[3:6]],

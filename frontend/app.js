@@ -1395,11 +1395,20 @@ async function runCardQuery() {
           ${tags}
           <span class="own-badge">${c.own ? `持 ${c.own}` : "未持有"}</span>
           <span class="meta">${esc(c.theme_name)} ${stars(c.star)}</span>
-          <span class="v-badge">面值 ${c.price}</span></div>
+          <span class="v-badge">面值 ${c.price}</span>
+          ${(c.price == 10 && c.theme_buyable)
+            ? `<button class="mini-btn buy-btn" data-act="buy" data-cid="${c.id}" data-tid="${c.theme_id}">买</button>`
+            : ""}</div>
         ${rec}</div>`;
     }).join("");
     $("lib-list").querySelectorAll(".it").forEach((el) => {
       el.onclick = () => openTheme(el.dataset.tid, el.dataset.cid);
+      el.querySelectorAll('.mini-btn[data-act="buy"]').forEach((b) => {
+        b.onclick = (ev) => {
+          ev.stopPropagation();
+          doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);
+        };
+      });
     });
   } catch (e) {
     $("lib-list").innerHTML = `<div class="empty-tip err">查询失败：${esc(e.message || e)}</div>`;
@@ -1812,11 +1821,16 @@ function cbCardHtml(c, boxType) {
   const style = theme
     ? ` style="border-left:4px solid hsl(${themeHue(theme)},55%,55%);background:hsl(${themeHue(theme)},72%,97%)"`
     : "";
+  // 面值 10 且所属套未下架在售 => 商店能买到，给个「买」按钮直接下单
+  const buyBtn = c.buyable
+    ? `<button class="btn sm buy" data-act="buy" data-id="${c.id}" data-tid="${c.theme_id || 0}">买</button>`
+    : "";
   return `<div class="cb-card" data-cid="${c.id}"${style}>
     <div class="cbn" title="${esc(c.name || "")}">${esc(c.name || ("卡#" + c.id))}</div>
     <div class="cbm"><span>面值 ${c.price ?? 0}</span>${theme ? `<span>${esc(theme)}</span>` : ""}${c.star ? `<span>${c.star}★</span>` : ""}</div>
     <div class="cb-route">点击查看合成路径 ▸</div>
     <div class="cbacts">
+      ${buyBtn}
       ${sellBtn}
       <button class="btn sm ghost" data-act="move" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}">${toName}</button>
     </div>
@@ -1856,6 +1870,15 @@ async function onCbAction(e) {
   const id = Number(b.dataset.id);
   b.disabled = true;
   try {
+    if (act === "buy") {
+      // 从商店再买一张同款（面值 10 且未下架在售的基础卡），直接扣金币
+      const tid = Number(b.dataset.tid || 0);
+      const d = await (await fetch(`/api/card/buy?card_id=${id}&theme_id=${tid}`, { method: "POST" })).json();
+      log(`买卡「${b.closest(".cb-card").querySelector(".cbn").textContent}」：${d.ok ? (d.message || "已购买") : "失败 " + (d.message || d.code)}`,
+          d.ok ? "ok" : "err");
+      await loadCardBox();
+      return;
+    }
     if (act === "sell") {
       const price = Number(b.dataset.price || 0);
       if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {
@@ -1892,12 +1915,15 @@ function fmtSynSecs(s) {
   return `${m}分`;
 }
 
-function synMatHtml(m) {
+function synMatHtml(m, tid) {
   let h = `<div class="syn-mat${m.owned ? " has" : " miss"}">
     <span class="dot"></span>${esc(m.name)} <span class="mp">${m.price || 0}面额</span>
     <span class="cnt">${m.owned ? "×" + m.count : "缺"}</span>`;
+  if (m.buyable) {
+    h += `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${tid}" title="这张是未下架在售的 10 面额卡，可直接从商店买一张补齐">买</button>`;
+  }
   if (m.children && m.children.length) {
-    h += `<div class="syn-children">${m.children.map((c) => synMatHtml(c)).join("")}</div>`;
+    h += `<div class="syn-children">${m.children.map((c) => synMatHtml(c, tid)).join("")}</div>`;
   }
   h += `</div>`;
   return h;
@@ -1934,7 +1960,7 @@ async function openSynth(cardId) {
                   : `<button class="btn sm primary syn-refine" data-tid="${n.card_id}" disabled title="当前炉位已满（自动炼卡占满主炉），腾出空炉后即可炼">炉满</button>`)
               : ""}
           </div>
-          <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2)).join("")}</div>
+          <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2, th.id)).join("")}</div>
         </div>`;
       }
     }
@@ -1943,6 +1969,17 @@ async function openSynth(cardId) {
       b.onclick = async (ev) => {
         ev.stopPropagation();
         await doRefine(Number(b.dataset.tid), b);
+      };
+    });
+    // 缺料且可买的 10 面额下级卡：直接买一张补齐，然后重开弹窗刷新持有状态
+    $("synth-body").querySelectorAll(".syn-buy").forEach((b) => {
+      b.onclick = async (ev) => {
+        ev.stopPropagation();
+        const ok = await doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);
+        if (ok) {
+          await loadCardBox();
+          await openSynth(cardId);
+        }
       };
     });
   } catch (e) {
@@ -1984,15 +2021,18 @@ async function doBuy(cardId, themeId, btn) {
       log(`买卡 ${cardId}（套${themeId}）：成功`, "ok");
       // 刷新卡库持有数
       if (libState.curThemeTid) openTheme(libState.curThemeTid);
+      return true;
     } else {
       log(`买卡 ${cardId}（套${themeId}）失败：${d.message || d.code || "未知错误"}`, "err");
       btn.disabled = false;
       btn.textContent = old;
+      return false;
     }
   } catch (e) {
     log("买卡异常：" + e, "err");
     btn.disabled = false;
     btn.textContent = old;
+    return false;
   }
 }
 
