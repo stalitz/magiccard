@@ -382,6 +382,9 @@ class AutoRefine:
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
+        # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
+        # 仅当它被失败缓存或炉上挂着我未取回的卡时才退回「从最后往回扫」。
+        self.preferred_steal_friend: str | None = None
         # 套间共享的素材保护：任一套的套内卡都要保底留 1 张
         self._keep: dict[int, int] = {}
         for p in self.plans.values():
@@ -744,6 +747,11 @@ class AutoRefine:
         now = time.time()
         busy = {str(c.get("opuin")) for c in st.get("stove", [])
                 if c.get("opuin") and str(c.get("opuin")) != str(self.s.uin)}
+        # 优先用「常去好友」：未被失败缓存、且其炉上没挂着我未取回的卡
+        pref = self.preferred_steal_friend
+        if pref and pref not in busy and self._friend_fail.get(pref, 0) <= now:
+            return pref
+        # 否则从最后一名好友往回找
         window = friends[-self.steal_search_depth:]
         window.reverse()                      # 从最后往回
         chosen = None
@@ -932,6 +940,7 @@ class AutoRefine:
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,
                 "steal": {"enabled": self.steal_enabled,
+                           "preferred": self.preferred_steal_friend,
                            "last_steal": self.last_steal,
                            "cooldown_until": self._steal_cooldown_until},
                 "log": self.log[-30:]}
