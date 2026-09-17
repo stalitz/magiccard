@@ -53,6 +53,35 @@
   .btn.primary{background:var(--qq-blue);color:#fff}
   .btn.primary:hover{background:var(--qq-blue-d)}
   .btn:disabled{opacity:.5;cursor:default}
+  .btn.danger{background:#e74c3c;color:#fff}
+  .btn.danger:hover{background:#c0392b}
+  .btn.ok{background:var(--ok);color:#fff}
+  .btn.ok:hover{background:#157a48}
+  .sel{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13.5px;
+    background:#fff;color:var(--text);outline:none;max-width:340px}
+  .num-in{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13.5px;
+    width:90px;outline:none}
+  .auto-log{font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;background:#f6f8fb;
+    border:1px solid var(--line);border-radius:8px;padding:8px 10px;color:#3a4757;
+    white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;margin-top:10px}
+  .auto-log .aok{color:#146b3a}.auto-log .aerr{color:#c0392b}.auto-log .at{color:#9aa5b5}
+  /* 套卡队列（多套并行） */
+  .q-wrap{margin-top:10px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .q-head{background:var(--chip-bg);padding:7px 10px;font-size:12.5px;font-weight:600;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .q-table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .q-table th{background:#fafbfd;color:var(--muted);font-weight:600;text-align:left;
+    padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  .q-table td{padding:6px 10px;border-bottom:1px solid #f1f3f7}
+  .q-table tr:last-child td{border-bottom:0}
+  .q-table .num{text-align:right;font-variant-numeric:tabular-nums}
+  .q-table .q-i{color:var(--muted);width:28px}
+  .q-table tr.q-act{background:#f0f9ff}
+  .q-table tr.q-act .q-i{color:var(--qq-blue-d);font-weight:700}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .dot.run{background:#2ecc71;box-shadow:0 0 0 3px rgba(46,204,113,.18);animation:pulse 1.2s infinite}
+  .dot.idle{background:#b8c0cc}
+  @keyframes pulse{50%{opacity:.45}}
   .btn.sm{padding:5px 12px;font-size:13px}
   .btn.block{width:100%;margin-top:8px}
   .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--muted)}
@@ -89,10 +118,23 @@
   .slot-list{margin-top:4px;display:flex;flex-wrap:wrap;gap:8px}
   .slot{display:inline-block;padding:5px 10px;border-radius:6px;background:#edf2f9;
     font-size:12.5px;color:var(--text);white-space:nowrap}
-  .slot .sname{color:var(--muted);margin-right:6px}
+  .slot .sname{color:var(--muted);margin-left:6px}
+  .slot b{font-weight:600}
+  .slot .smeta{display:block;margin-top:2px;font-size:11px;color:var(--muted)}
+  .slot.done .smeta{color:#3d7a55}
+  .slot.busy .smeta{color:#a1743a}
   .slot.done{background:#e5f8ec;color:#146b3a;border:1px solid #bdebd0}
   .slot.busy{background:#fdf3e2;color:#9a5b00;border:1px solid #f3ddb4}
+  .slot.friend{background:#f0ebfb;color:#6b3fa0;border:1px solid #d9c9f0}
   .slot.empty{background:#f2f4f7;color:#8a93a3;border:1px dashed #d5dae3}
+  .slot{position:relative}
+  .snote{display:block;margin-top:5px;font-size:11px;color:#7a5bb0;font-style:italic}
+  .sact{display:block;margin-top:5px;padding:2px 8px;font-size:11px;cursor:pointer;
+        border-radius:4px;border:1px solid #c3ccd9;background:#fff;color:#42506b}
+  .sact:hover{background:#eef3fb}
+  .sact.danger{border-color:#e0b4b4;color:#b23c3c}
+  .sact.danger:hover{background:#fdeeee}
+  .sact:disabled{opacity:.5;cursor:not-allowed}
   .err{color:var(--err)}
   .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}
 
@@ -128,6 +170,10 @@
     font-size:12.5px;color:var(--muted);cursor:pointer}
   .chip.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
   .chip.on{background:#eaf6fd;border-color:var(--qq-blue);color:var(--qq-blue-d)}
+  /* .lib 是 flex column，子项默认 flex-shrink:1 会被压扁。
+     换卡页的候选行内容一多就被压缩（实测 46 张卡时候选区只剩 44px，只能滚一行半），
+     显式禁止收缩，滚动交给各自的 max-height / overflow。 */
+  #ex-theme-picked,#ex-theme-cands,#ex-card-wrap,#ex-card-cands{flex:0 0 auto}
   .lib-body{flex:1 1 auto;min-height:0;display:grid;
     grid-template-columns:minmax(0,44fr) minmax(0,56fr);gap:14px}
   .lpanel{background:var(--panel);border-radius:12px;box-shadow:0 2px 10px rgba(20,40,80,.06);
@@ -138,6 +184,10 @@
   .lpanel .lp-head .cnt{font-size:12px;color:var(--muted)}
   .lpanel .lp-head .spacer{flex:1}
   .lst{flex:1 1 auto;overflow-y:auto;padding:6px}
+  /* #ex-body 是 display:flex(column) 的滚动区，子项默认 flex-shrink:1 会被压缩：
+     2026-09-11 新增「付出卡/加载我的卡」列表后，#ex-autoex 内容涨到 385px 却被压成 9px，
+     .cb-box 的 overflow:hidden 把整块裁掉 → 用户报「加载我的卡被挡住了」。 */
+  #ex-body > *{flex-shrink:0}
   .it{padding:8px 10px;border-radius:8px;cursor:pointer;border:1px solid transparent}
   .it:hover{background:#f3f8fc}
   .it.sel{background:#eaf6fd;border-color:var(--qq-blue)}
@@ -149,8 +199,22 @@
   .tag{font-size:11px;padding:1px 6px;border-radius:4px;background:#f0eefc;color:#6b5bd1}
   .tag.flash{background:linear-gradient(90deg,#d8f3ff,#dff0ff);color:#0a7ac2}
   .tag.off{background:#fdeeee;color:#c0392b}
+  /* 标签配色按「语义维度」分配色相，保证同一行并排时能一眼区分：
+     绿=发售状态 / 靛蓝=炼制能力 / 琥珀橙=变卡能力 / 紫=独立卡册 / 红=下架 / 灰=无此项。
+     此前 .refinable（可炼）与 .on（发行）是同一个绿值，.trans（可变）也偏青绿，
+     三者于套卡列表同一行相邻显示时几乎无法分辨（2026-09-10 用户反馈后重做）。*/
+  .tag.refinable{background:#e9edfd;color:#2f44c4;border:1px solid #c3cdf7}
   .tag.base{background:#f0f2f5;color:#7a8699}
-  .tag.refinable{background:#e5f8ec;color:#146b3a}
+  .tag.on{background:#e5f8ec;color:#146b3a;border:1px solid #b7e6c8}
+  .tag.limited{background:#fff3e0;color:#c77700}
+  .tag.mod{background:#f3ecff;color:#6b3fa0;border:1px solid #dcc9f5}
+  .tag.comp{background:#e9edfd;color:#2f44c4;border:1px solid #c3cdf7}
+  .tag.nocomp{background:#f5f5f5;color:#9e9e9e}
+  .tag.trans{background:#fff2df;color:#a1580a;border:1px solid #f0c987}
+  .tag.notrans{background:#f6f7f9;color:#8a939e;border:1px dashed #d3d9df}
+  .lib-group{margin:6px 0 14px}
+  .lib-group-title{display:flex;align-items:center;gap:8px;margin:10px 2px 6px;padding-bottom:5px;border-bottom:2px solid var(--line)}
+  .lib-group-title .meta{font-size:12px;color:var(--muted)}
   .v-badge{font-weight:700;font-size:12.5px;color:#1a9c5a;background:#e5f8ec;border-radius:6px;padding:1px 7px}
   .own-badge{font-size:12px;color:var(--qq-blue-d);font-weight:600}
   .empty-tip{color:var(--muted);text-align:center;padding:48px 20px;font-size:13px;line-height:2}
@@ -193,12 +257,62 @@
   .ex-log{font:12px/1.6 ui-monospace,Menlo,monospace;background:#f6f8fb;border:1px solid var(--line);
     border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap;max-height:180px;overflow-y:auto}
 
+  /* 卡箱页 */
+  .cb-box{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .cb-head{padding:9px 14px;background:#f4f8fc;font-weight:600;font-size:13.5px;color:var(--text);
+    border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .cb-cap{font-weight:400;font-size:12px;color:var(--muted)}
+  .cb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(152px,1fr));gap:8px;padding:6px 10px 12px}
+  .cb-scroll{display:grid;grid-template-columns:repeat(auto-fill,minmax(152px,1fr));
+    gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}
+  /* 整页（卡箱面板）滚动，而非每个卡箱各自内部滚动 */
+  #pane-cardbox{overflow-y:auto}
+  #pane-cardbox .lib{flex:0 0 auto}
+  .cb-group-h{display:flex;align-items:center;gap:8px;padding:10px 10px 4px;margin-top:4px;
+    font-size:12.5px;font-weight:600;color:var(--text);border-bottom:1px solid var(--line)}
+  .cb-group-h:first-child{margin-top:0}
+  .cb-gn{font-size:11px;font-weight:500;color:var(--muted);background:#fff;
+    border:1px solid var(--line);border-radius:10px;padding:0 7px;margin-left:auto}
+  .cb-card{border:1px solid var(--line);border-radius:8px;padding:8px 9px;background:#fff;
+    display:flex;flex-direction:column;gap:5px}
+  .cb-card .cbn{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .cb-card .cbm{font-size:11px;color:var(--muted);display:flex;gap:6px;flex-wrap:wrap}
+  .cb-card .cbacts{display:flex;gap:5px;margin-top:2px}
+  .cb-card .cbacts button{flex:1;font-size:11.5px;padding:3px 0}
+  .cb-empty{padding:14px;color:var(--muted);font-size:12.5px}
+
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
     .console{max-width:none;min-width:0;height:260px}
     .lib-body{grid-template-columns:minmax(0,1fr);overflow-y:auto}
     .lpanel{min-height:320px}
   }
+  /* ===== 付出卡分组列表（加载我的卡）===== */
+  .pay-group{margin:12px 0 6px;padding:0}
+  .pay-group-h{display:flex;align-items:center;gap:8px;padding:4px 8px;margin-bottom:4px;
+    font-size:12.5px;font-weight:600;color:var(--text);background:#eef6fc;
+    border-left:3px solid var(--qq-blue);border-radius:0 6px 6px 0}
+  .pay-gn{font-size:11px;font-weight:500;color:var(--muted);background:#fff;
+    border:1px solid var(--line);border-radius:10px;padding:0 7px;margin-left:auto}
+  .pay-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));
+    gap:6px 10px;padding:0 2px 2px}
+  .pay-it{display:flex;align-items:center;gap:9px;font-size:13px;line-height:1.4;
+    padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;
+    min-width:0}
+  /* 灵宠探险：三套玩法状态一次全显示（切换 tab 只换高亮，不再请求接口） */
+  .sp-all{display:flex;flex-direction:column;gap:4px;margin:0 0 10px}
+  .sp-all-row{display:flex;align-items:baseline;gap:10px;padding:7px 11px;border:1px solid var(--line);
+    border-left:3px solid transparent;border-radius:8px;background:#fafbfd;cursor:pointer;font-size:12.5px}
+  .sp-all-row:hover{background:#f3f8fc}
+  .sp-all-row.on{border-left-color:#2f7cf6;background:#f2f7ff}
+  .sp-all-row .n{flex:0 0 62px;font-weight:600}
+  .sp-all-row .v{flex:0 0 auto}
+  .sp-all-row .x{flex:1 1 auto;color:var(--muted);font-size:12px}
+  .pay-it:hover{background:#f3f8fc}
+  .pay-it input[type=checkbox]{margin:0;flex:0 0 auto;width:14px;height:14px}
+  .pay-nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .pay-meta{flex:0 0 auto;color:var(--muted);font-size:12px;white-space:nowrap;margin-left:10px}
 </style>
 </head>
 <body>
@@ -238,7 +352,11 @@
         <div class="subnav">
           <button class="btn sm ghost active" data-pane="overview">总览</button>
           <button class="btn sm ghost" data-pane="lib">卡库查询</button>
+          <button class="btn sm ghost" data-pane="cardbox">卡箱</button>
+          <button class="btn sm ghost" data-pane="auto">自动炼卡</button>
           <button class="btn sm ghost" data-pane="exchange">换卡</button>
+          <button class="btn sm ghost" data-pane="lottery">抽奖/翻牌</button>
+          <button class="btn sm ghost" data-pane="spirite">灵宠探险</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
         <span class="spacer"></span>
@@ -257,13 +375,17 @@
             <div id="state-box" class="state-box">
               <span class="spinner"></span>正在读取游戏数据…
             </div>
+            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
+              <h3 style="margin-bottom:10px">炼卡道具</h3>
+              <div id="ov-props" style="display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px"></div>
+            </div>
             <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
               <button id="probe-btn" class="btn sm">探测接口（调试）</button>
             </div>
           </div>
           <div class="console">
             <div class="log-title">操作日志</div>
-            <div id="log"></div>
+            <div id="log" data-op-log></div>
           </div>
         </div>
       </div>
@@ -282,6 +404,13 @@
             <label class="check hidden" id="lib-own-wrap"><input type="checkbox" id="lib-own"> 只看我持有的</label>
             <div class="sep hidden" id="lib-sep1"></div>
             <div class="chiprow" id="lib-pricechips"></div>
+            <div class="chiprow hidden" id="lib-modfilter">
+              <span class="chip active" data-m="main">普通卡</span>
+              <span class="chip" data-m="挖地">挖地</span>
+              <span class="chip" data-m="猫咪旅行">猫咪旅行</span>
+              <span class="chip" data-m="猫咪探险·西游记">西游记</span>
+              <span class="chip" data-m="猫咪探险·三国战役">三国战役</span>
+            </div>
             <div class="chiprow hidden" id="lib-themefilter">
               <span class="chip" data-s="0">全部星级</span>
               <span class="chip" data-s="1">★1</span>
@@ -316,6 +445,41 @@
         </div>
       </div>
 
+      <!-- 子页：自动炼卡 -->
+      <div id="pane-auto" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px">
+            <span style="font-weight:600;font-size:13.5px">自动炼卡：</span>
+            <select id="auto-theme" class="sel" title="正收益可刷套卡；也可在右侧直接输入套卡 ID"></select>
+            <input type="text" id="auto-tid" class="num-in" placeholder="或输入套卡ID" title="任意发行套卡 ID（backend/card_query.py 可查）">
+            <label class="check" title="底卡（面值10）用金币从商店买，20金/张"><input type="checkbox" id="auto-buy" checked> 买底卡</label>
+            <input type="text" id="auto-rounds" class="num-in" value="0"
+                   title="**每套**集齐次数上限，0=不限（队列里每一套各自计数）">
+            <button id="auto-start" class="btn sm ok">启动</button>
+            <button id="auto-stop" class="btn sm danger hidden">停止</button>
+            <span class="sep"></span>
+            <input type="text" id="auto-queue-tid" class="num-in" placeholder="套卡ID"
+                   title="运行中追加：炼长时限卡时炉位空着，可以同时推进下一套（空间允许就并行）">
+            <button id="auto-queue-add" class="btn sm">追加队列</button>
+            <span class="spacer" style="flex:1"></span>
+            <button id="auto-req-refresh" class="btn sm">刷新空位</button>
+          </div>
+
+          <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
+            <div class="lpanel">
+              <div class="lp-head">
+                <span class="t" id="auto-title">运行状态</span>
+                <span class="cnt" id="auto-state-cnt"></span>
+                <div class="spacer"></div>
+              </div>
+              <div class="lst" style="padding:12px 16px" id="auto-body">
+                <div class="empty-tip">正在加载可刷套卡…</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 子页：换卡（手动） -->
       <div id="pane-exchange" class="pane hidden">
         <div class="lib">
@@ -328,10 +492,34 @@
             <span style="color:var(--muted);font-size:12px">面值</span>
             <input type="text" id="ex-price" class="num" placeholder="全部" style="width:70px">
             <span class="spacer" style="flex:1"></span>
+            <span style="color:var(--muted);font-size:12px">扫到</span>
+            <input type="text" id="ex-stop" class="num" placeholder="0" style="width:52px"
+                   title="累计找到这么多个「可换目标」就提前停止扫描，不用把 100 人全扫完；0 或留空 = 全部扫完">
+            <span style="color:var(--muted);font-size:12px">个可换即停</span>
+            <label class="check" style="font-size:12px;white-space:nowrap"
+                   title="默认开启。并入你的好友名单（card_user_list，约 194 人＝QQ 好友里玩过本游戏的人，含你的小号）。它与按套找出的卡友池零重叠，能补上「没在玩该套、但换卡箱里恰好放着目标卡」的人。扫描人数变多，耗时略增。">
+              <input type="checkbox" id="ex-all-players" checked>好友池
+            </label>
             <button id="ex-peers-btn" class="btn sm">找该套卡友</button>
             <button id="ex-scan-btn" class="btn sm primary">扫描卡友换卡箱</button>
           </div>
+          <!-- 已选目标套（可多选）：在炼某套卡的卡友，换卡箱里也会有别的套的卡，
+               多选后一次性把这些套的卡都捞出来。点 chip 上的 × 可移除。 -->
+          <div class="chiprow hidden" id="ex-theme-picked" style="padding:2px 4px;gap:6px">
+            <span style="color:var(--muted);font-size:12.5px">已选目标套</span>
+          </div>
           <div class="chiprow hidden" id="ex-theme-cands" style="padding:0 4px"></div>
+
+          <!-- 指定卡（可多选）：只列出换卡箱里正放着这些卡的人。
+               腾讯没有「按卡搜人」接口，筛选池仍是「正在玩该套的玩家」。 -->
+          <div class="chiprow hidden" id="ex-card-wrap" style="padding:2px 4px;gap:6px">
+            <span style="color:var(--muted);font-size:12.5px">指定卡</span>
+            <input type="text" id="ex-card-kw" placeholder="过滤卡名…" style="width:170px">
+            <span id="ex-card-sel" style="font-size:12.5px;color:var(--muted)">未指定：该套全部卡都算命中</span>
+            <button id="ex-card-clear" class="btn sm ghost">清空指定</button>
+          </div>
+          <div class="chiprow hidden" id="ex-card-cands"
+               style="padding:0 4px;max-height:132px;overflow-y:auto;border-radius:8px"></div>
 
           <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
             <!-- 操作区 -->
@@ -347,8 +535,168 @@
                   ② 点「找该套卡友」→ 从服务器拉取正在玩该套的玩家，也可在下方补充自己的卡友 QQ。<br>
                   ③ 点「扫描卡友换卡箱」→ 列出谁换卡箱里有该套的卡、卡是否上锁、以及你能否付出对方想要的同面值卡。<br>
                   ④ 选中「我付出的卡」点「交换」完成一次换卡。</div>
+                <div class="cb-box" id="ex-autoex" style="margin-bottom:10px">
+                  <div class="cb-head">自动换卡 <span class="cb-cap" id="ex-autoex-state">未运行</span></div>
+                  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 2px;font-size:12.5px">
+                    <span>目标套：<b id="ex-autoex-tid">未选（用上方搜套）</b></span>
+                    <span>面值</span><input type="text" id="ex-autoex-price" class="num" placeholder="全部" style="width:62px">
+                    <span>每张</span><input type="text" id="ex-autoex-want" class="num" value="1" style="width:44px">
+                    <span>张，最多查</span><input type="text" id="ex-autoex-max" class="num" value="0" style="width:52px" title="0=不限">
+                    <span>位卡友</span>
+                    <label class="check" title="模拟运行只报告会换什么，不真发换卡请求"><input type="checkbox" id="ex-autoex-dry" checked> 模拟</label>
+                    <button id="ex-autoex-start" class="btn sm primary">启动</button>
+                    <button id="ex-autoex-stop" class="btn sm ghost" disabled>停止</button>
+                  </div>
+                  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 2px 4px;font-size:12.5px">
+                    <span>付出卡（可选）：</span>
+                    <button id="ex-pay-load" class="btn sm ghost">加载我的卡</button>
+                    <span style="color:var(--muted)">面值</span>
+                    <input type="text" id="ex-pay-price" class="num" placeholder="全部" style="width:66px"
+                           title="留空 = 显示我的全部卡；填面值 = 只看该面值">
+                    <button id="ex-pay-all" class="btn sm ghost hidden">显示全部</button>
+                    <span style="color:var(--muted)">勾选 = 只用这些卡去换，且可全部换完；不勾 = 自动挑多余的卡（每种至少留 1 张）</span>
+                  </div>
+                  <div id="ex-pay-sum" style="padding:0 2px 4px;font-size:12px;color:var(--muted)"></div>
+                  <div id="ex-pay-list" style="padding:6px 8px;font-size:13px;max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted)">点「加载我的卡」查看可付出的卡（换卡箱 + 保险箱）</div>
+                  <div id="ex-autoex-need" style="padding:2px 2px 6px;font-size:12.5px;color:var(--muted)"></div>
+                  <div id="ex-autoex-logs" style="font:12px/1.6 ui-monospace,Menlo,monospace;max-height:170px;overflow-y:auto;background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap"></div>
+                </div>
                 <div id="ex-friends-wrap" class="hidden"></div>
                 <div id="ex-auto-wrap" class="hidden"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 子页：卡箱 -->
+      <div id="pane-cardbox" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px">
+            <button id="cb-refresh" class="btn sm">刷新卡箱</button>
+            <span id="cb-hint" class="muted" style="font-size:12px"></span>
+          </div>
+          <div class="cb-box">
+            <div class="cb-head">换卡箱 <span id="cb-change-cap" class="cb-cap"></span></div>
+            <div id="cb-change" class="cb-scroll"></div>
+          </div>
+          <div class="cb-box">
+            <div class="cb-head">保险箱 <span id="cb-store-cap" class="cb-cap"></span></div>
+            <div id="cb-store" class="cb-scroll"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 子页：抽奖/翻牌 -->
+      <div id="pane-lottery" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px">
+            <span style="font-weight:600;font-size:13.5px">随机抽卡：</span>
+            <span id="lot-randchance" class="stat-chip" style="padding:6px 10px">
+              <span class="k">剩余机会</span>
+              <span class="v">-</span>
+            </span>
+            <button id="lot-draw-all" class="btn sm ok">一键抽卡 + 自动卖10面额</button>
+            <span class="spacer" style="flex:1"></span>
+            <span style="font-weight:600;font-size:13.5px">翻牌：</span>
+            <button id="lot-pai-once" class="btn sm primary">手动翻一次牌</button>
+          </div>
+          <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
+            <div class="lpanel">
+              <div class="lp-head">
+                <span class="t">结果/日志</span>
+                <span class="cnt" id="lot-cnt"></span>
+                <div class="spacer"></div>
+                <button id="lot-clear" class="btn sm ghost">清空</button>
+              </div>
+              <div class="lst" style="padding:12px 16px" id="lot-body">
+                <div class="empty-tip">随机抽卡机会会随时间累积（最高16次），点「一键抽卡」抽完并自动卖掉10面额卡。<br>
+                  每次从自己炉位取卡会获得1次翻牌机会，自动炼卡已默认取卡后立即翻牌。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="pane-spirite" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:13.5px">灵宠探险：</span>
+            <span class="stat-chip" style="padding:6px 10px"><span class="k">免费次数</span><span class="v" id="sp-free">-</span></span>
+            <span class="stat-chip" style="padding:6px 10px"><span class="k">体力</span><span class="v" id="sp-power">-</span></span>
+            <span class="stat-chip" style="padding:6px 10px"><span class="k" id="sp-cur-k">当前探险</span><span class="v" id="sp-cur">-</span></span>
+            <span class="stat-chip" style="padding:6px 10px"><span class="k">累计收获</span><span class="v" id="sp-harv">0</span></span>
+            <button id="sp-refresh" class="btn sm ghost">刷新状态</button>
+            <button id="sp-once" class="btn sm primary" style="display:none" title="穿越丛林：花 1 次历练，即时到账">单次历练</button>
+            <button id="sp-harvest" class="btn sm ok" disabled>手动收</button>
+            <span class="spacer" style="flex:1"></span>
+            <button id="sp-start" class="btn sm ok">开始自动探险</button>
+            <button id="sp-stop" class="btn sm ghost" disabled>停止</button>
+          </div>
+          <!-- 三套玩法的状态**一次全部显示**（同一份 act=1 就含全部玩法状态）：
+               切换 tab 只换高亮与下拉，不再请求接口。 -->
+          <div id="sp-all" class="sp-all"></div>
+          <div class="lib-body" style="grid-template-columns:300px minmax(0,1fr)">
+            <div class="lpanel">
+              <div class="lp-head"><span class="t">设置</span></div>
+              <div class="lst" style="padding:12px 14px;display:flex;flex-direction:column;gap:11px;font-size:12.5px">
+                <div style="display:flex;gap:5px">
+                  <button class="btn sm primary sp-tab" data-mode="map" style="flex:1;padding:4px 2px">大地图</button>
+                  <button class="btn sm ghost sp-tab" data-mode="island" style="flex:1;padding:4px 2px">荒岛</button>
+                  <button class="btn sm ghost sp-tab" data-mode="across" style="flex:1;padding:4px 2px">穿越丛林</button>
+                </div>
+                <label style="display:flex;align-items:center;gap:8px">
+                  <span id="sp-lab1" style="color:var(--muted);width:62px;flex:0 0 auto">大地图</span>
+                  <select id="sp-map" style="flex:1;min-width:0;font-size:12px;padding:4px 6px"></select>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px">
+                  <span id="sp-lab2" style="color:var(--muted);width:62px;flex:0 0 auto">小关</span>
+                  <select id="sp-pass" style="flex:1;min-width:0;font-size:12px;padding:4px 6px"></select>
+                </label>
+                <div id="sp-stage-info" style="color:var(--muted);font-size:11.5px;line-height:1.5;border:1px dashed var(--line);border-radius:6px;padding:6px 8px"></div>
+                <label style="display:flex;align-items:center;gap:8px">
+                  <span style="color:var(--muted);width:62px;flex:0 0 auto">最短等待</span>
+                  <input id="sp-minwait" type="number" value="300" min="60" step="30" style="flex:1;padding:4px 6px">
+                  <span style="color:var(--muted)">秒</span>
+                </label>
+                <label style="display:flex;align-items:center;gap:8px">
+                  <span style="color:var(--muted);width:62px;flex:0 0 auto">轮询间隔</span>
+                  <input id="sp-interval" type="number" value="30" min="10" style="flex:1;padding:4px 6px">
+                  <span style="color:var(--muted)">秒</span>
+                </label>
+                <label class="check"><input type="checkbox" id="sp-autodispatch" checked> 收到后自动派下一只</label>
+                <label class="check"><input type="checkbox" id="sp-dryrun"> 模拟运行（不真发出发请求）</label>
+                <div style="border-top:1px dashed var(--line);padding-top:9px">
+                  <div style="color:var(--muted);margin-bottom:6px">
+                    指定灵宠（<b>当前按最多 2 只</b>；不勾选=自动轮换）
+                  </div>
+                  <div id="sp-spirites" style="display:flex;flex-direction:column;gap:6px"></div>
+                </div>
+                <div style="border-top:1px dashed var(--line);padding-top:9px">
+                  <div style="color:var(--muted);margin-bottom:6px">
+                    灵宠道具（探险奖励：碎片 · 银锭 · 百变丹 · 金钥匙 · 藏宝图）
+                  </div>
+                  <div id="sp-wallet" style="display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px"></div>
+                </div>
+              </div>
+            </div>
+            <div class="lpanel">
+              <div class="lp-head">
+                <span class="t">本次运行日志</span>
+                <div class="spacer"></div>
+                <button id="sp-clearlog" class="btn sm ghost">清空</button>
+              </div>
+              <div class="lst" id="sp-log" style="padding:10px 14px;max-height:230px;overflow:auto">
+                <div class="empty-tip">点「刷新状态」查看灵宠与探险进度；点「开始自动探险」开始循环。</div>
+              </div>
+            </div>
+            <div class="lpanel">
+              <div class="lp-head">
+                <span class="t">操作日志（全局）</span>
+                <div class="spacer"></div>
+                <button id="sp-clearglob" class="btn sm ghost">清空全局</button>
+              </div>
+              <div class="lst" id="sp-globallog" data-op-log style="padding:10px 14px;max-height:230px;overflow:auto">
+                <div class="empty-tip">无记录。</div>
               </div>
             </div>
           </div>
@@ -357,6 +705,6 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260907b"></script>
+<script src="/app.js?v=20260917a"></script>
 </body>
 </html>
