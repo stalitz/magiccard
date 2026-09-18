@@ -31,6 +31,7 @@ from . import prop_dict as pd
 from . import spirite_maps as spm
 from . import spirite_progress as spg
 from .auto_refine import AutoRefine, parse_full
+from . import daily
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_XIYOU, EP_WORLD_SANGUO)
@@ -1099,6 +1100,21 @@ async def players():
                 "total": len(rows), "players": rows}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"查询异常：{e}"}
+
+@app.post("/api/daily/run")
+async def daily_run(body: dict | None = None):
+    """一键日常：跑 daily.ACTIONS 里**已实证**的每日领取动作。
+
+    body 可选 {"keys": ["gift"]} 只跑指定项；不传 = 全跑。
+    ⚠️ 只有 daily.py 里写明实证依据的动作才会执行 —— 需要抓包确认的（签到 /
+    连续登录领奖 / 猫咪旅行等）宁缺勿滥，不在这里凭猜测补。
+    """
+    if err := _require_login():
+        return err
+    keys = (body or {}).get("keys") or None
+    items = await daily.run(_session, keys)
+    return {"ok": bool(items) and all(i["ok"] for i in items), "items": items}
+
 
 @app.get("/api/world/status")
 async def world_status(w: str = "xiyou"):

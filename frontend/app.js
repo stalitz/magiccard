@@ -2210,6 +2210,29 @@ function initLotteryOnce() {
   lotInitDone = true;
   $("lot-draw-all").onclick = lotDrawAll;
   $("lot-pai-once").onclick = lotPaiOnce;
+  $("daily-run").onclick = dailyRun;
+}
+
+// 一键日常：只跑后端 daily.ACTIONS 里「已实证」的动作，结果逐条进全局日志
+async function dailyRun() {
+  const btn = $("daily-run"), last = $("daily-last");
+  btn.disabled = true;
+  const old = btn.textContent; btn.textContent = "领取中…";
+  try {
+    const d = await (await fetch("/api/daily/run", { method: "POST" })).json();
+    if (!d.items) { log("一键日常失败：" + (d.message || "未知原因"), "err"); return; }
+    let got = false;
+    for (const it of d.items) {
+      log(`一键日常 · ${it.name}：${it.text}`, it.ok ? "ok" : "err");
+      if (it.ok && it.code === 0) got = true;
+    }
+    if (last) last.textContent = d.items.map(i => `${i.name}：${i.text}`).join("；");
+    if (got) loadState();   // 金币变了，重读一次
+  } catch (e) {
+    log("一键日常异常：" + e, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = old;
+  }
 }
 
 // 就地刷新总览「随机抽卡」那个 chip（不重绘整块 state-box，避免打断正在看的炉位）

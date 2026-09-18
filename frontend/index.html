@@ -502,6 +502,16 @@
                 每次从自己炉位取卡得 1 次翻牌机会，自动炼卡已默认取卡后立即翻牌。<br>
                 结果写入右侧<b>操作日志</b>，不在这里重复留档。</div>
             </div>
+            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
+              <h3 style="margin-bottom:10px">一键日常</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <button id="daily-run" class="btn sm ok">跑一遍</button>
+                <span id="daily-last" class="hint"></span>
+              </div>
+              <div class="hint" style="margin-top:8px">只放<b>已实证</b>的动作：每日登陆礼包（<b>+100 金币</b>，每天 1 次，重复跑会提示「今日已领过」）。<br>
+                签到 / 连续登录领奖要签名参数、猫咪旅行与挖地的端点还没定位 —— 抓包确认前不写进来。<br>
+                结果写入右侧<b>操作日志</b>。</div>
+            </div>
             <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
               <button id="probe-btn" class="btn sm">探测接口（调试）</button>
             </div>
@@ -850,7 +860,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260918f"></script>
+<script src="/app.js?v=20260919a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
