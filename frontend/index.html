@@ -359,11 +359,32 @@
     display:flex;flex-direction:column;gap:4px}
   .syn-empty{color:var(--muted);font-size:12.5px;padding:8px 2px}
 
+  /* ===== 灵宠探险三栏：设置/选择 | 本次运行日志 | 操作日志（全局） =====
+     2026-09-18 用户反馈：① 全局日志挤在「本次运行日志」下面同一竖列，两块争高度；
+     ② 设置栏写死 300px，章节/小关下拉 + 16 只灵宠的选择器太窄。
+     拆三栏后设置栏加宽到 ≥340px、灵宠改多列网格；三块各自独立滚动、同时可见。 */
+  .sp-grid{grid-template-columns:minmax(340px,440px) minmax(0,1fr) minmax(268px,340px);
+    grid-template-areas:"set run glob"}
+  .sp-col{display:flex;flex-direction:column;gap:12px;min-height:0;min-width:0}
+  .sp-col:nth-child(1){grid-area:set}
+  .sp-col:nth-child(2){grid-area:run}
+  .sp-col:nth-child(3){grid-area:glob}
+  .sp-col>.lpanel{flex:1 1 auto;min-height:160px}
+  /* 日志不再各自限高（限高会和栏高打架）：高度交给栏，滚动交给 .lst */
+  #sp-log,#sp-globallog{max-height:none}
+  /* 16 只灵宠：宽栏里多列铺开，一眼选完（窄栏自动回落单列） */
+  #sp-spirites{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));
+    gap:6px 10px}
+
   /* 中等宽度（三栏挤不开）：卡友列表 + 日志一行两栏，自动换卡/付出卡整行铺在下面 */
   @media (max-width:1240px){
     .ex-grid{grid-template-columns:minmax(0,1fr) minmax(268px,320px);
       grid-template-rows:minmax(0,1.1fr) minmax(0,0.9fr);
       grid-template-areas:"main log" "auto auto"}
+    /* 灵宠页：设置 + 运行日志一行两栏，全局日志整行铺下面 */
+    .sp-grid{grid-template-columns:minmax(320px,400px) minmax(0,1fr);
+      grid-template-rows:minmax(0,1.15fr) minmax(0,0.85fr);
+      grid-template-areas:"set run" "glob glob"}
   }
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
@@ -375,6 +396,11 @@
       grid-template-areas:"main" "auto" "log";overflow-y:auto}
     .ex-grid .ex-col>.lpanel{min-height:280px}
     .ex-msgs{max-height:220px}
+    /* 灵宠页窄屏同样单栏堆叠 */
+    .sp-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;
+      grid-template-areas:"set" "run" "glob";overflow-y:auto}
+    .sp-col>.lpanel{min-height:280px}
+    #sp-log,#sp-globallog{max-height:240px}
   }
   /* ===== 付出卡分组列表（加载我的卡）===== */
   .pay-group{margin:12px 0 6px;padding:0}
@@ -762,7 +788,9 @@
           <!-- 三套玩法的状态**一次全部显示**（同一份 act=1 就含全部玩法状态）：
                切换 tab 只换高亮与下拉，不再请求接口。 -->
           <div id="sp-all" class="sp-all"></div>
-          <div class="lib-body" style="grid-template-columns:300px minmax(0,1fr)">
+          <!-- 三栏：栏1=设置/选择，栏2=本次运行日志，栏3=操作日志（全局）。见上方 .sp-grid 注释 -->
+          <div class="lib-body sp-grid">
+            <div class="sp-col">
             <div class="lpanel">
               <div class="lp-head"><span class="t">设置</span></div>
               <div class="lst" style="padding:12px 14px;display:flex;flex-direction:column;gap:11px;font-size:12.5px">
@@ -796,7 +824,7 @@
                   <div style="color:var(--muted);margin-bottom:6px">
                     指定灵宠（<b>当前按最多 2 只</b>；不勾选=自动轮换）
                   </div>
-                  <div id="sp-spirites" style="display:flex;flex-direction:column;gap:6px"></div>
+                  <div id="sp-spirites"></div>
                 </div>
                 <div style="border-top:1px dashed var(--line);padding-top:9px">
                   <div style="color:var(--muted);margin-bottom:6px">
@@ -806,25 +834,32 @@
                 </div>
               </div>
             </div>
+            </div>
+
+            <div class="sp-col">
             <div class="lpanel">
               <div class="lp-head">
                 <span class="t">本次运行日志</span>
                 <div class="spacer"></div>
                 <button id="sp-clearlog" class="btn sm ghost">清空</button>
               </div>
-              <div class="lst" id="sp-log" style="padding:10px 14px;max-height:230px;overflow:auto">
+              <div class="lst" id="sp-log" style="padding:10px 14px">
                 <div class="empty-tip">点「刷新状态」查看灵宠与探险进度；点「开始自动探险」开始循环。</div>
               </div>
             </div>
+            </div>
+
+            <div class="sp-col">
             <div class="lpanel">
               <div class="lp-head">
                 <span class="t">操作日志（全局）</span>
                 <div class="spacer"></div>
                 <button id="sp-clearglob" class="btn sm ghost">清空全局</button>
               </div>
-              <div class="lst" id="sp-globallog" data-op-log style="padding:10px 14px;max-height:230px;overflow:auto">
+              <div class="lst" id="sp-globallog" data-op-log style="padding:10px 14px">
                 <div class="empty-tip">无记录。</div>
               </div>
+            </div>
             </div>
           </div>
         </div>
@@ -832,7 +867,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260918c"></script>
+<script src="/app.js?v=20260918d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
