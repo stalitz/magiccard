@@ -580,6 +580,10 @@
                    title="**每套**集齐次数上限，0=不限（队列里每一套各自计数）">
             <span class="sep"></span>
             <label class="check" title="借好友的空炉多并行炼一炉（主炉满时也能偷）。炉上炼好的卡若不及时取回，好友可能收走。"><input type="checkbox" id="auto-steal" checked> 偷炉</label>
+            <select id="auto-steal-pick" class="sel" style="max-width:200px"
+                    title="从好友列表里选一个「常去偷」的对象（选完会填进右边输入框）">
+              <option value="">不指定（自动挑）</option>
+            </select>
             <input type="text" id="auto-steal-friend" class="num-in" placeholder="常去好友QQ"
                    title="优先去这家偷（如 983688972）；留空 = 从好友列表最后一名往回找有空炉的">
             <span class="sep"></span>
@@ -846,7 +850,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260918e"></script>
+<script src="/app.js?v=20260918f"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

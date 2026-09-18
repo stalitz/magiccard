@@ -1709,7 +1709,14 @@ function initAutoOnce() {
   if ($("auto-queue-tid")) $("auto-queue-tid").onkeydown = (e) => {
     if (e.key === "Enter") autoQueueAdd();
   };
+  // 偷炉好友下拉：选一个就填进输入框，输入框仍可手动改（如填不在好友列表里的 QQ）
+  const pick = $("auto-steal-pick");
+  if (pick) {
+    pick.onchange = () => { $("auto-steal-friend").value = pick.value || ""; };
+    $("auto-steal-friend").oninput = () => { pick.value = ""; };
+  }
   loadAutoOptions();
+  loadStealFriends();
   autoRefresh();
 }
 
@@ -1727,6 +1734,26 @@ async function autoQueueAdd() {
     }
   } catch (e) { log("加入队列异常：" + e, "err"); }
   autoRefresh();
+}
+
+// 偷炉「常去好友」下拉：从好友列表（card_user_list，194 人）里选，选完填进右边的输入框。
+// 按经验值倒序 —— 高等级好友更可能有炉且长期在线；自己会被后端排除。
+let stealFriendsLoaded = false;
+async function loadStealFriends() {
+  const sel = $("auto-steal-pick");
+  if (!sel) return;
+  if (stealFriendsLoaded) return;
+  try {
+    const r = await (await fetch("/api/players", { method: "POST" })).json();
+    const rows = (r.players || []).slice().sort((a, b) => (b.exp || 0) - (a.exp || 0));
+    sel.innerHTML = `<option value="">不指定（自动挑）</option>` + rows.map((p) =>
+      `<option value="${p.uin}">${esc(p.nick || p.uin)}（${p.uin}）</option>`).join("");
+    stealFriendsLoaded = true;
+    if ($("auto-steal-friend").value.trim()) sel.value = $("auto-steal-friend").value.trim();
+    log(`偷炉好友列表已加载：${rows.length} 人`, "ok");
+  } catch (e) {
+    log("加载好友列表失败：" + e, "err");
+  }
 }
 
 async function loadAutoOptions() {

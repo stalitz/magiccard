@@ -52,6 +52,15 @@ EP_USER_LIST    = "card_user_list"               # **好友列表**（uin/nick/e
                                                  # 玩过本游戏的人（含自己 + 若干 exp=0 的僵尸号），
                                                  # 忽略分页参数、与请求者参数无关；可作换卡补充池
 EP_MINI_GET     = "card_mini_get"                # 集卡册进度：<Node theme_id num lv>，覆盖全库套卡
+# ---- 2026-09-18 探明：猫咪探险（「每日比赛」下的两个大地图）----
+# 定位过程：card_run_base.version_list 里有 XiYouModule_v_41.swf / SanGuoModule_v_14.swf
+# → 解压取字符串，在其中找到 cgi 名 card_worldexplore / card_worldsanguo（SWF 内另有
+#   card_travel_elf_competition = 每日比赛）。两者 act=1 均返回 code=0 真实 JSON。
+EP_WORLD_XIYOU  = "card_worldexplore"            # 西游大地图（8 张小地图＝套卡 1604..1611）
+EP_WORLD_SANGUO = "card_worldsanguo"             # 三国大地图（9 张小地图＝套卡 1745..1756）
+EP_TRAVEL_MATCH = "card_travel_elf_competition"  # 每日比赛（猫咪旅行·精灵比赛）
+# ⚠️ 关卡参数名是**全小写** levelid（不是 levelId / level_id）—— 用 levelId 一律
+#    返 -40006「错误的关卡ID」，改 levelid=101 才通。
 EP_PROPS_INFO   = "card_market_props_info"       # 道具持有清单（2026-09-15 抓包发现）
                                                  # 返回 <prop type="1" subtype="N" count="X">，
                                                  # subtype 即道具卡 id（见 propCard_v_26.xml）

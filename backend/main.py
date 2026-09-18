@@ -32,7 +32,8 @@ from . import spirite_maps as spm
 from . import spirite_progress as spg
 from .auto_refine import AutoRefine, parse_full
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
-                        EP_REGISTER, EP_SPIRITE, EP_USER_LIST)
+                        EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
+                        EP_WORLD_XIYOU, EP_WORLD_SANGUO)
 from .spirite_auto import SPIRITE_MAPS, get_engine, plain_uin
 
 # 复用 mc_api 里已配好 handler 的 logger（那边 propagate=False，root 不带 handler）
@@ -1098,6 +1099,73 @@ async def players():
                 "total": len(rows), "players": rows}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"查询异常：{e}"}
+
+@app.get("/api/world/status")
+async def world_status(w: str = "xiyou"):
+    """猫咪探险（「每日比赛」下的两个大地图）状态，只读。
+
+    w=xiyou  → `card_worldexplore`  act=1（西游；小地图＝套卡，如花果山）
+    w=sanguo → `card_worldsanguo`   act=1（三国；小地图＝套卡，如官渡之战）
+
+    端点名的来源：card_run_base.version_list 里 XiYouModule_v_41.swf /
+    SanGuoModule_v_14.swf，解压后在其字符串常量中找到这两个 cgi 名（另有
+    card_travel_elf_competition = 每日比赛）。
+
+    ⚠️ **只做状态查询**：「出发探索」的 act 尚未定位（西游 act=2/4 恒返
+    -30002「队伍忙碌中」、三国 act=2 levelid=101 返 -302「未达到领取条件」），
+    所以这里不提供任何写操作 —— 需要抓一次真实点击的包才能定。
+    """
+    if err := _require_login():
+        return err
+    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_XIYOU
+    try:
+        r = await _session.post(ep, act=1)
+        data = r.get("data") or {}
+        if not data and r.get("raw"):
+            try:
+                data = json.loads(r["raw"])
+            except (ValueError, TypeError):
+                data = {}
+        lv = data.get("levelId") if w == "sanguo" else data.get("maxLevelId")
+        return {
+            "ok": r.get("code") == 0,
+            "code": r.get("code"),
+            "message": r.get("message", ""),
+            "world": w,
+            "endpoint": ep,
+            "level": lv,
+            # 关键计数：三国 freenum/buynum = 免费次数/已购次数；
+            # 西游 nlb/vlb/txd/sjb/jjb/zxb = 各类能量包与材料（实测本号全为 0）
+            "counts": {k: data.get(k) for k in
+                       ("freenum", "buynum", "nlb", "vlb", "txd", "sjb", "jjb", "zxb")
+                       if k in data},
+            "raw": data,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"查询异常：{e}"}
+
+
+@app.get("/api/world/levels")
+async def world_levels(w: str = "sanguo"):
+    """猫咪探险关卡进度表（三国 act=9 / 西游同族 act），只读。"""
+    if err := _require_login():
+        return err
+    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_XIYOU
+    try:
+        r = await _session.post(ep, act=9)
+        # parse_response 会把整个响应体塞进 r["data"]，真正的关卡数组是 data["data"]
+        body = r.get("data") or {}
+        if not isinstance(body, dict):
+            try:
+                body = json.loads(r.get("raw") or "{}")
+            except (ValueError, TypeError):
+                body = {}
+        data = body.get("data") or []
+        return {"ok": r.get("code") == 0, "code": r.get("code"),
+                "world": w, "total": len(data), "levels": data}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"查询异常：{e}"}
+
 
 @app.post("/api/collection/progress")
 async def collection_progress():
