@@ -537,6 +537,17 @@ function bindExchangeEvents() {
       exRenderCardPick();
     };
   }
+  // 日志面板（右栏）与「只看可换」开关：判空保护同 ckw——旧缓存 index.html 里没这些元素
+  const lclr = $("ex-log-clear");
+  if (lclr) {
+    lclr.onclick = () => {
+      const box = $("ex-msgs");
+      if (box) box.innerHTML = "";
+      exMsg("日志已清空", "info");
+    };
+  }
+  const hl = $("ex-hide-locked");
+  if (hl) hl.onchange = () => { if (exState.results) renderScan(exState.results); };
 }
 
 // ---------- 自动换卡 ----------
@@ -746,12 +757,21 @@ function renderExAuto(d) {
   }).join("\n");
 }
 
+// 换卡页的操作日志：写进右栏常驻面板 #ex-msgs（原来是 prepend 到 #ex-body，
+// 与结果列表同处一个滚动区 —— 往下拉去点交换就看不见日志了，2026-09-18 用户反馈后改）。
+// 新消息在最上面，面板自身滚动，故永远可见。
 function exMsg(text, cls = "warn") {
-  const body = $("ex-body");
+  const box = $("ex-msgs") || $("ex-body");
+  if (!box) return;
   const m = document.createElement("div");
   m.className = `ex-msg ${cls}`;
-  m.textContent = text;
-  body.insertBefore(m, body.firstChild);
+  const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  m.innerHTML = `<span class="ts">${ts}</span>${esc(text)}`;
+  box.insertBefore(m, box.firstChild);
+  // 只留最近 200 条，避免长时间挂机后 DOM 无限增长
+  while (box.children.length > 200) box.removeChild(box.lastChild);
+  const cnt = $("ex-log-cnt");
+  if (cnt) cnt.textContent = `${box.children.length} 条`;
   log(`[换卡] ${text}`, cls === "ok" ? "ok" : (cls === "err" ? "err" : "info"));
 }
 
@@ -1170,7 +1190,9 @@ function renderScan(d) {
   let html = "";
   const priceTxt = d.price ? `面值 ${d.price} 的` : "全部面值的";
   $("ex-cnt").textContent =
-    `「${targetText}」${priceTxt}卡：扫 ${d.scanned}/${d.peers_total} 人，${d.hit_users} 人有货` +
+    `「${targetText}」${priceTxt}卡：扫 ${d.scanned}/${d.peers_total} 人，` +
+    `${d.usable_users ?? d.hit_users} 人现在就能换` +
+    (d.locked_users ? `，另有 ${d.locked_users} 人只有已锁的卡（共 ${d.locked_n} 张）` : "") +
     (d.stopped_early ? `，已凑够 ${d.usable_n} 个可换目标提前收工` : "") +
     (d.errors_n ? `，${d.errors_n} 人读取失败` : "") + `（${d.elapsed}s）`;
 
@@ -1193,63 +1215,165 @@ function renderScan(d) {
   list.innerHTML = html;
 
   d.rows.forEach((row) => {
-    const peerEl = document.createElement("div");
-    peerEl.className = "ex-peer";
-    // 该卡友所有命中（含未开放交换的）
-    const hitHtml = row.hits.map((h) => {
-      // 能不能换，一律以后端算好的 h.srcs（我方可付出的卡）为准 —— 判定逻辑集中在
-      // exchange._hit_from_box，前端不再自己用 want_theme_id 当门槛（那样会把
-      // 「未设置想收套」和「下架套」误判成不可换）。
-      const wantThemes = h.want_themes || [];
-      const wantTxt = wantThemes.map((x) => x.name).join("、");
-      const hasSrc = (h.srcs || []).length > 0;
-      const lockedNow = h.unlock > Math.floor(Date.now() / 1000);
-      const srcOpts = hasSrc
-        ? `<select data-friend="${row.uin}" data-dst="${h.id}_${h.slot}" data-src="">
-             <option value="">选择付出的卡…</option>
-             ${h.srcs.map((s) => `<option value="${s.id}_${s.slot}_1">${esc(s.name)}（面值 ${s.price}，${esc(s.theme_name)}）</option>`).join("")}
-           </select>
-           <button class="btn sm primary ex-swap" data-friend="${row.uin}"
-                   data-dst-id="${h.id}" data-dst-slot="${h.slot}">交换</button>`
-        : "";
-      const note = [];
-      if (!wantThemes.length) note.push('<span class="tag" style="background:#e8f6ee;color:#1a7f4b">对方不限想收套 · 同面值即可换</span>');
-      if (lockedNow) note.push('<span class="tag off">对方上锁至 ' + new Date(h.unlock * 1000).toLocaleTimeString("zh-CN", { hour12: false }) + '</span>');
-      const nopay = hasSrc ? ""
-        : `<span class="ex-nopay">（我方可付卡里没有面值 ${h.price} 的${wantTxt ? `，或受对方想收「${esc(wantTxt)}」限制` : ""}）</span>`;
-      // 多套扫描时标出该卡属于哪个目标套，否则同名/相近卡名看不出来源
-      const themeTag = (tNames.length > 1 && h.theme_name)
-        ? `<span class="tag base" title="所属套卡">${esc(h.theme_name)}</span>` : "";
-      return `<div class="ex-hit">
-        <span class="cnm">${esc(h.name)} <span class="v-badge" style="background:#eef4fa;color:#66738a">面值 ${h.price}</span>${themeTag}</span>
-        <span class="pay" style="font-size:12px">${wantTxt ? `对方想收：${esc(wantTxt)}` : ""}${nopay}</span>
-        ${note.join(" ")}
-        ${srcOpts}
-      </div>`;
-    }).join("");
-
-    peerEl.innerHTML = `<div class="ph">
-        <span class="nick">${esc(row.nick)}</span>
-        <span class="qq">QQ ${row.uin}</span>
-        <span class="want">他想要的套：${(row.hits[0].want_themes || []).length ? esc(row.hits[0].want_themes.map((x) => x.name).join("、")) : "不限（任何套卡均可）"}</span>
-        <span style="margin-left:auto;color:var(--muted);font-size:12px">${row.hits.length} 张可换目标</span>
-      </div>
-      <div class="hits">${hitHtml}</div>`;
-    list.appendChild(peerEl);
+    // 「有货但换不了」（命中的卡全被对方上锁）默认也列出、但标锁：
+    // 此前后端直接把上锁卡过滤掉，界面上完全没有它们 —— 用户只能靠真点交换拿报错，
+    // 才知道「这卡锁着 / 已经被换走了」（2026-09-18 反馈）。勾「只看可换」可隐藏。
+    const usable = Number(row.usable ?? row.hits.filter((h) => (h.srcs || []).length).length);
+    const hideLocked = !!($("ex-hide-locked") || {}).checked;
+    if (hideLocked && !usable) return;
+    list.appendChild(peerBlock(row, tNames));
   });
 
-  // 交换事件
-  list.querySelectorAll(".ex-swap").forEach((btn) => {
-    btn.onclick = () => {
-      const hit = btn.closest(".ex-hit");
-      const sel = hit.querySelector("select");
-      if (!sel || !sel.value) { exMsg("请先选择要付出的卡", "err"); return; }
-      const [srcId, srcSlot] = sel.value.split("_");
-      if (!confirm(`确认用这张卡交换？\n付出：${sel.options[sel.selectedIndex].text}\n换入：${hit.querySelector(".cnm").textContent.trim()}\n\n交换会真实消耗付出卡。`)) return;
-      doSwap(btn.dataset.friend, Number(btn.dataset.dstId), Number(btn.dataset.dstSlot),
-             Number(srcId), Number(srcSlot));
-    };
-  });
+  // 勾了「只看可换」却一个人都没剩下：明确说清是被过滤掉的，别让用户以为扫描无结果
+  if (!list.children.length) {
+    const tip = document.createElement("div");
+    tip.className = "empty-tip";
+    tip.style.padding = "24px 16px";
+    tip.textContent = `扫描到 ${d.rows.length} 位有货卡友，但他们的卡现在都锁着，没有能立刻换的。取消勾选「只看可换」可查看这些已锁的卡（带解锁时间）。`;
+    list.appendChild(tip);
+  }
+
+  bindPeerEvents(list);
+}
+
+// ---------- 换卡结果渲染（左栏） ----------
+// 布局见 index.html .ex-grid：结果在左栏、日志在右栏，各自独立滚动。
+// 换卡结果**就地**显示在点过的那一行（.ex-res），不必再去日志里翻；
+// 日志仍同步留档（exMsg），失败时还能一键「↻ 重扫此人」刷新对方换卡箱实时状态。
+function fmtClock(tsSec) {
+  return new Date(tsSec * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+function scanTargetNames(d) {
+  const n = (d && d.target_names) || [];
+  return n.length ? n : exTargetTids().map((t) => exState.themeNames[t] || `#${t}`);
+}
+
+/** 单张命中卡的 HTML。tNames = 目标套名数组（多套扫描时用来标注卡属于哪套）。 */
+function exHitHtml(row, h, tNames) {
+  // 能不能换，一律以后端算好的 h.srcs（我方可付出的卡）为准 —— 判定逻辑集中在
+  // exchange._hit_from_box，前端不再自己用 want_theme_id 当门槛（那样会把
+  // 「未设置想收套」和「下架套」误判成不可换）。
+  const wantThemes = h.want_themes || [];
+  const wantTxt = wantThemes.map((x) => x.name).join("、");
+  // 锁：h.locked 由后端标注（锁定卡 srcs 必为空）；unlock 兜底兼容旧响应
+  const lockedNow = !!h.locked || h.unlock > Math.floor(Date.now() / 1000);
+  const hasSrc = !lockedNow && (h.srcs || []).length > 0;
+  const srcOpts = hasSrc
+    ? `<select data-friend="${row.uin}" data-dst="${h.id}_${h.slot}" data-src="">
+         <option value="">选择付出的卡…</option>
+         ${h.srcs.map((s) => `<option value="${s.id}_${s.slot}_1">${esc(s.name)}（面值 ${s.price}，${esc(s.theme_name)}）</option>`).join("")}
+       </select>
+       <button class="btn sm primary ex-swap" data-friend="${row.uin}"
+               data-dst-id="${h.id}" data-dst-slot="${h.slot}">交换</button>`
+    : "";
+  const note = [];
+  if (!wantThemes.length) note.push('<span class="tag" style="background:#e8f6ee;color:#1a7f4b">对方不限想收套 · 同面值即可换</span>');
+  if (lockedNow) note.push(`<span class="tag off">🔒 已锁至 ${fmtClock(h.unlock)}</span>`);
+  const nopay = lockedNow
+    ? '<span class="ex-nopay" style="color:var(--warn)">锁定期内不可换：记下解锁时间再来，或点右上「↻ 重扫此人」刷新</span>'
+    : (hasSrc ? ""
+      : `<span class="ex-nopay">（我方可付卡里没有面值 ${h.price} 的${wantTxt ? `，或受对方想收「${esc(wantTxt)}」限制` : ""}）</span>`);
+  // 多套扫描时标出该卡属于哪个目标套，否则同名/相近卡名看不出来源
+  const themeTag = (tNames.length > 1 && h.theme_name)
+    ? `<span class="tag base" title="所属套卡">${esc(h.theme_name)}</span>` : "";
+  return `<div class="ex-hit" data-slot="${h.slot}" data-id="${h.id}">
+    <span class="cnm">${esc(h.name)} <span class="v-badge" style="background:#eef4fa;color:#66738a">面值 ${h.price}</span>${themeTag}</span>
+    <span class="pay" style="font-size:12px">${wantTxt ? `对方想收：${esc(wantTxt)}` : ""}${nopay}</span>
+    ${note.join(" ")}
+    ${srcOpts}
+    <span class="ex-res"></span>
+  </div>`;
+}
+
+/** 一个卡友的整块（卡友信息 + 命中卡列表 + 单人重扫）。 */
+function peerBlock(row, tNames) {
+  const usable = Number(row.usable ?? row.hits.filter((h) => (h.srcs || []).length).length);
+  const lockedN = Number(row.locked_n ?? row.hits.filter((h) => h.locked).length);
+  const peerEl = document.createElement("div");
+  peerEl.className = "ex-peer";
+  peerEl.dataset.uin = row.uin;
+  peerEl.innerHTML = `<div class="ph">
+      <span class="nick">${esc(row.nick)}</span>
+      <span class="qq">QQ ${row.uin}</span>
+      <span class="want">他想要的套：${(row.hits[0].want_themes || []).length ? esc(row.hits[0].want_themes.map((x) => x.name).join("、")) : "不限（任何套卡均可）"}</span>
+      <span style="color:var(--muted);font-size:12px">
+        ${usable} 张可换${lockedN ? ` · ${lockedN} 张已锁` : ""}
+      </span>
+      <button class="btn sm ghost rescan" data-uin="${row.uin}"
+              title="只重扫这一位卡友（1 次请求，秒回）。换卡失败、或卡被别人换走后用它刷新实时状态，不必重扫全部卡友">↻ 重扫此人</button>
+    </div>
+    <div class="hits">${row.hits.map((h) => exHitHtml(row, h, tNames)).join("")}</div>`;
+  return peerEl;
+}
+
+function bindPeerEvents(scope) {
+  scope.querySelectorAll(".ex-swap").forEach((btn) => { btn.onclick = () => onSwapClick(btn); });
+  scope.querySelectorAll(".ex-rescan").forEach((btn) => { btn.onclick = () => rescanPeer(btn); });
+}
+
+/** 交换：结果就地写进该行（成功/失败都在原地可见），日志同步留档。 */
+async function onSwapClick(btn) {
+  const hit = btn.closest(".ex-hit");
+  const sel = hit.querySelector("select");
+  const res = hit.querySelector(".ex-res");
+  if (!sel || !sel.value) {
+    if (res) { res.className = "ex-res err"; res.textContent = "请先选择付出的卡"; }
+    exMsg("请先选择要付出的卡", "err");
+    return;
+  }
+  const [srcId, srcSlot] = sel.value.split("_");
+  if (!confirm(`确认用这张卡交换？\n付出：${sel.options[sel.selectedIndex].text}\n换入：${hit.querySelector(".cnm").textContent.trim()}\n\n交换会真实消耗付出卡。`)) return;
+  const dstId = Number(btn.dataset.dstId), dstSlot = Number(btn.dataset.dstSlot);
+  btn.disabled = true; sel.disabled = true;
+  if (res) { res.className = "ex-res"; res.textContent = "交换中…"; }
+  const d = await doSwap(btn.dataset.friend, dstId, dstSlot, Number(srcId), Number(srcSlot));
+  if (d && d.code === 0) {
+    if (res) { res.className = "ex-res ok"; res.textContent = "✅ 已换入"; }
+    hit.classList.add("dead");
+    // 这一格已经被换掉，不能再点（想再换同一张请重扫该卡友）
+    if (sel) sel.remove();
+    btn.remove();
+  } else {
+    const msg = (d && (d.message || `code=${d.code}`)) || "请求异常";
+    if (res) { res.className = "ex-res err"; res.textContent = `❌ ${msg}`; }
+    btn.disabled = false; sel.disabled = false;
+  }
+}
+
+/** 只重扫一位卡友（1 次请求），用于交换失败/卡被换走后刷新实时状态。 */
+async function rescanPeer(btn) {
+  const peerEl = btn.closest(".ex-peer");
+  const uin = btn.dataset.uin || (peerEl && peerEl.dataset.uin);
+  if (!peerEl || !uin) return;
+  const tids = exTargetTids();
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "重扫中…";
+  try {
+    const d = await (await fetch("/api/exchange/scan", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        theme_id: tids[0] || 0, theme_ids: tids,
+        price: Number(exState.price) || 0,
+        card_ids: [...exState.pickCards],
+        peers: [uin], use_api: false, include_friends: false, concurrency: 1,
+      }),
+    })).json();
+    const row = d && d.ok && (d.rows || [])[0];
+    if (row) {
+      const el = peerBlock(row, scanTargetNames(d));
+      peerEl.replaceWith(el);
+      bindPeerEvents(el);
+      exMsg(`已重扫 QQ ${uin}：${row.usable || 0} 张可换${row.locked_n ? `，${row.locked_n} 张已锁` : ""}。`, "ok");
+    } else {
+      peerEl.classList.add("dead");
+      exMsg(`重扫 QQ ${uin}：换卡箱里已无目标卡（被别人换走 / 已上锁 / 已撤下）。`, "warn");
+      btn.disabled = false; btn.textContent = old;
+    }
+  } catch (e) {
+    exMsg("重扫失败：" + (e.message || e), "err");
+    btn.disabled = false; btn.textContent = old;
+  }
 }
 
 async function doSwap(friend, dstId, dstSlot, srcId, srcSlot) {

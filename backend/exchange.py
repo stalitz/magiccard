@@ -252,8 +252,6 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
     exch_set = set(exch_list)
     buyable = buyable_themes()
     for card in p.get("cards", []):
-        if card["locked"]:
-            continue
         cid = card["id"]
         ci = idx["card_by_id"].get(cid)
         if ci is None:
@@ -267,12 +265,17 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
         # 指定卡（可多选）：只保留用户点名的那几张；空集 = 该套全部
         if card_ids and cid not in card_ids:
             continue
+        # 已上锁的卡：2026-09-18 起**不再丢弃**，而是带回界面标注「已锁至 …」。
+        # 动机（用户反馈）：此前锁定的卡直接跳过，界面上「谁有货」完全不含它们，
+        # 于是「有没有锁」只能等真点交换拿到报错才知道。现在改为一并列出、
+        # 明确标锁、且不参与可换目标计数（srcs 为空）。
+        locked = bool(card.get("locked"))
         # 可付出的 src：面额相同，且满足 exch 限制。
         # exch 限制是**套卡级**的，且只作用于「商店能买到的套卡」（套内存在 10 面额基础卡）：
         #   - 对方未设想收套（exch 为空）→ 不限制，任何同面额卡都能换；
         #   - 下架/绝版套（如纸寿千年、名家）商店买不到 → 不受限，同面额即可换；
         #   - 商店可买的套卡 → 其主题必须在对方 exch 里。
-        srcs = [
+        srcs = [] if locked else [
             {"slot": s["slot"], "id": s["id"], "name": s["name"],
              "price": s["price"],
              "theme_name": s.get("theme_name", "")}
@@ -290,6 +293,7 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
             "theme_id": tid,
             "theme_name": theme_names.get(tid, f"主题{tid}"),
             "unlock": card["unlock"],
+            "locked": locked,
             "want_theme_id": want_theme,
             "want_theme_name": theme_names.get(want_theme, f"主题{want_theme}") if want_theme else "",
             "want_themes": [{"tid": t, "name": theme_names.get(t, f"主题{t}")}
@@ -304,6 +308,9 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
         "nick": p.get("nick", opuin),
         "exch": p.get("exch", []),
         "hits": hits,
+        # 该卡友是否至少有一张「现在就能换」的目标卡（前端据此把只能看不能换的人排后面）
+        "usable": sum(1 for h in hits if h["srcs"]),
+        "locked_n": sum(1 for h in hits if h["locked"]),
     }
 
 
@@ -370,6 +377,10 @@ async def scan_peers(session, theme_id: int, peers: list[str],
         ok_n += 1
         if r.get("hits"):
             rows.append(r)
+    # 「有货但现在换不了」（命中的卡全被对方上锁）的人排到后面：
+    # 他们的卡看得见、解不了锁，先让能立刻换的人占前排。sort 稳定，组内保持扫描顺序。
+    rows.sort(key=lambda r: 0 if r.get("usable") else 1)
+    locked_n = sum(int(r.get("locked_n") or 0) for r in rows)
     return {
         "ok": True,
         "theme_id": theme_id,
@@ -383,6 +394,10 @@ async def scan_peers(session, theme_id: int, peers: list[str],
         "scanned": ok_n,
         "stopped_early": stopped_early,
         "usable_n": usable_n,
+        # 可换的人 = 至少有一张现在就能换的卡的人（usable_n 是「可换目标卡数」）
+        "usable_users": sum(1 for r in rows if r.get("usable")),
+        "locked_n": locked_n,
+        "locked_users": sum(1 for r in rows if not r.get("usable") and r.get("locked_n")),
         "hit_users": len(rows),
         "errors": errors[:20],
         "errors_n": len(errors),
