@@ -570,9 +570,18 @@ class AutoRefine:
 
     async def _refine_all(self, st: dict, stock: Counter, slots: dict,
                           pending: Counter, steps: list[dict]) -> None:
-        """把空着的主炉位按轮转顺序分给队列里各套能立刻提交的炉次。"""
+        """把空着的主炉位按轮转顺序分给队列里各套能立刻提交的炉次；
+        主炉满时仍要尝试偷炉（借好友空炉再并行一炉）。"""
         free_stove = st["cap"].get("stove", {}).get("free_main", 0)
-        if free_stove <= 0 or not self.queue:
+        free_steal = st["cap"].get("stove", {}).get("free_steal", 0)
+        can_steal = bool(self.steal_enabled and free_steal > 0
+                         and self._steal_cooldown_until < time.time())
+        # ★ 2026-09-18 修：旧版这里写的是 `if free_stove <= 0 or not self.queue: return`，
+        #   于是主炉一满（free_main=0）整个函数立刻返回，末尾的偷炉分支**永远走不到** ——
+        #   而主炉满恰恰是常态（实测 free_main=0 / free_steal=1，偷炉位空着没人用），
+        #   表现出来就是「自动炼卡从来没偷过炉」。
+        #   现在：主炉空位与偷炉位各自独立，只要还有一边可用就继续。
+        if not self.queue or (free_stove <= 0 and not can_steal):
             return
         # planned = 各套并集（「会再产出」的卡，允许被当素材消耗）
         planned: set = set()
@@ -657,9 +666,8 @@ class AutoRefine:
 
         # ---------- 偷炉：用好友空炉再并行 1 张 ----------
         # 条件：开启偷炉、偷炉槽空闲、未被全局冷却、尚有未提交的炉次。
-        free_steal = st["cap"].get("stove", {}).get("free_steal", 0)
-        if (self.steal_enabled and free_steal > 0
-                and self._steal_cooldown_until < time.time() and self.queue):
+        # 注意这里**不要求主炉有空位**（主炉满时也要偷，见函数开头注释）。
+        if can_steal and st["cap"].get("stove", {}).get("free_steal", 0) > 0:
             # 找一个「素材已齐、能立刻炼」的目标（偷炉不就地买卡，保持简单）
             steal_cand = None
             for tid, target in seq:

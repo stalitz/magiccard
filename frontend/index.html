@@ -257,16 +257,24 @@
   .ex-log{font:12px/1.6 ui-monospace,Menlo,monospace;background:#f6f8fb;border:1px solid var(--line);
     border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap;max-height:180px;overflow-y:auto}
 
-  /* ===== 换卡页两栏：左=卡友与结果，右=操作日志（+ 自动换卡） =====
-     2026-09-18 用户反馈：日志原先插在结果列表同一个滚动区的顶部，往下拉去点「交换」
-     就看不见日志，换卡失败 / 卡已被别人换走只能翻回顶部才发现。
-     拆两栏后各自独立滚动 —— 日志与卡友列表永远同时可见。 */
-  .ex-grid{grid-template-columns:minmax(0,1fr) minmax(320px,400px)}
-  .ex-side{display:flex;flex-direction:column;gap:12px;min-height:0}
-  /* 日志面板吃掉剩余高度（下限 140px），保证「日志永远看得见」 */
-  .ex-side>.lpanel{flex:1 1 auto;min-height:140px}
-  /* 自动换卡块也挪进右栏：限高 + 自滚，内容再多也不会把日志挤没 */
-  .ex-side #ex-autoex{flex:0 1 auto;max-height:44%;overflow-y:auto;margin:0}
+  /* ===== 换卡页三栏：卡友与结果 | 自动换卡·付出卡 | 操作日志 =====
+     2026-09-18 第一版拆两栏（左结果 / 右日志+自动换卡）：日志是能常驻了，但「加载我的卡」
+     被挤在右栏底部（约 320px 宽），上百张卡只能单列往下滚 —— 用户要求再拆。
+     现改为三栏，付出卡占满一整栏（≥268px 起，宽屏 ~1fr），三块各自独立滚动、
+     同时可见；日志仍常驻右栏。 */
+  .ex-grid{grid-template-columns:minmax(0,1fr) minmax(0,1.05fr) minmax(268px,320px);
+    grid-template-areas:"main auto log"}
+  .ex-col{display:flex;flex-direction:column;gap:12px;min-height:0;min-width:0}
+  .ex-col:nth-child(1){grid-area:main}
+  .ex-col:nth-child(2){grid-area:auto}
+  .ex-col:nth-child(3){grid-area:log}
+  /* 每栏内的面板吃掉本栏剩余高度（下限 140px），保证「日志永远看得见」 */
+  .ex-col>.lpanel{flex:1 1 auto;min-height:140px}
+  /* 自动换卡块在栏内自然展开，滚动交给整栏，避免嵌套滚动 */
+  #ex-autoex{flex:0 0 auto;margin:0;max-height:none;overflow:visible}
+  .ex-auto-scroll{padding:8px 10px}
+  /* 付出卡列表：铺满本栏宽度 + 不限高（栏自己滚），上百张卡也能一眼扫过去 */
+  #ex-pay-list{max-height:none}
   .ex-msgs{flex:1 1 auto;min-height:140px;overflow-y:auto;padding:8px 10px;
     display:flex;flex-direction:column;gap:6px}
   .ex-msgs .ex-msg{margin:0;flex:0 0 auto}
@@ -351,15 +359,21 @@
     display:flex;flex-direction:column;gap:4px}
   .syn-empty{color:var(--muted);font-size:12.5px;padding:8px 2px}
 
+  /* 中等宽度（三栏挤不开）：卡友列表 + 日志一行两栏，自动换卡/付出卡整行铺在下面 */
+  @media (max-width:1240px){
+    .ex-grid{grid-template-columns:minmax(0,1fr) minmax(268px,320px);
+      grid-template-rows:minmax(0,1.1fr) minmax(0,0.9fr);
+      grid-template-areas:"main log" "auto auto"}
+  }
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
     .console{max-width:none;min-width:0;height:260px}
     .lib-body{grid-template-columns:minmax(0,1fr);overflow-y:auto}
     .lpanel{min-height:320px}
-    /* 窄屏回落单栏：日志排到结果上方（不再各自独立滚动，靠整页滚） */
-    .ex-grid{grid-template-columns:minmax(0,1fr);overflow-y:auto}
-    .ex-grid .ex-side{order:-1}
-    .ex-side #ex-autoex{max-height:none}
+    /* 窄屏回落单栏：三块依次堆叠，每块自己定高，靠整页滚 */
+    .ex-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;
+      grid-template-areas:"main" "auto" "log";overflow-y:auto}
+    .ex-grid .ex-col>.lpanel{min-height:280px}
     .ex-msgs{max-height:220px}
   }
   /* ===== 付出卡分组列表（加载我的卡）===== */
@@ -369,7 +383,7 @@
     border-left:3px solid var(--qq-blue);border-radius:0 6px 6px 0}
   .pay-gn{font-size:11px;font-weight:500;color:var(--muted);background:#fff;
     border:1px solid var(--line);border-radius:10px;padding:0 7px;margin-left:auto}
-  .pay-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));
+  .pay-items{display:grid;grid-template-columns:repeat(auto-fill,minmax(186px,1fr));
     gap:6px 10px;padding:0 2px 2px}
   .pay-it{display:flex;align-items:center;gap:9px;font-size:13px;line-height:1.4;
     padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;
@@ -529,6 +543,11 @@
             <label class="check" title="底卡（面值10）用金币从商店买，20金/张"><input type="checkbox" id="auto-buy" checked> 买底卡</label>
             <input type="text" id="auto-rounds" class="num-in" value="0"
                    title="**每套**集齐次数上限，0=不限（队列里每一套各自计数）">
+            <span class="sep"></span>
+            <label class="check" title="借好友的空炉多并行炼一炉（主炉满时也能偷）。炉上炼好的卡若不及时取回，好友可能收走。"><input type="checkbox" id="auto-steal" checked> 偷炉</label>
+            <input type="text" id="auto-steal-friend" class="num-in" placeholder="常去好友QQ"
+                   title="优先去这家偷（如 983688972）；留空 = 从好友列表最后一名往回找有空炉的">
+            <span class="sep"></span>
             <button id="auto-start" class="btn sm ok">启动</button>
             <button id="auto-stop" class="btn sm danger hidden">停止</button>
             <span class="sep"></span>
@@ -595,32 +614,74 @@
           <div class="chiprow hidden" id="ex-card-cands"
                style="padding:0 4px;max-height:132px;overflow-y:auto;border-radius:8px"></div>
 
-          <!-- 两栏：左=卡友与结果，右=操作日志（+自动换卡）。见上方 .ex-grid 注释 -->
+          <!-- 三栏：栏1=卡友与结果，栏2=自动换卡·付出卡，栏3=操作日志。见上方 .ex-grid 注释 -->
           <div class="lib-body ex-grid">
-            <!-- 左栏：卡友与扫描结果 -->
-            <div class="lpanel">
-              <div class="lp-head">
-                <span class="t">卡友与结果</span>
-                <span class="cnt" id="ex-cnt"></span>
-                <div class="spacer"></div>
-                <label class="check" style="font-size:12px;white-space:nowrap"
-                       title="只显示当前未上锁、能立刻换的卡。默认显示全部，已锁的卡会标注「已锁至 …」并说明原因。">
-                  <input type="checkbox" id="ex-hide-locked"> 只看可换
-                </label>
-                <button id="ex-reset" class="btn sm ghost hidden">清空结果</button>
-              </div>
-              <div class="lst" style="display:flex;flex-direction:column;gap:10px" id="ex-body">
-                <div class="empty-tip" id="ex-empty">① 上方搜并选定「想收的套」（下架/绝版套也能选）。<br>
-                  ② 点「找该套卡友」→ 从服务器拉取正在玩该套的玩家，也可在下方补充自己的卡友 QQ。<br>
-                  ③ 点「扫描卡友换卡箱」→ 列出谁换卡箱里有该套的卡、<b>卡是否上锁</b>（带解锁时间）、以及你能否付出对方想要的同面值卡。<br>
-                  ④ 选中「我付出的卡」点「交换」——<b>结果会直接显示在该行右侧</b>，右侧「操作日志」同步留档。</div>
-                <div id="ex-friends-wrap" class="hidden"></div>
-                <div id="ex-auto-wrap" class="hidden"></div>
+            <!-- 栏1：卡友与扫描结果 -->
+            <div class="ex-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">卡友与结果</span>
+                  <span class="cnt" id="ex-cnt"></span>
+                  <div class="spacer"></div>
+                  <label class="check" style="font-size:12px;white-space:nowrap"
+                         title="只显示当前未上锁、能立刻换的卡。默认显示全部，已锁的卡会标注「已锁至 …」并说明原因。">
+                    <input type="checkbox" id="ex-hide-locked"> 只看可换
+                  </label>
+                  <button id="ex-reset" class="btn sm ghost hidden">清空结果</button>
+                </div>
+                <div class="lst" style="display:flex;flex-direction:column;gap:10px" id="ex-body">
+                  <div class="empty-tip" id="ex-empty">① 上方搜并选定「想收的套」（下架/绝版套也能选）。<br>
+                    ② 点「找该套卡友」→ 从服务器拉取正在玩该套的玩家，也可在下方补充自己的卡友 QQ。<br>
+                    ③ 点「扫描卡友换卡箱」→ 列出谁换卡箱里有该套的卡、<b>卡是否上锁</b>（带解锁时间）、以及你能否付出对方想要的同面值卡。<br>
+                    ④ 选中「我付出的卡」点「交换」——<b>结果会直接显示在该行右侧</b>，右栏「操作日志」同步留档。</div>
+                  <div id="ex-friends-wrap" class="hidden"></div>
+                  <div id="ex-auto-wrap" class="hidden"></div>
+                </div>
               </div>
             </div>
 
-            <!-- 右栏：操作日志（常驻可视）+ 自动换卡 -->
-            <div class="ex-side">
+            <!-- 栏2：自动换卡 + 付出卡（独立一整栏，上百张卡才有地方铺开） -->
+            <div class="ex-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">自动换卡 · 付出卡</span>
+                  <span class="cnt" id="ex-auto-cnt"></span>
+                  <div class="spacer"></div>
+                  <span style="color:var(--muted);font-size:11.5px">付出卡上百张时，可在「面值」框筛一下</span>
+                </div>
+                <div class="lst ex-auto-scroll">
+                  <div class="cb-box" id="ex-autoex">
+                    <div class="cb-head">自动换卡 <span class="cb-cap" id="ex-autoex-state">未运行</span></div>
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 2px;font-size:12.5px">
+                      <span>目标套：<b id="ex-autoex-tid">未选（用上方搜套）</b></span>
+                      <span>面值</span><input type="text" id="ex-autoex-price" class="num" placeholder="全部" style="width:62px">
+                      <span>每张</span><input type="text" id="ex-autoex-want" class="num" value="1" style="width:44px">
+                      <span>张，最多查</span><input type="text" id="ex-autoex-max" class="num" value="0" style="width:52px" title="0=不限">
+                      <span>位卡友</span>
+                      <label class="check" title="模拟运行只报告会换什么，不真发换卡请求"><input type="checkbox" id="ex-autoex-dry" checked> 模拟</label>
+                      <button id="ex-autoex-start" class="btn sm primary">启动</button>
+                      <button id="ex-autoex-stop" class="btn sm ghost" disabled>停止</button>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 2px 4px;font-size:12.5px">
+                      <span>付出卡（可选）：</span>
+                      <button id="ex-pay-load" class="btn sm ghost">加载我的卡</button>
+                      <span style="color:var(--muted)">面值</span>
+                      <input type="text" id="ex-pay-price" class="num" placeholder="全部" style="width:66px"
+                             title="留空 = 显示我的全部卡；填面值 = 只看该面值">
+                      <button id="ex-pay-all" class="btn sm ghost hidden">显示全部</button>
+                      <span style="color:var(--muted)">勾选 = 只用这些卡去换，且可全部换完；不勾 = 自动挑多余的卡（每种至少留 1 张）</span>
+                    </div>
+                    <div id="ex-pay-sum" style="padding:0 2px 4px;font-size:12px;color:var(--muted)"></div>
+                    <div id="ex-pay-list" style="padding:6px 8px;font-size:13px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted)">点「加载我的卡」查看可付出的卡（换卡箱 + 保险箱）</div>
+                    <div id="ex-autoex-need" style="padding:2px 2px 6px;font-size:12.5px;color:var(--muted)"></div>
+                    <div id="ex-autoex-logs" style="font:12px/1.6 ui-monospace,Menlo,monospace;max-height:170px;overflow-y:auto;background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 栏3：操作日志（常驻可视） -->
+            <div class="ex-col">
               <div class="lpanel">
                 <div class="lp-head">
                   <span class="t">操作日志</span>
@@ -629,33 +690,6 @@
                   <button id="ex-log-clear" class="btn sm ghost">清空日志</button>
                 </div>
                 <div class="ex-msgs" id="ex-msgs"></div>
-              </div>
-
-              <div class="cb-box" id="ex-autoex">
-                <div class="cb-head">自动换卡 <span class="cb-cap" id="ex-autoex-state">未运行</span></div>
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 2px;font-size:12.5px">
-                  <span>目标套：<b id="ex-autoex-tid">未选（用上方搜套）</b></span>
-                  <span>面值</span><input type="text" id="ex-autoex-price" class="num" placeholder="全部" style="width:62px">
-                  <span>每张</span><input type="text" id="ex-autoex-want" class="num" value="1" style="width:44px">
-                  <span>张，最多查</span><input type="text" id="ex-autoex-max" class="num" value="0" style="width:52px" title="0=不限">
-                  <span>位卡友</span>
-                  <label class="check" title="模拟运行只报告会换什么，不真发换卡请求"><input type="checkbox" id="ex-autoex-dry" checked> 模拟</label>
-                  <button id="ex-autoex-start" class="btn sm primary">启动</button>
-                  <button id="ex-autoex-stop" class="btn sm ghost" disabled>停止</button>
-                </div>
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 2px 4px;font-size:12.5px">
-                  <span>付出卡（可选）：</span>
-                  <button id="ex-pay-load" class="btn sm ghost">加载我的卡</button>
-                  <span style="color:var(--muted)">面值</span>
-                  <input type="text" id="ex-pay-price" class="num" placeholder="全部" style="width:66px"
-                         title="留空 = 显示我的全部卡；填面值 = 只看该面值">
-                  <button id="ex-pay-all" class="btn sm ghost hidden">显示全部</button>
-                  <span style="color:var(--muted)">勾选 = 只用这些卡去换，且可全部换完；不勾 = 自动挑多余的卡（每种至少留 1 张）</span>
-                </div>
-                <div id="ex-pay-sum" style="padding:0 2px 4px;font-size:12px;color:var(--muted)"></div>
-                <div id="ex-pay-list" style="padding:6px 8px;font-size:13px;max-height:320px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--muted)">点「加载我的卡」查看可付出的卡（换卡箱 + 保险箱）</div>
-                <div id="ex-autoex-need" style="padding:2px 2px 6px;font-size:12.5px;color:var(--muted)"></div>
-                <div id="ex-autoex-logs" style="font:12px/1.6 ui-monospace,Menlo,monospace;max-height:170px;overflow-y:auto;background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap"></div>
               </div>
             </div>
           </div>
@@ -798,7 +832,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260918a"></script>
+<script src="/app.js?v=20260918b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

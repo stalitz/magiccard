@@ -1751,10 +1751,14 @@ async function autoStart() {
   if (!tid) { log("自动炼卡：请先选择一套卡（下拉或输入套卡ID）", "err"); return; }
   const buy = $("auto-buy").checked ? 1 : 0;
   const rounds = parseInt($("auto-rounds").value, 10) || 0;
+  // 偷炉（借好友空炉多并行一炉）：开关 + 常去好友 QQ。留空则后端从好友列表最后一名往回找空炉。
+  const steal = $("auto-steal").checked ? 1 : 0;
+  const sf = ($("auto-steal-friend").value || "").trim();
   $("auto-start").disabled = true;
   try {
-    const d = await (await fetch(`/api/auto/start?tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}`,
-      { method: "POST" })).json();
+    const qs = `tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}&steal=${steal}`
+      + (sf ? `&steal_friend=${encodeURIComponent(sf)}` : "");
+    const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
       log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）`, "ok");
       startAutoPoll();
@@ -1874,6 +1878,28 @@ function renderAuto(st, bx) {
       `</div>`);
     if (need && !enough) {
       head.push(`<div class="ex-msg err" style="margin-top:8px">卡箱空位不够启动：可用 ${totFree} 格 < 需 ${need} 格。先整理卡箱（集齐上交 / 腾位），或输入需要更少底卡的套卡。</div>`);
+    }
+  }
+  // 偷炉状态：独立于主炉的并行位（2026-09-18 起主炉满也会尝试偷炉）
+  const sl = (st && st.steal) || null;
+  if (sl) {
+    const last = sl.last_steal;
+    const cd = Math.max(0, Math.round((sl.cooldown_until || 0) - Date.now() / 1000));
+    const lastTxt = last
+      ? `${esc(last.name || "")}<small>@${esc(String(last.friend || ""))} ${esc(last.msg || "")}</small>`
+      : "还没偷过";
+    head.push(`<div class="state-box" style="margin-top:10px">` +
+      stat("偷炉", sl.enabled ? "开启" : "关闭",
+           sl.preferred ? `常去 ${esc(sl.preferred)}` : "自动找空炉") +
+      stat("偷炉冷却", cd > 0 ? `${cd}s` : "无", cd > 0 ? "失败后短暂停" : "") +
+      stat("上次偷炉", lastTxt) +
+      `</div>`);
+    if (last && last.code !== 0) {
+      head.push(`<div class="ex-msg err" style="margin-top:8px">上次偷炉失败：${esc(last.msg || "")}`
+        + `（错误码 ${esc(String(last.code))}）`
+        + (last.code === -33031
+            ? " —— 「同时只能偷一个炉子」是全局限制（好友炉上已挂着我的一炉），取回后自动恢复，不是这家好友不能用。"
+            : "") + `</div>`);
     }
   }
   // 最近日志

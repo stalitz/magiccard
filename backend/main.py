@@ -292,7 +292,7 @@ async def auto_status():
 
 @app.post("/api/auto/start")
 async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0,
-                    steal_friend: str = ""):
+                    steal: int = 1, steal_friend: str = ""):
     """启动自动炼卡（**可多套并行**）。先按**实时库存算净需求**做启动预检。
 
     · `tids` = 逗号分隔的套卡 id 列表（队列，按序轮转，空着的炉位给各套分着用）；
@@ -317,6 +317,7 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
         eng = AutoRefine(_session, ids, buy=bool(buy), max_rounds=rounds)
     except Exception as exc:  # noqa: BLE001  (tid 不存在等)
         return {"ok": False, "message": f"无法加载该套卡计划：{exc}"}
+    eng.steal_enabled = bool(steal)
     if steal_friend.strip():
         eng.preferred_steal_friend = steal_friend.strip()
 
