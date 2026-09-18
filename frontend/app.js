@@ -290,17 +290,15 @@ function switchPane(pane) {
   $("pane-cardbox").classList.toggle("hidden", pane !== "cardbox");
   $("pane-auto").classList.toggle("hidden", pane !== "auto");
   $("pane-exchange").classList.toggle("hidden", pane !== "exchange");
-  $("pane-lottery").classList.toggle("hidden", pane !== "lottery");
   $("pane-spirite").classList.toggle("hidden", pane !== "spirite");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
-  if (pane === "overview") ovLoadProps();
+  if (pane === "overview") { ovLoadProps(); initLotteryOnce(); }
   if (pane === "lib") initLibOnce();
   if (pane === "cardbox") initCardBoxOnce();
   if (pane === "auto") initAutoOnce();
   if (pane === "exchange") initExchangeOnce();
-  if (pane === "lottery") initLotteryOnce();
   if (pane === "spirite") { initSpiriteOnce(); spStartLive(); }
   else spStopLive();
 }
@@ -314,8 +312,8 @@ function fmtLeft(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
   return h > 0 ? `${h}小时${m}分` : (m > 0 ? `${m}分${s}秒` : `${s}秒`);
 }
-function chip(k, v, small = "") {
-  return `<div class="stat-chip"><span class="k">${k}</span><span class="v">${v}${small ? `<small>${small}</small>` : ""}</span></div>`;
+function chip(k, v, small = "", id = "") {
+  return `<div class="stat-chip"${id ? ` id="${id}"` : ""}><span class="k">${k}</span><span class="v">${v}${small ? `<small>${small}</small>` : ""}</span></div>`;
 }
 
 // 炉位上的「取消 / 取卡」按钮。取消后素材卡会原样退回卡箱，不会消失。
@@ -419,7 +417,7 @@ async function loadState() {
       chip("昵称", u.nick || "-", `QQ ${u.uin || "-"}`) +
       chip("金币", (u.money || 0).toLocaleString()) +
       chip("经验", (u.exp || 0).toLocaleString()) +
-      chip("随机抽卡", `${u.randchance || 0} 次`) +
+      chip("随机抽卡", `${u.randchance || 0} 次`).replace('class="stat-chip"', 'class="stat-chip" id="ov-randchip"') +
       chip("炼卡位", `${sb.cur || 0} / ${sb.max || 0}`, doneSlots ? `${doneSlots} 位可取` : "") +
       chip("换卡箱", `${cb.filled ?? 0} / ${cb.cur || 0}`,
            cb.max > cb.cur ? `未开通 ${cb.max - cb.cur} 格` : "") +
@@ -2173,115 +2171,71 @@ async function doBuy(cardId, themeId, btn) {
   }
 }
 
-// ---------- 抽奖/翻牌页 ----------
-let lotteryInitDone = false;
-let lotState = { randchance: 0, running: false, results: [] };
-let lotTimer = null;
-const LOT_KEY = "mc_lot_log";
-
-function lotLoad() {
-  try { return JSON.parse(localStorage.getItem(LOT_KEY)) || []; } catch { return []; }
-}
-function lotSave() {
-  try { localStorage.setItem(LOT_KEY, JSON.stringify(lotState.results.slice(-200))); } catch {}
-}
+// ---------- 随机抽卡 / 翻牌（并入总览页；结果只写全局操作日志） ----------
+// 2026-09-18 用户要求：不必单独占一个子页，功能放总览、结果放全局操作日志。
+// 因此不再维护本页自己的结果列表（原 #lot-body + localStorage mc_lot_log）——
+// 一切产出都走 log()，与其它操作同一条时间线，刷新页面也还在。
+let lotInitDone = false;
+let lotRunning = false;
 
 function initLotteryOnce() {
-  if (lotteryInitDone) return;
-  lotteryInitDone = true;
-  lotState.results = lotLoad();
+  if (lotInitDone) return;
+  lotInitDone = true;
   $("lot-draw-all").onclick = lotDrawAll;
   $("lot-pai-once").onclick = lotPaiOnce;
-  $("lot-clear").onclick = () => {
-    lotState.results = [];
-    lotSave();
-    renderLottery();
-  };
-  lotRefresh();
-  // 停留在抽奖页时，每 10 秒刷新一次 randchance，避免 stale
-  if (lotTimer) clearInterval(lotTimer);
-  lotTimer = setInterval(() => {
-    if (!document.hidden && !lotState.running) lotRefresh();
-  }, 10000);
 }
 
-async function lotRefresh() {
-  try {
-    const d = await (await fetch("/api/state")).json();
-    if (d.ok && d.user) {
-      lotState.randchance = d.user.randchance || 0;
-    }
-  } catch (e) { log("读取抽奖状态异常：" + e, "err"); }
-  renderLottery();
+// 就地刷新总览「随机抽卡」那个 chip（不重绘整块 state-box，避免打断正在看的炉位）
+function lotSetChance(n) {
+  const el = $("ov-randchip");
+  if (el) el.innerHTML = `<span class="k">随机抽卡</span><span class="v">${n} 次</span>`;
 }
 
 async function lotDrawAll() {
-  if (lotState.running) return;
-  lotState.running = true;
-  $("lot-draw-all").disabled = true;
-  log("一键抽卡：先刷新剩余次数…", "info");
+  if (lotRunning) return;
+  lotRunning = true;
+  const btn = $("lot-draw-all");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "抽卡中…";
   try {
-    // 点击前强制刷新，避免前端 stale 数据导致"明明有机会却抽了0次"的误解
-    await lotRefresh();
-    if (lotState.randchance <= 0) {
-      const tip = "当前没有随机抽卡机会（randchance=0），请等待自动恢复后再抽";
-      lotState.results.push({ ts: Date.now(), type: "draw", ok: false, text: tip });
-      log(tip, "err");
-      lotState.running = false;
-      $("lot-draw-all").disabled = false;
-      renderLottery();
+    // 点击前强制刷新，避免前端 stale 导致「明明有机会却抽了 0 次」的误解
+    let chance = null;
+    try {
+      const s = await (await fetch("/api/state")).json();
+      if (s.ok && s.user) { chance = s.user.randchance || 0; lotSetChance(chance); }
+    } catch {}
+    if (chance !== null && chance <= 0) {
+      log("一键抽卡：当前没有随机抽卡机会（0 次），等待自动恢复后再抽", "err");
       return;
     }
     const d = await (await fetch("/api/random/draw", { method: "POST" })).json();
-    lotState.randchance = d.remain || 0;
-    const summary = `抽卡 ${d.draws} 次，得卡 ${d.cards} 张，卖出 ${d.sold} 张（+${d.gold} 金），剩余 ${d.remain} 次`;
-    lotState.results.push({ ts: Date.now(), type: "draw", ok: d.ok, text: summary, detail: d });
-    lotSave();
+    const summary = d.ok
+      ? `一键抽卡：抽 ${d.draws} 次，得卡 ${d.cards} 张，自动卖出 10 面额 ${d.sold} 张（+${d.gold} 金），剩余 ${d.remain} 次`
+      : `一键抽卡失败：${d.message || d.code || "未知原因"}`;
     log(summary, d.ok ? "ok" : "err");
+    if (d.ok) { lotSetChance(d.remain || 0); loadState(); }  // 卡进换卡箱/金币变了，重读一次
   } catch (e) {
-    lotState.results.push({ ts: Date.now(), type: "draw", ok: false, text: "请求异常：" + e });
-    lotSave();
     log("一键抽卡异常：" + e, "err");
+  } finally {
+    lotRunning = false;
+    btn.disabled = false; btn.textContent = old;
   }
-  lotState.running = false;
-  $("lot-draw-all").disabled = false;
-  renderLottery();
 }
 
 async function lotPaiOnce() {
-  log("翻牌一次…", "info");
+  const btn = $("lot-pai-once");
+  btn.disabled = true; btn.textContent = "翻牌中…";
   try {
     const d = await (await fetch("/api/pai/open", { method: "POST" })).json();
-    const items = (d.items || []).map((it) => {
-      return it.text || it.name || (it.cardname || "") || `道具${it.id || ""}`;
-    }).join("、") || "（无奖励数据）";
-    const text = `${d.message || "翻牌结束"} → ${items}`;
-    lotState.results.push({ ts: Date.now(), type: "pai", ok: d.ok, text, detail: d });
-    lotSave();
-    log(text, d.ok ? "ok" : "err");
+    const items = (d.items || []).map((it) =>
+      it.text || it.name || it.cardname || `道具${it.id || ""}`).join("、") || "（无奖励数据）";
+    log(`翻牌一次：${d.message || (d.ok ? "成功" : "失败")} → ${items}`, d.ok ? "ok" : "err");
+    if (d.ok) loadState();
   } catch (e) {
-    lotState.results.push({ ts: Date.now(), type: "pai", ok: false, text: "翻牌异常：" + e });
-    lotSave();
     log("翻牌异常：" + e, "err");
+  } finally {
+    btn.disabled = false; btn.textContent = "手动翻一次牌";
   }
-  renderLottery();
-}
-
-function renderLottery() {
-  $("lot-randchance").innerHTML =
-    `<span class="k">剩余机会</span><span class="v">${lotState.randchance} 次</span>`;
-  const body = $("lot-body");
-  $("lot-cnt").textContent = lotState.results.length
-    ? `最近 ${lotState.results.length} 条` : "";
-  if (!lotState.results.length) return;
-  body.innerHTML = lotState.results.slice().reverse().map((r) => {
-    const t = new Date(r.ts).toLocaleTimeString("zh-CN", { hour12: false });
-    const icon = r.type === "draw" ? "🎲" : "🃏";
-    const cls = r.ok ? "aok" : "aerr";
-    const detail = r.detail ? `<pre style="margin:4px 0 0;font:11px monospace;white-space:pre-wrap">${esc(JSON.stringify(r.detail, null, 2).slice(0, 500))}</pre>` : "";
-    return `<div style="border-bottom:1px solid var(--line);padding:8px 0">
-      <div><span class="at">[${t}]</span> <span class="${cls}">${icon} ${esc(r.text)}</span></div>${detail}</div>`;
-  }).join("");
 }
 
 // ---------- 换卡「好友池」开关（默认开，选择持久化） ----------
@@ -2310,9 +2264,11 @@ function initFriendPoolPref() {
     if (me.logged_in) {
       log(`检测到已有登录态（${me.uin}）`, "ok");
       showDash(me.uin);
-      // 支持 URL hash 直接打开某个子页（默认 #overview）
-      const hp = (location.hash || "").replace("#", "");
-      if (hp && ["overview", "lib", "auto", "exchange", "lottery"].includes(hp)) {
+      // 支持 URL hash 直接打开某个子页（默认 #overview）。
+      // #lottery 已并入总览（2026-09-18），老书签落到 overview，别变成空白页。
+      let hp = (location.hash || "").replace("#", "");
+      if (hp === "lottery") hp = "overview";
+      if (hp && ["overview", "lib", "cardbox", "auto", "exchange", "spirite"].includes(hp)) {
         setTimeout(() => switchPane(hp), 50);
       }
       return;

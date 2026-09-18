@@ -469,7 +469,6 @@
           <button class="btn sm ghost" data-pane="cardbox">卡箱</button>
           <button class="btn sm ghost" data-pane="auto">自动炼卡</button>
           <button class="btn sm ghost" data-pane="exchange">换卡</button>
-          <button class="btn sm ghost" data-pane="lottery">抽奖/翻牌</button>
           <button class="btn sm ghost" data-pane="spirite">灵宠探险</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
@@ -492,6 +491,16 @@
             <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
               <h3 style="margin-bottom:10px">炼卡道具</h3>
               <div id="ov-props" style="display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px"></div>
+            </div>
+            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
+              <h3 style="margin-bottom:10px">随机抽卡 / 翻牌</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <button id="lot-draw-all" class="btn sm ok">一键抽卡 + 自动卖10面额</button>
+                <button id="lot-pai-once" class="btn sm primary">手动翻一次牌</button>
+              </div>
+              <div class="hint" style="margin-top:8px">抽卡机会随时间累积（上限 16 次，见上方「随机抽卡」）；
+                每次从自己炉位取卡得 1 次翻牌机会，自动炼卡已默认取卡后立即翻牌。<br>
+                结果写入右侧<b>操作日志</b>，不在这里重复留档。</div>
             </div>
             <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
               <button id="probe-btn" class="btn sm">探测接口（调试）</button>
@@ -740,36 +749,6 @@
         </div>
       </div>
 
-      <!-- 子页：抽奖/翻牌 -->
-      <div id="pane-lottery" class="pane hidden">
-        <div class="lib">
-          <div class="lib-toolbar" style="gap:10px">
-            <span style="font-weight:600;font-size:13.5px">随机抽卡：</span>
-            <span id="lot-randchance" class="stat-chip" style="padding:6px 10px">
-              <span class="k">剩余机会</span>
-              <span class="v">-</span>
-            </span>
-            <button id="lot-draw-all" class="btn sm ok">一键抽卡 + 自动卖10面额</button>
-            <span class="spacer" style="flex:1"></span>
-            <span style="font-weight:600;font-size:13.5px">翻牌：</span>
-            <button id="lot-pai-once" class="btn sm primary">手动翻一次牌</button>
-          </div>
-          <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
-            <div class="lpanel">
-              <div class="lp-head">
-                <span class="t">结果/日志</span>
-                <span class="cnt" id="lot-cnt"></span>
-                <div class="spacer"></div>
-                <button id="lot-clear" class="btn sm ghost">清空</button>
-              </div>
-              <div class="lst" style="padding:12px 16px" id="lot-body">
-                <div class="empty-tip">随机抽卡机会会随时间累积（最高16次），点「一键抽卡」抽完并自动卖掉10面额卡。<br>
-                  每次从自己炉位取卡会获得1次翻牌机会，自动炼卡已默认取卡后立即翻牌。</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
       <div id="pane-spirite" class="pane hidden">
         <div class="lib">
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap">
@@ -867,7 +846,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260918d"></script>
+<script src="/app.js?v=20260918e"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
