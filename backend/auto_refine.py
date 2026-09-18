@@ -387,6 +387,7 @@ class AutoRefine:
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
+        self.steal_blocked: str = ""          # 本轮「能偷却没偷」的原因，供面板显示
         # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
         # 仅当它被失败缓存或炉上挂着我未取回的卡时才退回「从最后往回扫」。
         self.preferred_steal_friend: str | None = None
@@ -576,6 +577,7 @@ class AutoRefine:
         free_steal = st["cap"].get("stove", {}).get("free_steal", 0)
         can_steal = bool(self.steal_enabled and free_steal > 0
                          and self._steal_cooldown_until < time.time())
+        self.steal_blocked = ""              # 每 tick 重算
         # ★ 2026-09-18 修：旧版这里写的是 `if free_stove <= 0 or not self.queue: return`，
         #   于是主炉一满（free_main=0）整个函数立刻返回，末尾的偷炉分支**永远走不到** ——
         #   而主炉满恰恰是常态（实测 free_main=0 / free_steal=1，偷炉位空着没人用），
@@ -609,35 +611,15 @@ class AutoRefine:
         for tid, target in seq:
             if free_stove <= 0:
                 break
-            plan = self.plans[tid]
-            comp = plan.comp[target]
-            mats = [int(m) for m in (comp[3], comp[4], comp[5]) if m]
-            need_cnt = Counter(mats)
-            short = {m: n - stock.get(m, 0) for m, n in need_cnt.items()
-                     if n > stock.get(m, 0)}
-            if any(m in plan.comp for m in short):
-                continue                        # 缺成品卡 → 等下一轮
-            need_buy = sum(short.values())
-            if need_buy:
-                free_box = self._free_change(st)
-                if need_buy > free_box or bought + need_buy > MAX_BUY_PER_TICK:
-                    # 不是故障，是等前面那几炉把素材烧掉腾格位 —— 不计入 errors
-                    self._log("暂缓", True,
-                              f"{plan.cname(target)}（{plan.name}）：需就地买 {need_buy} 张素材，"
-                              f"换卡箱只剩 {free_box} 格，等下一轮")
-                    continue
-                if not await self._buy_for(tid, target, short, steps):
-                    continue
-                bought += need_buy
-                rd = await self._read_state()   # 买完槽位变了，重读一次再入炉
-                if rd is None:
-                    self._log("读取卡箱", False, "买卡后重读失败")
-                    return
-                st, stock, slots, pending = rd
-            # 素材必须此刻在箱里（炉内在炼的不能当素材），且套内卡不能被动到清空
-            if any(stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)
-                   for m, n in need_cnt.items()):
+            # 素材必须此刻在箱里（炉内在炼的不能当素材），套内卡不能被动到清空，
+            # 缺的 10 面值底卡就地买 —— 与偷炉共用 _prepare_turn，判定只有一份。
+            prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
+                                            planned, bought, steps, tag="炼卡")
+            if prep is None:
                 continue
+            st, stock, slots, pending, need_cnt, nb = prep
+            bought += nb
+            plan = self.plans[tid]
             res = self._payload(plan, target, need_cnt, slots)
             if res is None:
                 continue
@@ -668,37 +650,84 @@ class AutoRefine:
         # 条件：开启偷炉、偷炉槽空闲、未被全局冷却、尚有未提交的炉次。
         # 注意这里**不要求主炉有空位**（主炉满时也要偷，见函数开头注释）。
         if can_steal and st["cap"].get("stove", {}).get("free_steal", 0) > 0:
-            # 找一个「素材已齐、能立刻炼」的目标（偷炉不就地买卡，保持简单）
-            steal_cand = None
+            # 与主炉走**同一个** _prepare_turn（含「就地买底卡」）。
+            # 旧版这里自写了一份「素材必须已经躺在箱里」的判定，而底卡平时零库存
+            # （主炉路径就地为每炉补买、用完即烧）→ 候选永远被否 → 「指定了好友也从没偷过」
+            # （2026-09-18 定位：live 库存下 1652 的三个候选被同一理由全部跳过）。
+            stole = False
             for tid, target in seq:
                 if target in taken:
                     continue                        # 主炉已占，别在好友炉上重复炼同一张
-                plan = self.plans[tid]
-                comp = plan.comp[target]
-                mats = [int(m) for m in (comp[3], comp[4], comp[5]) if m]
-                nc = Counter(mats)
-                short = {m: n - stock.get(m, 0) for m, n in nc.items() if n > stock.get(m, 0)}
-                if any(m in plan.comp for m in short):
+                prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
+                                                planned, bought, steps, tag="偷炉")
+                if prep is None:
                     continue
-                if sum(short.values()) > 0:
-                    continue
-                if any(stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)
-                       for m, n in nc.items()):
-                    continue
-                steal_cand = (tid, target, nc, plan)
-                break
-            if steal_cand:
-                tid, target, nc, plan = steal_cand
+                st, stock, slots, pending, need_cnt, nb = prep
+                bought += nb
+                # 买卡 + 重读之后世界可能变了：偷炉槽被别人占了 / 我这轮进了全局冷却
+                if st["cap"].get("stove", {}).get("free_steal", 0) <= 0:
+                    self.steal_blocked = "偷炉位已被占用"
+                    break
                 friend = await self._pick_steal_friend(st)
-                if friend:
-                    await self._refine_steal(st, tid, target, nc, plan, slots, friend,
-                                            stock, pending, steps)
+                if not friend:
+                    self.steal_blocked = "没找到可用好友（炉满或挂着我没取的卡）"
+                    break
+                plan = self.plans[tid]
+                await self._refine_steal(st, tid, target, need_cnt, plan, slots, friend,
+                                         stock, pending, steps)
+                taken.add(target)                   # 防重复提交
+                stole = True
+                break
+            if not stole and not self.steal_blocked:
+                rest = [t for _tid, t in seq if t not in taken]
+                self.steal_blocked = ("没有待提交的炉次（都已在炉上）" if not rest
+                                      else "候选素材没备齐（底卡买不到/换卡箱没格，见日志）")
 
     @staticmethod
     def _free_change(st: dict) -> int:
         """换卡箱剩余可放格数 = 已开通格 cur - 已放卡数 used（max-cur 是未开通格）。"""
         c = st["cap"].get("change", {})
         return c.get("cur", 0) - c.get("used", 0)
+
+    async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
+                            planned: set, bought: int, steps: list[dict],
+                            tag: str = "炼卡"):
+        """备齐一个炉次的素材（缺的 10 面值底卡**就地买**），返回
+        `(st, stock, slots, pending, need_cnt, n_bought)`；不可提交返回 None。
+
+        ★ 主炉与偷炉必须共用这一份逻辑（2026-09-18 修）：
+          偷炉原先自己写了一份「素材必须已经躺在箱里、且不许买」的判定，而底卡
+          平时是**零库存**的（主炉路径就地为每炉补买，用完即烧）—— 于是偷炉的候选
+          永远被「需就地买 N 张素材」这一条否掉，表现为「指定了好友也从来没偷过」。
+          离线复现：live 库存下 1652 的三个候选全部被同一理由跳过。
+        """
+        plan = self.plans[tid]
+        comp = plan.comp[target]
+        need_cnt = Counter(int(m) for m in (comp[3], comp[4], comp[5]) if m)
+        short = {m: n - stock.get(m, 0) for m, n in need_cnt.items()
+                 if n > stock.get(m, 0)}
+        if any(m in plan.comp for m in short):
+            return None                        # 缺的是「还得炼出来」的成品卡 → 等主炉先炼它
+        need_buy = sum(short.values())
+        if need_buy:
+            free_box = self._free_change(st)
+            if need_buy > free_box or bought + need_buy > MAX_BUY_PER_TICK:
+                # 不是故障，是等前面那几炉把素材烧掉腾格位 —— 不计入 errors
+                self._log("暂缓", True,
+                          f"{tag}·{plan.cname(target)}（{plan.name}）：需就地买 {need_buy} 张素材，"
+                          f"换卡箱只剩 {free_box} 格，等下一轮")
+                return None
+            if not await self._buy_for(tid, target, short, steps):
+                return None
+            rd = await self._read_state()      # 买完槽位变了，重读一次再入炉
+            if rd is None:
+                self._log("读取卡箱", False, f"{tag}买卡后重读失败")
+                return None
+            st, stock, slots, pending = rd
+        if any(stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)
+               for m, n in need_cnt.items()):
+            return None
+        return st, stock, slots, pending, need_cnt, need_buy
 
     async def _read_state(self):
         """读主界面 -> (st, stock, slots, pending)。失败返回 None。"""
@@ -974,5 +1003,6 @@ class AutoRefine:
                 "steal": {"enabled": self.steal_enabled,
                            "preferred": self.preferred_steal_friend,
                            "last_steal": self.last_steal,
+                           "blocked": self.steal_blocked,
                            "cooldown_until": self._steal_cooldown_until},
                 "log": self.log[-30:]}

@@ -1893,6 +1893,7 @@ function renderAuto(st, bx) {
            sl.preferred ? `常去 ${esc(sl.preferred)}` : "自动找空炉") +
       stat("偷炉冷却", cd > 0 ? `${cd}s` : "无", cd > 0 ? "失败后短暂停" : "") +
       stat("上次偷炉", lastTxt) +
+      (sl.blocked ? stat("本轮未偷", esc(sl.blocked), "为什么没偷就看这里") : "") +
       `</div>`);
     if (last && last.code !== 0) {
       head.push(`<div class="ex-msg err" style="margin-top:8px">上次偷炉失败：${esc(last.msg || "")}`

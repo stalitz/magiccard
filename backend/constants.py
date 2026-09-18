@@ -102,4 +102,7 @@ ERR_CODES = {
 
 
 def err_msg(code: int) -> str:
+    # code=0 = 成功。以前会走到 fallback，日志里全是「未知错误码 0」（买卡/偷炉成功也这么写）。
+    if code == 0:
+        return "成功"
     return ERR_CODES.get(code, f"未知错误码 {code}")
