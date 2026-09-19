@@ -357,33 +357,26 @@
   .tchip.no .q{background:#c98d86}
   .tchip.base{border-style:dashed;background:#fafbfd}
   .tchip.craft{opacity:.55;background:#eef1f5;border-color:#c9d2de}
-  /* 选中卡 = 蓝框；它的 3 张下级材料**就地**换色框（对齐游戏界面：不另起一行列材料）
+  /* 选中卡 = 蓝框；它需要的下级材料**就地**换色框出（对齐游戏界面：不另起一行列材料）。
+     选中卡与材料是两种颜色；**材料之间统一同一种颜色**（不再按配方顺序分色）。
      用 box-shadow 描边，避免改 border 宽度导致整行抖动 */
   .tchip.sel{border-color:#2f7cf6;background:#eef5ff;box-shadow:0 0 0 2px #2f7cf6;font-weight:600;z-index:2}
-  .tchip.m1{border-color:#e08c1b;background:#fff8ec;box-shadow:0 0 0 2px #e08c1b;z-index:2}
-  .tchip.m2{border-color:#7a5af8;background:#f5f2ff;box-shadow:0 0 0 2px #7a5af8;z-index:2}
-  .tchip.m3{border-color:#0f9b8e;background:#eefaf8;box-shadow:0 0 0 2px #0f9b8e;z-index:2}
+  .tchip.mat{border-color:#e08c1b;background:#fff8ec;box-shadow:0 0 0 2px #e08c1b;z-index:2}
   /* 点基础素材卡时，把「用到它的父卡」框出来（灰虚框） */
   .tchip.pframe{border-style:dashed;border-color:#9aa6b8;background:#f6f8fb;box-shadow:0 0 0 2px #c3cddb;z-index:2}
-  /* 材料格内注入的角标：配方序号 / 需求张数 / 有·缺 */
+  /* 材料格内注入的角标：需求张数 / 有·缺 */
   .tchip .inj{font-style:normal;flex:0 0 auto}
-  .tchip .mi{width:14px;height:14px;line-height:14px;text-align:center;border-radius:50%;
-    font-size:10px;color:#fff}
-  .tchip .mi.m1{background:#e08c1b}
-  .tchip .mi.m2{background:#7a5af8}
-  .tchip .mi.m3{background:#0f9b8e}
   .mn{font-style:normal;font-size:10.5px;font-weight:600;color:#b9770b;background:#fff3dd;
     border-radius:4px;padding:0 4px}
   .mh{font-style:normal;font-size:10.5px;font-weight:600;border-radius:4px;padding:0 4px}
   .mh.ok{color:#1a7a4a;background:#e8f6ee}
   .mh.no{color:#c0392b;background:#fdecea}
   .tchip .buy-btn{font-size:10.5px;padding:0 5px;line-height:15px;border-radius:4px}
-  /* 图例（写在顶部说明行里） */
-  .synth-sub .lg{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
-    border-radius:50%;font-size:10px;color:#fff;margin:0 2px 0 5px;font-style:normal}
-  .synth-sub .lg1{background:#e08c1b}
-  .synth-sub .lg2{background:#7a5af8}
-  .synth-sub .lg3{background:#0f9b8e}
+  /* 图例（写在顶部说明行里）：选中色 / 材料色 */
+  .synth-sub .lg{display:inline-block;width:12px;height:12px;border-radius:4px;
+    margin:0 3px;vertical-align:-1px}
+  .synth-sub .lg-sel{background:#2f7cf6}
+  .synth-sub .lg-mat{background:#e08c1b}
   /* 底部只留一行「动作行」：选中卡 + 耗时/持有 + 炼卡（材料已在上方框出，不再重复列一遍） */
   .syn-act{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
     background:#fbfcfe;font-size:12.5px;display:flex;align-items:center;gap:8px;
@@ -933,7 +926,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919n"></script>
+<script src="/app.js?v=20260919o"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

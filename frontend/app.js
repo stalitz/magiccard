@@ -1637,10 +1637,10 @@ function renderSynTiers(d) {
                          : `<span class="tag no">炉位已满</span>`)
     + `</div>`;
   h += `<div class="synth-sub">按面值分层，每张卡只列一次（左上角数字＝你持有几张）。`
-    + `点任意一张卡 → <b>它需要的下级材料就在上面直接框出来</b>`
-    + `<span class="lg lg1">①</span><span class="lg lg2">②</span><span class="lg lg3">③</span>`
-    + `＝配方第 1/2/3 张（橙/紫/青框），角标 <i class="mn">×2</i>＝需 2 张，`
-    + `<i class="mh ok">有</i>绿字＝够、<i class="mh no">缺</i>红字＝不够。</div>`;
+    + `点任意一张卡 → <b>它需要的下级材料就在上面直接框出来</b>：`
+    + `<span class="lg lg-sel">选中</span><span class="lg lg-mat">它需要的材料</span>`
+    + `（材料统一一种颜色；角标 <i class="mn">×2</i>＝需 2 张，`
+    + `<i class="mh ok">有</i>绿字＝够、<i class="mh no">缺</i>红字＝不够）。</div>`;
   if (!total) {
     h += `<div class="syn-empty">该套卡没有卡。</div>`;
     return h;
@@ -1671,9 +1671,8 @@ function mountSynView(root, d, rerender) {
   synSelect(root, d.clicked_card_id, rerender);   // 默认选中你点开的那张卡
 }
 
-// 材料框色：配方第 1/2/3 张各一色（对齐游戏界面「材料就地变色框」的做法）
-const SYN_MAT_CLS = ["m1", "m2", "m3"];
-const SYN_MAT_ORD = ["①", "②", "③"];
+// 选中卡与「它需要的材料」用两种颜色区分；材料本身**统一一种颜色**（不再按配方顺序分色）
+const SYN_MAT_CLS = "mat";
 
 function synSelect(root, cid, rerender) {
   const d = root.__syn || {};
@@ -1682,7 +1681,7 @@ function synSelect(root, cid, rerender) {
   const me = flat.find((c) => c.card_id === Number(cid));
   // 先清掉上一次的标注（框色 + 注入的角标/买按钮），避免叠加
   for (const c of root.querySelectorAll(".tchip")) {
-    c.classList.remove("sel", "pframe", ...SYN_MAT_CLS);
+    c.classList.remove("sel", "pframe", SYN_MAT_CLS);
     for (const el of c.querySelectorAll(".inj")) el.remove();
   }
   const act = root.querySelector(".syn-act");
@@ -1706,17 +1705,12 @@ function synSelect(root, cid, rerender) {
     return;
   }
 
-  // 有配方：3 张下级材料**就在上面的分层清单里直接框出来**（不再另外列一行）
+  // 有配方：3 张下级材料**就在上面的分层清单里直接框出来**（同一种颜色，不再另外列一行）
   const outside = [];   // 兜底：万一有材料不属于本套卡（清单里没有那一格），仍要看得见
-  me.mats.forEach((m, i) => {
-    const slot = Math.min(i, 2);
+  me.mats.forEach((m) => {
     const el = root.querySelector(`.tchip[data-cid="${m.card_id}"]`);
-    if (!el) { outside.push({ m, slot }); return; }
-    el.classList.add(SYN_MAT_CLS[slot]);
-    const ord = document.createElement("i");
-    ord.className = "inj mi " + SYN_MAT_CLS[slot];
-    ord.textContent = SYN_MAT_ORD[slot];
-    el.appendChild(ord);
+    if (!el) { outside.push(m); return; }
+    el.classList.add(SYN_MAT_CLS);
     if (m.need > 1) {
       const mn = document.createElement("i");
       mn.className = "inj mn";
@@ -1740,8 +1734,8 @@ function synSelect(root, cid, rerender) {
 
   act.innerHTML = `<span class="muted">已选</span><span class="who">${esc(me.name)}</span>`
     + `<span class="muted">耗时 ${fmtDur(me.secs)} · 持有 ${me.own}</span>`
-    + outside.map(({ m, slot }) => `<span class="tchip ${SYN_MAT_CLS[slot]}" style="cursor:default">`
-        + `<i class="mi ${SYN_MAT_CLS[slot]}">${SYN_MAT_ORD[slot]}</i>${esc(m.name)}`
+    + outside.map((m) => `<span class="tchip ${SYN_MAT_CLS}" style="cursor:default">`
+        + `${esc(m.name)}`
         + (m.need > 1 ? `<i class="mn">×${m.need}</i>` : "")
         + `<i class="mh ${m.owned ? "ok" : "no"}">${m.owned ? "有" + m.count : "缺" + m.lack}</i>`
         + `</span>`).join("")

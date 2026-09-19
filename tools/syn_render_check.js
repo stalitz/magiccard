@@ -59,9 +59,9 @@ const sandbox = {
   }
   console.log("重复出现（>2 次）的卡:", dup.length ? dup.join(", ") : "无 ✓");
 
-  // 2) 材料必须是**在上方清单里就地换色框出**，不是另列一行
+  // 2) 材料必须是**在上方清单里就地换色框出**（统一一种颜色），不是另列一行
   console.log("动作行:", root.querySelector(".syn-act").textContent.trim());
-  const framed = [...root.querySelectorAll(".tchip.m1,.tchip.m2,.tchip.m3")]
+  const framed = [...root.querySelectorAll(".tchip.mat")]
     .map((e) => `${e.className.replace(/tchip\s*/, "")}·${e.textContent.trim()}`);
   console.log("被框出的材料格:", framed.length ? framed.join(" / ") : "（无）");
   console.log("选中格:", (root.querySelector(".tchip.sel") || {}).textContent);
@@ -69,7 +69,7 @@ const sandbox = {
     root.querySelectorAll(".syn-act .tchip").length);
 
   // 3) 下钻：点一个框出来的材料格，看是否切到那张卡（逐层看路径，零重复）
-  const m = root.querySelector(".tchip.m1[data-cid],.tchip.m2[data-cid],.tchip.m3[data-cid]");
+  const m = root.querySelector(".tchip.mat[data-cid]");
   if (!m) {
     console.log("\n（该卡没有材料可下钻，跳过）");
   } else {
