@@ -1638,9 +1638,8 @@ function renderSynTiers(d) {
     + `</div>`;
   h += `<div class="synth-sub">按面值分层，每张卡只列一次（左上角数字＝你持有几张）。`
     + `点任意一张卡 → <b>它需要的下级材料就在上面直接框出来</b>：`
-    + `<span class="lg lg-sel">选中</span><span class="lg lg-mat">它需要的材料</span>`
-    + `（材料统一一种颜色；角标 <i class="mn">×2</i>＝需 2 张，`
-    + `<i class="mh ok">有</i>绿字＝够、<i class="mh no">缺</i>红字＝不够）。</div>`;
+    + `<span class="lg lg-sel"></span>选中卡　<span class="lg lg-mat"></span>它需要的材料（同一种颜色）`
+    + `。角标 <i class="mn">×2</i>＝需 2 张，<i class="mh ok">有</i>＝够、<i class="mh no">缺</i>＝不够。</div>`;
   if (!total) {
     h += `<div class="syn-empty">该套卡没有卡。</div>`;
     return h;

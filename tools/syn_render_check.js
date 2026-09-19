@@ -61,6 +61,10 @@ const sandbox = {
 
   // 2) 材料必须是**在上方清单里就地换色框出**（统一一种颜色），不是另列一行
   console.log("动作行:", root.querySelector(".syn-act").textContent.trim());
+  // 图例色块必须是**空 span**（文字写在色块外面）；文字塞进 12px 色块里会挤成竖排
+  const lgBad = [...root.querySelectorAll(".synth-sub .lg")].filter((e) => e.textContent.trim());
+  console.log("图例色块里混入文字（应为 0）:", lgBad.length);
+  console.log("说明行:", root.querySelector(".synth-sub").textContent.trim());
   const framed = [...root.querySelectorAll(".tchip.mat")]
     .map((e) => `${e.className.replace(/tchip\s*/, "")}·${e.textContent.trim()}`);
   console.log("被框出的材料格:", framed.length ? framed.join(" / ") : "（无）");
