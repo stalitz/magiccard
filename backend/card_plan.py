@@ -268,8 +268,9 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
             secs = int(c[6])
             recipes[t] = (mats, secs)
 
-    # 实时持有（仅换卡箱/保险箱，炉内不算素材）+ 空炉数
+    # 实时持有（仅换卡箱/保险箱，炉内不算素材）+ 空炉数 + 炉内正在合成/待收的卡
     owned: dict[int, int] = {}
+    crafting: set[int] = set()
     free_stoves = 0
     if xml_text:
         uc = parse_user_cards(xml_text)
@@ -279,20 +280,12 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
                 if cid > 0:
                     owned[cid] = owned.get(cid, 0) + 1
         free_stoves = sum(1 for _, e in uc.get("stoves", []) if e <= now)
+        # 炉内的卡：游戏炼卡窗口里显示为「合成中」的灰态
+        crafting = {cid for _s, cid in uc.get("stovebox", []) if cid > 0}
 
-    def mat_detail(m: int) -> dict:
-        mc = card_by_id.get(m)
-        nm = str(mc[2]) if mc else f"卡{m}"
-        pr = int(mc[3]) if mc else 0
-        cnt = owned.get(m, 0)
-        return {"card_id": m, "name": nm, "price": pr, "count": cnt,
-                "need": 1, "lack": 1, "owned": False,
-                "children": [], "buyable": 0}
-
-    def build_node(t: int, depth: int) -> dict:
-        mats, secs = recipes[t]
-        # 同一配方里同一张卡可能出现多个槽位（如 [x, x, y] = 需 x×2），
-        # 聚合成「一张卡 ×need」，与游戏炼卡窗口的角标一致，不再重复显示
+    def agg_slots(mats: list) -> tuple[dict[int, int], list[int]]:
+        """同一配方的材料槽可能重复（如 [x, x, y] = 需 x×2）：
+        聚合成「一张卡 ×need」，与游戏炼卡窗口的角标一致，不再重复显示。"""
         need: dict[int, int] = {}
         order: list[int] = []
         for m in mats:
@@ -301,38 +294,51 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
                     need[m] = 0
                     order.append(m)
                 need[m] += 1
-        mlist = []
-        ok = True
-        for m in order:
-            d = mat_detail(m)
-            have = d["count"]
-            nd = need[m]
-            d["need"] = nd
-            d["lack"] = max(0, nd - have)
-            d["owned"] = have >= nd
-            # 缺料 + 面值 10 + 该套未下架在售 => 可从商店直接买来补齐
-            d["buyable"] = 1 if (d["price"] == 10 and theme_id in bt and d["lack"] > 0) else 0
-            if not d["owned"]:
-                ok = False
-            if depth < 3 and m in recipes:
-                d["children"] = [build_node(m, depth + 1)]
-            mlist.append(d)
-        return {
-            "card_id": t,
-            "name": card_name(t),
-            "price": int((card_by_id.get(t) or [None, None, None, 0])[3] or 0),
-            "secs": secs,
-            "materials": mlist,
-            "refinable": ok,
-        }
+        return need, order
 
-    nodes = [build_node(t, 0) for t in recipes]
-    nodes.sort(key=lambda n: (not n["refinable"], n["secs"]))
+    def mat_detail(m: int, nd: int) -> dict:
+        mc = card_by_id.get(m)
+        cnt = owned.get(m, 0)
+        return {"card_id": m, "name": str(mc[2]) if mc else f"卡{m}",
+                "price": int(mc[3]) if mc else 0,
+                "need": nd, "count": cnt, "lack": max(0, nd - cnt),
+                "owned": cnt >= nd,
+                # 缺料 + 面值 10 + 该套未下架在售 => 可从商店直接买来补齐
+                "buyable": 1 if (mc and int(mc[3]) == 10 and theme_id in bt and cnt < nd) else 0}
+
+    # ---- 按面值分层：该套**每张卡只出现一次**（对齐游戏炼卡窗口的排布）----
+    # 每张卡：角标=持有数；target=有配方；refinable=3 张下级卡都够；craft=正在炉里合成。
+    # 材料只挂在卡上（前端点卡时高亮 + 单行说明），不整片铺开，杜绝同名卡反复出现。
+    tiers_map: dict[int, list] = {}
+    for c in lib["card_list"]:
+        if int(c[1]) != theme_id:
+            continue
+        cid = int(c[0])
+        pr = int(c[3] or 0)
+        rec = recipes.get(cid)
+        entry = {
+            "card_id": cid, "name": str(c[2]), "price": pr,
+            "secs": int(rec[1]) if rec else 0,
+            "own": owned.get(cid, 0), "craft": cid in crafting,
+            "target": bool(rec), "refinable": False, "mats": [],
+        }
+        if rec:
+            need, order = agg_slots(rec[0])
+            entry["mats"] = [mat_detail(m, need[m]) for m in order]
+            entry["refinable"] = all(m["owned"] for m in entry["mats"])
+        tiers_map.setdefault(pr, []).append(entry)
+
+    tiers = []
+    for pr in sorted(tiers_map, reverse=True):
+        cs = sorted(tiers_map[pr], key=lambda e: -e["card_id"])
+        tiers.append({"price": pr, "secs": max(e["secs"] for e in cs), "cards": cs})
+
     return {
         "ok": True,
         "theme": {"id": theme_id, "name": theme_name},
         "theme_buyable": theme_id in bt,
         "clicked_card_id": int(card_id),
         "free_stoves": free_stoves,
-        "nodes": nodes,
+        "total": sum(len(t["cards"]) for t in tiers),
+        "tiers": tiers,
     }

@@ -233,16 +233,9 @@
   /* 套卡明细里的卡行 */
   .card-row{padding:7px 10px;border-radius:8px;border:1px solid var(--line);margin-bottom:6px}
   .card-row .head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .card-row .recipe{font-size:12.5px;color:var(--muted);margin-top:4px;line-height:1.7}
-  .card-row .recipe .eq{color:var(--text)}
-  .chain{margin:6px 0 0 4px;padding-left:14px;border-left:2px solid #d8e6f2;font-size:12.5px;color:var(--text);line-height:1.9}
-  .chain .lv{display:flex;gap:6px;align-items:center}
-  .chain .arrow{color:var(--muted)}
-  .chain .secs{color:var(--muted);font-size:11.5px}
   .lib-foot{flex:0 0 auto;font-size:12px;color:var(--muted);padding:6px 14px;border-top:1px solid var(--line)}
   .mini-btn{border:none;background:#eef4fa;color:#2b6cb0;font-size:12px;padding:2px 9px;border-radius:5px;cursor:pointer}
   .mini-btn:hover{background:#e0ecf8}
-  .mini-btn.chain-on{background:#d5e8f7}
 
   .hidden{display:none!important}
 
@@ -343,12 +336,39 @@
   .modal-body{padding:14px 16px;overflow-y:auto}
   .synth-theme{font-size:14px;font-weight:700;color:var(--text)}
   .synth-sub{font-size:12px;color:var(--muted);margin:4px 0 12px;line-height:1.5}
-  .syn-node{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:#fbfdff}
-  .syn-node.on{border-color:#2f7cf6;box-shadow:0 0 0 2px rgba(47,124,246,.12)}
-  .syn-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-  .syn-name{font-weight:700;font-size:13.5px}
-  .syn-pr{font-size:11px;color:var(--muted);background:#eef2f7;border-radius:8px;padding:0 7px}
-  .syn-secs{font-size:11px;color:var(--muted)}
+  /* 套卡合成信息：按面值分层，每张卡只占一格（对齐游戏炼卡窗口，省空间、无重复） */
+  .tier-rows{display:flex;flex-direction:column;gap:6px}
+  .tier-row{display:flex;gap:10px;align-items:flex-start;padding:7px 9px;
+    border:1px solid var(--line);border-radius:8px;background:#fbfcfe}
+  .tier-lab{flex:0 0 86px;display:flex;flex-direction:column;line-height:1.3;padding-top:2px}
+  .tier-lab b{font-size:13.5px;color:var(--qq-blue-d)}
+  .tier-lab i{font-size:11px;color:var(--muted);font-style:normal}
+  .tier-cards{flex:1 1 auto;display:flex;flex-wrap:wrap;gap:5px}
+  .tchip{position:relative;display:inline-flex;align-items:center;padding:3px 9px 3px 16px;
+    border:1px solid #cfd7e3;border-radius:6px;background:#fff;font-size:12.5px;
+    line-height:1.5;cursor:pointer;user-select:none}
+  .tchip .q{position:absolute;left:3px;top:50%;transform:translateY(-50%);font-size:10px;
+    font-style:normal;min-width:10px;text-align:center;color:#fff;background:#98a4b8;
+    border-radius:3px;padding:0 2px}
+  .tchip:hover{filter:brightness(0.98)}
+  .tchip.ok{border-color:#8fd2a6;background:#f1fbf5}
+  .tchip.ok .q{background:#2e9e5b}
+  .tchip.no{border-color:#e3c9c5;background:#fdf6f5}
+  .tchip.no .q{background:#c98d86}
+  .tchip.base{border-style:dashed;background:#fafbfd}
+  .tchip.craft{opacity:.55;background:#eef1f5;border-color:#c9d2de}
+  .tchip.sel{outline:2px solid var(--qq-blue);outline-offset:1px;font-weight:600}
+  .tchip.mat{border-color:#f0b429;background:#fffbf0}
+  .syn-cap{margin-top:8px;padding:7px 10px;border:1px dashed #c9d2de;border-radius:8px;
+    background:#fbfcfe;font-size:12.5px;display:flex;align-items:center;gap:6px;
+    flex-wrap:wrap;min-height:34px;line-height:1.7}
+  .syn-cap .op{color:var(--muted)}
+  .syn-cap .muted{color:var(--muted)}
+  .mchip{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:6px;
+    border:1px solid #cfd7e3;background:#fff;font-size:12px;cursor:pointer}
+  .mchip i{font-style:normal;font-size:11px;color:var(--muted)}
+  .mchip.ok{border-color:#8fd2a6;background:#f1fbf5}
+  .mchip.no{border-color:#e3c9c5;background:#fdf6f5}
   .tag{font-size:11px;border-radius:8px;padding:0 7px;font-weight:600}
   .tag.ok{background:#e6f7ec;color:#1a8a4a}
   .tag.no{background:#fdeeee;color:#c0392b}
@@ -358,17 +378,6 @@
   .buy-btn:hover{background:#fff0cf}
   .buy-btn:disabled{opacity:.6;cursor:not-allowed}
   .syn-buy{margin-left:6px;flex:0 0 auto}
-  .syn-mats{margin-top:8px;border-top:1px dashed var(--line);padding-top:8px;display:flex;flex-direction:column;gap:5px}
-  .syn-mat{display:flex;align-items:center;gap:7px;font-size:12.5px}
-  .syn-mat .dot{width:8px;height:8px;border-radius:50%;background:#cdd6e2;flex:0 0 auto}
-  .syn-mat.has .dot{background:#1a8a4a}
-  .syn-mat.miss .dot{background:#c0392b}
-  .syn-mat .mp{font-size:11px;color:var(--muted)}
-  .syn-mat .cnt{font-size:11px;font-weight:600;margin-left:auto}
-  .syn-mat.has .cnt{color:#1a8a4a}
-  .syn-mat.miss .cnt{color:#c0392b}
-  .syn-children{margin:5px 0 2px 16px;padding-left:10px;border-left:2px solid var(--line);
-    display:flex;flex-direction:column;gap:4px}
   .syn-empty{color:var(--muted);font-size:12.5px;padding:8px 2px}
 
   /* ===== 灵宠探险三栏：设置/选择 | 本次运行日志 | 操作日志（全局） =====
@@ -903,7 +912,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919l"></script>
+<script src="/app.js?v=20260919m"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

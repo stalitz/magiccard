@@ -20,7 +20,6 @@ const libState = {
   price: "", kw: "", star: 0, ownOnly: false,
   module: "main",         // 卡册：main=普通卡 | 挖地 | 猫咪旅行 | 猫咪探险·西游记 | 猫咪探险·三国战役
   curThemeTid: null,
-  openChains: new Set(),  // 已展开合成路径的 card id
 };
 
 // ---------- 工具 ----------
@@ -1600,55 +1599,24 @@ async function openTheme(tid, focusCid = null) {
     const t = d.theme;
     $("dt-title").textContent = `${t.name}`;
     $("dt-sub").textContent = `主题 #${t.tid} · ${t.n} 张`;
+    // 套卡明细 = 该套的合成信息：按面值分层、每张卡只出现一次（不再逐卡铺「炼成 X ＝ …」，
+    // 那样一张 10 面额素材卡会被重复写七八遍）。持有数/可炼/空炉 走 synthesis 接口。
+    const anchor = d.cards.some((c) => c.id === Number(focusCid))
+      ? Number(focusCid) : (d.cards[0] ? d.cards[0].id : 0);
+    const syn = await (await fetch(`/api/card/synthesis?card_id=${anchor}`)).json();
+    if (!syn.ok) throw new Error(syn.message || "合成信息加载失败");
     detail.innerHTML =
       `<div class="card-row"><div class="head">${esc(t.name)}　${stars(t.star)}
          ${kindTag(t.kind)}${attrTags(t)}
          <span class="meta" style="margin-left:auto;color:var(--muted);font-size:12px">共 ${t.n} 张卡 · 面值区间以卡为准</span></div>
-       </div>` +
-      d.cards.map((c) => {
-        const rec = c.recipe
-          ? `<div class="recipe">炼成 ${esc(c.name)} ＝ ${aggMats(c.recipe.mats).map((m) => `${esc(m.name)}<span class="v-badge" style="background:#eef4fa;color:#66738a">${m.price}${m.n > 1 ? "×" + m.n : ""}</span>`).join(" + ")}　<span class="eq">耗时 ${fmtDur(c.recipe.secs)}</span></div>`
-          : '<div class="recipe">基础素材卡 · 无配方（靠抽卡/活动获得，用于合成上面的卡）</div>';
-        const used = c.used_by.length
-          ? `<div class="recipe">↳ 被用作素材去炼：${c.used_by.map((u) => `${esc(u.name)}<span class="v-badge" style="background:#eef4fa;color:#66738a">${u.price}</span>`).join("、")}</div>`
-          : "";
-        return `<div class="card-row" data-cid="${c.id}">
-          <div class="head">
-            <span class="nm" style="font-weight:600">${esc(c.name)}</span>
-            <span class="v-badge">面值 ${c.price}</span>
-            ${c.own ? `<span class="own-badge">持 ${c.own}</span>` : ""}
-            ${c.recipe ? '<span class="tag refinable">可炼</span>' : '<span class="tag base">素材</span>'}
-            <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
-              ${(c.price == 10 && d.theme_buyable)
-                ? `<button class="mini-btn buy-btn" data-act="buy">买</button>`
-                : ""}
-              <button class="mini-btn ${libState.openChains.has(c.id) ? "chain-on" : ""}" data-act="chain">${libState.openChains.has(c.id) ? "收起路径" : "合成路径"}</button>
-            </span>
-          </div>
-          ${rec}${used}
-          <div class="chain-wrap"></div>
-        </div>`;
-      }).join("");
-
-    detail.querySelectorAll(".mini-btn").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const row = btn.closest(".card-row");
-        const cid = Number(row.dataset.cid);
-        if (btn.dataset.act === "buy") {
-          doBuy(cid, t.tid, btn);
-          return;
-        }
-        toggleChain(row, cid, btn);
-      };
+       </div>` + renderSynTiers(syn);
+    mountSynView(detail, syn, () => {
+      const sel = detail.querySelector(".tchip.sel");
+      return openTheme(tid, sel ? Number(sel.dataset.cid) : null);
     });
     if (focusCid) {
-      const targetRow = detail.querySelector(`.card-row[data-cid="${focusCid}"]`);
-      if (targetRow) {
-        targetRow.scrollIntoView({ block: "center", behavior: "smooth" });
-        const b = targetRow.querySelector('.mini-btn[data-act="chain"]');
-        if (b && !libState.openChains.has(Number(focusCid))) b.click();
-      }
+      const chip = detail.querySelector(`.tchip[data-cid="${Number(focusCid)}"]`);
+      if (chip) chip.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   } catch (e) {
     detail.innerHTML = `<div class="empty-tip err">加载失败：${esc(e.message || e)}</div>`;
@@ -1656,80 +1624,104 @@ async function openTheme(tid, focusCid = null) {
   }
 }
 
-async function toggleChain(row, cid, btn) {
-  const wrap = row.querySelector(".chain-wrap");
-  if (libState.openChains.has(cid)) {
-    libState.openChains.delete(cid);
-    btn.textContent = "合成路径";
-    btn.classList.remove("chain-on");
-    wrap.innerHTML = "";
-    return;
-  }
-  libState.openChains.add(cid);
-  btn.textContent = "收起路径";
-  btn.classList.add("chain-on");
-  await renderChainWrap(cid, wrap);
-}
-
-// 卡库「合成路径」/ 卡箱弹窗 共用的游戏式平铺渲染：
-// 该套所有可合成目标各一行，材料列在目标下、×N=配方需要几张，标「有x/缺x」，不嵌套（中间卡不随父卡重复）。
-function renderSynNodesHtml(d) {
+// ===== 套卡合成信息：统一「按面值分层、每张卡只出现一次」=====
+// 2026-09-19 用户拿游戏炼卡窗口做参照：那边每张卡只占一格（角标=持有数，灰=合成中）。
+// 我们原来按「配方」铺 16 块，同一张材料卡在每一块里都出现一次，观感全是重复、也费空间。
+// 现在只渲染一份全集清单（卡库明细 / 卡箱弹窗共用），材料通过「点卡 → 就地框出」按需看。
+function renderSynTiers(d) {
   const th = d.theme || {};
-  let h = `<div class="synth-theme">📦 ${esc(th.name || "套卡")}（套卡#${th.id ?? ""}）</div>`;
-  h += `<div class="synth-sub">该套卡所有「可合成」目标的合成路径（游戏炼卡窗口式，每张卡只出现一次）。`
-    + (d.free_stoves > 0 ? `当前有 ${d.free_stoves} 个空炉` : "当前炉位已满")
-    + `。带「炼」= 你卡箱已集齐它的 3 张下级卡。</div>`;
-  if (!d.nodes || !d.nodes.length) {
-    h += `<div class="syn-empty">该套卡没有可导出的合成配方（可能都是基础卡）。</div>`;
+  const tiers = d.tiers || [];
+  const total = tiers.reduce((a, t) => a + t.cards.length, 0);
+  let h = `<div class="synth-theme">📦 ${esc(th.name || "套卡")}（套卡#${th.id ?? ""}）· ${total} 张`
+    + (d.free_stoves > 0 ? `<span class="tag ok">空炉 ${d.free_stoves}</span>`
+                         : `<span class="tag no">炉位已满</span>`)
+    + `</div>`;
+  h += `<div class="synth-sub">按面值分层，每张卡只列一次（左上角数字＝你持有几张）。`
+    + `点任意一张卡 → 它的 3 张下级材料会在下方就地框出，不重复铺开。</div>`;
+  if (!total) {
+    h += `<div class="syn-empty">该套卡没有卡。</div>`;
     return h;
   }
-  for (const n of d.nodes) {
-    const isClick = n.card_id === d.clicked_card_id;
-    h += `<div class="syn-node${isClick ? " on" : ""}">
-      <div class="syn-head">
-        <span class="syn-name">${esc(n.name)}</span>
-        ${n.price ? `<span class="syn-pr">${n.price}面额</span>` : ""}
-        <span class="syn-secs">${fmtSynSecs(n.secs)}</span>
-        ${n.refinable ? `<span class="tag ok">可炼</span>` : `<span class="tag no">缺料</span>`}
-        ${n.refinable
-          ? (d.free_stoves > 0
-              ? `<button class="btn sm primary syn-refine" data-tid="${n.card_id}">炼卡</button>`
-              : `<button class="btn sm primary syn-refine" data-tid="${n.card_id}" disabled title="当前炉位已满，腾出空炉后即可炼">炉满</button>`)
-          : ""}
-      </div>
-      <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2, th.id)).join("")}</div>
-    </div>`;
+  h += `<div class="tier-rows">`;
+  for (const t of tiers) {
+    h += `<div class="tier-row"><span class="tier-lab"><b>${t.price}</b>`
+      + `<i>${t.secs ? fmtDur(t.secs) : "素材"}</i></span><span class="tier-cards">`
+      + t.cards.map((c) => {
+          const cls = c.craft ? "craft" : (!c.target ? "base" : (c.refinable ? "ok" : "no"));
+          const st = c.craft ? "合成中" : (!c.target ? "基础素材卡" : (c.refinable ? "可炼" : "缺料"));
+          return `<span class="tchip ${cls}" data-cid="${c.card_id}" title="${esc(c.name)} · ${st}">`
+            + `<i class="q">${c.own}</i>${esc(c.name)}</span>`;
+        }).join("")
+      + `</span></div>`;
   }
+  h += `</div><div class="syn-cap"></div>`;
   return h;
 }
 
-// 绑定「炼」/「买」按钮；rerender 用于买卡后刷新当前视图（弹窗重开 / 卡库展开区重渲染）
-function bindSynButtons(container, rerender) {
-  container.querySelectorAll(".syn-refine").forEach((b) => {
+// 挂载：绑定点卡（选中 → 高亮它的下级材料 + 单行说明）。
+// rerender 供买卡/炼卡后刷新当前视图（卡库明细重载 / 弹窗重开）。
+function mountSynView(root, d, rerender) {
+  root.__syn = d;
+  for (const chip of root.querySelectorAll(".tchip")) {
+    chip.onclick = (ev) => { ev.stopPropagation(); synSelect(root, Number(chip.dataset.cid), rerender); };
+  }
+  synSelect(root, d.clicked_card_id, rerender);   // 默认选中你点开的那张卡
+}
+
+function synSelect(root, cid, rerender) {
+  const d = root.__syn || {};
+  const flat = [];
+  for (const t of (d.tiers || [])) for (const c of t.cards) flat.push(c);
+  const me = flat.find((c) => c.card_id === Number(cid));
+  for (const c of root.querySelectorAll(".tchip")) {
+    c.classList.toggle("sel", Number(c.dataset.cid) === Number(cid));
+    c.classList.remove("mat");
+  }
+  const cap = root.querySelector(".syn-cap");
+  if (!cap) return;
+  if (!me) { cap.innerHTML = `<span class="muted">点上方任意一张卡 → 这里显示它的下级材料</span>`; return; }
+  if (!me.target) {
+    const used = flat.filter((c) => (c.mats || []).some((m) => m.card_id === me.card_id))
+                     .map((c) => c.name);
+    cap.innerHTML = `<b>${esc(me.name)}</b> 是基础素材卡（无配方，靠抽卡 / 商店 / 活动获得）`
+      + `　<span class="muted">持有 ${me.own} 张</span>`
+      + (used.length ? `<span class="muted">· 被用作素材去炼：</span>` + used.map((n) => `<span class="mchip">${esc(n)}</span>`).join("") : "");
+    return;
+  }
+  const matIds = new Set(me.mats.map((m) => m.card_id));
+  for (const c of root.querySelectorAll(".tchip")) {
+    if (matIds.has(Number(c.dataset.cid))) c.classList.add("mat");
+  }
+  let h = `<b>${esc(me.name)}</b><span class="op">＝</span>`
+    + me.mats.map((m) => `<span class="mchip ${m.owned ? "ok" : "no"}" data-cid="${m.card_id}" title="点它继续看下级材料">${esc(m.name)}`
+        + (m.need > 1 ? `<i>×${m.need}</i>` : "")
+        + `<i>${m.owned ? "有" + m.count : "缺" + m.lack}</i></span>`
+        + (m.buyable ? `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${d.theme ? d.theme.id : ""}">买</button>` : ""))
+      .join(`<span class="op">+</span>`);
+  h += `<span class="muted">耗时 ${fmtDur(me.secs)} · 持有 ${me.own}</span>`;
+  h += me.refinable
+    ? (d.free_stoves > 0
+        ? `<button class="btn sm primary syn-refine" data-tid="${me.card_id}">炼卡</button>`
+        : `<button class="btn sm primary syn-refine" data-tid="${me.card_id}" disabled title="当前炉位已满，腾出空炉后即可炼">炉满</button>`)
+    : `<span class="tag no">缺料</span>`;
+  cap.innerHTML = h;
+  // 材料名可点：就地跳到那张卡继续看它的下级（逐层下钻，任何卡片始终只出现一次）
+  for (const el of cap.querySelectorAll(".mchip[data-cid]")) {
+    el.onclick = (ev) => { ev.stopPropagation(); synSelect(root, Number(el.dataset.cid), rerender); };
+  }
+  for (const b of cap.querySelectorAll(".syn-refine")) {
     b.onclick = async (ev) => {
       ev.stopPropagation();
       await doRefine(Number(b.dataset.tid), b);
       if (rerender) await rerender();
     };
-  });
-  container.querySelectorAll(".syn-buy").forEach((b) => {
+  }
+  for (const b of cap.querySelectorAll(".syn-buy")) {
     b.onclick = async (ev) => {
       ev.stopPropagation();
       const ok = await doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);
       if (ok) { await loadCardBox(); if (rerender) await rerender(); }
     };
-  });
-}
-
-// 卡库点「合成路径」：就地展开该套卡的游戏式平铺合成路径（复用 synthesis 接口，不再嵌套重复）
-async function renderChainWrap(cid, wrap) {
-  try {
-    const d = await (await fetch(`/api/card/synthesis?card_id=${cid}`)).json();
-    if (!d.ok) { wrap.innerHTML = `<div class="err" style="font-size:12px">${esc(d.message || "加载失败")}</div>`; return; }
-    wrap.innerHTML = renderSynNodesHtml(d);
-    bindSynButtons(wrap, () => renderChainWrap(cid, wrap));
-  } catch (e) {
-    wrap.innerHTML = `<div class="err" style="font-size:12px">加载异常：${esc(e)}</div>`;
   }
 }
 
@@ -2123,25 +2115,6 @@ function closeSynth() {
   $("synth-body").innerHTML = "";
 }
 
-function fmtSynSecs(s) {
-  s = Number(s) || 0;
-  if (s < 60) return s + "秒";
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  if (h) return `${h}小时${m ? m + "分" : ""}`;
-  return `${m}分`;
-}
-
-// 配方里同一张卡可能占多个材料槽（需 ×2）——聚合为一张 + ×N，不再重复显示
-function aggMats(mats) {
-  const out = [];
-  const idx = new Map();
-  for (const m of mats) {
-    const key = m.card_id ?? m.id ?? m.name;
-    if (idx.has(key)) { idx.get(key).n++; }
-    else { const e = { ...m, n: 1 }; out.push(e); idx.set(key, e); }
-  }
-  return out;
-}
 function matsWithCount(names) {
   const out = [];
   const idx = new Map();
@@ -2150,24 +2123,6 @@ function matsWithCount(names) {
     else { const e = { nm, n: 1 }; out.push(e); idx.set(nm, e); }
   }
   return out.map((e) => (e.n > 1 ? `${e.nm}×${e.n}` : e.nm)).join(" + ");
-}
-
-function synMatHtml(m, tid) {
-  // 游戏炼卡窗口式：一张卡只显示一次，×N=配方需要几张；旁边标「有x/缺x」。
-  // 不再渲染嵌套 children —— 中间卡在弹窗里已有自己的顶级条目，嵌套只会让同一张卡重复出现多次。
-  const need = m.need || 1;
-  const lack = m.lack ?? (m.owned ? 0 : need);
-  let h = `<div class="syn-mat${m.owned ? " has" : " miss"}">
-    <span class="dot"></span>${esc(m.name)} <span class="mp">${m.price || 0}面额</span>
-    <span class="cnt">×${need}</span>`
-    + (m.owned
-        ? `<span class="cnt" style="background:#e8f6ee;color:#1a7a4a">有${m.count}</span>`
-        : `<span class="cnt" style="background:#fdecea;color:#c0392b">缺${lack}</span>`);
-  if (m.buyable) {
-    h += `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${tid}" title="这张是未下架在售的 10 面额卡，可从商店买一张补齐">买</button>`;
-  }
-  h += `</div>`;
-  return h;
 }
 
 async function openSynth(cardId) {
@@ -2179,8 +2134,8 @@ async function openSynth(cardId) {
       $("synth-body").innerHTML = `<div class="ex-msg err">${esc(d.message || "生成失败")}</div>`;
       return;
     }
-    $("synth-body").innerHTML = renderSynNodesHtml(d);
-    bindSynButtons($("synth-body"), () => openSynth(cardId));
+    $("synth-body").innerHTML = renderSynTiers(d);
+    mountSynView($("synth-body"), d, () => openSynth(cardId));
   } catch (e) {
     $("synth-body").innerHTML = `<div class="ex-msg err">请求异常：${esc(e)}</div>`;
   }
