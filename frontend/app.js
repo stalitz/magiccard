@@ -1665,32 +1665,72 @@ async function toggleChain(row, cid, btn) {
     wrap.innerHTML = "";
     return;
   }
-  btn.textContent = "…";
-  try {
-    const d = await (await fetch(`/api/cards/card/${cid}`)).json();
-    if (!d.ok) throw new Error(d.message || "加载失败");
-    libState.openChains.add(cid);
-    btn.textContent = "收起路径";
-    btn.classList.add("chain-on");
-    wrap.innerHTML = renderChain(d.chain);
-  } catch (e) {
-    btn.textContent = "合成路径";
-    wrap.innerHTML = `<div class="err" style="font-size:12px">加载失败：${esc(e.message || e)}</div>`;
-  }
+  libState.openChains.add(cid);
+  btn.textContent = "收起路径";
+  btn.classList.add("chain-on");
+  await renderChainWrap(cid, wrap);
 }
 
-function renderChain(node) {
-  const lines = [];
-  const walk = (n, d) => {
-    if (!n || !n.recipe) return;
-    for (const r of n.recipe) {
-      const m = r.mat;
-      lines.push(`<div class="lv" style="padding-left:${d * 16}px"><span class="arrow">←</span> <b>${esc(m.name)}</b> <span class="v-badge" style="background:#eef4fa;color:#66738a">面值 ${m.price}</span> ${m.recipe ? "" : '<span class="tag base">基础素材</span>'}</div>`);
-      walk(m, d + 1);
-    }
-  };
-  walk(node, 0);
-  return lines.length ? `<div class="chain">${lines.join("")}</div>` : "";
+// 卡库「合成路径」/ 卡箱弹窗 共用的游戏式平铺渲染：
+// 该套所有可合成目标各一行，材料列在目标下、×N=配方需要几张，标「有x/缺x」，不嵌套（中间卡不随父卡重复）。
+function renderSynNodesHtml(d) {
+  const th = d.theme || {};
+  let h = `<div class="synth-theme">📦 ${esc(th.name || "套卡")}（套卡#${th.id ?? ""}）</div>`;
+  h += `<div class="synth-sub">该套卡所有「可合成」目标的合成路径（游戏炼卡窗口式，每张卡只出现一次）。`
+    + (d.free_stoves > 0 ? `当前有 ${d.free_stoves} 个空炉` : "当前炉位已满")
+    + `。带「炼」= 你卡箱已集齐它的 3 张下级卡。</div>`;
+  if (!d.nodes || !d.nodes.length) {
+    h += `<div class="syn-empty">该套卡没有可导出的合成配方（可能都是基础卡）。</div>`;
+    return h;
+  }
+  for (const n of d.nodes) {
+    const isClick = n.card_id === d.clicked_card_id;
+    h += `<div class="syn-node${isClick ? " on" : ""}">
+      <div class="syn-head">
+        <span class="syn-name">${esc(n.name)}</span>
+        ${n.price ? `<span class="syn-pr">${n.price}面额</span>` : ""}
+        <span class="syn-secs">${fmtSynSecs(n.secs)}</span>
+        ${n.refinable ? `<span class="tag ok">可炼</span>` : `<span class="tag no">缺料</span>`}
+        ${n.refinable
+          ? (d.free_stoves > 0
+              ? `<button class="btn sm primary syn-refine" data-tid="${n.card_id}">炼卡</button>`
+              : `<button class="btn sm primary syn-refine" data-tid="${n.card_id}" disabled title="当前炉位已满，腾出空炉后即可炼">炉满</button>`)
+          : ""}
+      </div>
+      <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2, th.id)).join("")}</div>
+    </div>`;
+  }
+  return h;
+}
+
+// 绑定「炼」/「买」按钮；rerender 用于买卡后刷新当前视图（弹窗重开 / 卡库展开区重渲染）
+function bindSynButtons(container, rerender) {
+  container.querySelectorAll(".syn-refine").forEach((b) => {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
+      await doRefine(Number(b.dataset.tid), b);
+      if (rerender) await rerender();
+    };
+  });
+  container.querySelectorAll(".syn-buy").forEach((b) => {
+    b.onclick = async (ev) => {
+      ev.stopPropagation();
+      const ok = await doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);
+      if (ok) { await loadCardBox(); if (rerender) await rerender(); }
+    };
+  });
+}
+
+// 卡库点「合成路径」：就地展开该套卡的游戏式平铺合成路径（复用 synthesis 接口，不再嵌套重复）
+async function renderChainWrap(cid, wrap) {
+  try {
+    const d = await (await fetch(`/api/card/synthesis?card_id=${cid}`)).json();
+    if (!d.ok) { wrap.innerHTML = `<div class="err" style="font-size:12px">${esc(d.message || "加载失败")}</div>`; return; }
+    wrap.innerHTML = renderSynNodesHtml(d);
+    bindSynButtons(wrap, () => renderChainWrap(cid, wrap));
+  } catch (e) {
+    wrap.innerHTML = `<div class="err" style="font-size:12px">加载异常：${esc(e)}</div>`;
+  }
 }
 
 // ---------- 自动炼卡页 ----------
@@ -2139,50 +2179,8 @@ async function openSynth(cardId) {
       $("synth-body").innerHTML = `<div class="ex-msg err">${esc(d.message || "生成失败")}</div>`;
       return;
     }
-    const th = d.theme || {};
-    let h = `<div class="synth-theme">📦 ${esc(th.name || "套卡")}（套卡#${th.id ?? ""}）</div>`;
-    h += `<div class="synth-sub">该套卡所有「可合成」目标的合成路径如下。带「炼」按钮 = 你卡箱已集齐它的 3 张下级卡`
-      + (d.free_stoves > 0 ? `，且当前有 ${d.free_stoves} 个空炉` : "，但当前炉位已满")
-      + `。点「炼」直接进炉开炼（会真实消耗素材卡）。</div>`;
-    if (!d.nodes || !d.nodes.length) {
-      h += `<div class="syn-empty">该套卡没有可导出的合成配方（可能都是基础卡）。</div>`;
-    } else {
-      for (const n of d.nodes) {
-        const isClick = n.card_id === d.clicked_card_id;
-        h += `<div class="syn-node${isClick ? " on" : ""}">
-          <div class="syn-head">
-            <span class="syn-name">${esc(n.name)}</span>
-            ${n.price ? `<span class="syn-pr">${n.price}面额</span>` : ""}
-            <span class="syn-secs">${fmtSynSecs(n.secs)}</span>
-            ${n.refinable ? `<span class="tag ok">可炼</span>` : `<span class="tag no">缺料</span>`}
-            ${n.refinable
-              ? (d.free_stoves > 0
-                  ? `<button class="btn sm primary syn-refine" data-tid="${n.card_id}">炼卡</button>`
-                  : `<button class="btn sm primary syn-refine" data-tid="${n.card_id}" disabled title="当前炉位已满（自动炼卡占满主炉），腾出空炉后即可炼">炉满</button>`)
-              : ""}
-          </div>
-          <div class="syn-mats">${n.materials.map((m2) => synMatHtml(m2, th.id)).join("")}</div>
-        </div>`;
-      }
-    }
-    $("synth-body").innerHTML = h;
-    $("synth-body").querySelectorAll(".syn-refine").forEach((b) => {
-      b.onclick = async (ev) => {
-        ev.stopPropagation();
-        await doRefine(Number(b.dataset.tid), b);
-      };
-    });
-    // 缺料且可买的 10 面额下级卡：直接买一张补齐，然后重开弹窗刷新持有状态
-    $("synth-body").querySelectorAll(".syn-buy").forEach((b) => {
-      b.onclick = async (ev) => {
-        ev.stopPropagation();
-        const ok = await doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);
-        if (ok) {
-          await loadCardBox();
-          await openSynth(cardId);
-        }
-      };
-    });
+    $("synth-body").innerHTML = renderSynNodesHtml(d);
+    bindSynButtons($("synth-body"), () => openSynth(cardId));
   } catch (e) {
     $("synth-body").innerHTML = `<div class="ex-msg err">请求异常：${esc(e)}</div>`;
   }
