@@ -2615,11 +2615,9 @@ function spSetMode(mode) {
     hb.style.display = (mode === "across") ? "none" : "";
     hb.textContent = (mode === "island") ? "荒岛收" : "手动收";
   }
-  for (const b of document.querySelectorAll(".sp-tab")) {
-    const on = b.dataset.mode === mode;
-    b.classList.toggle("primary", on);
-    b.classList.toggle("ghost", !on);
-  }
+  // 玩法切换入口只有**上方状态行**（点一行即切），这里同步设置面板标题里的玩法名。
+  const tt = $("sp-set-title");
+  if (tt) tt.textContent = "设置 · " + ((SP_MODE_LABELS[mode] || SP_MODE_LABELS.map)[0] || mode);
   const lb = SP_MODE_LABELS[mode] || SP_MODE_LABELS.map;
   if ($("sp-lab1")) $("sp-lab1").textContent = lb[0];
   if ($("sp-lab2")) $("sp-lab2").textContent = lb[1];
@@ -2670,10 +2668,8 @@ function initSpiriteOnce() {
     spPicked[spMode] = true;
     spBuildStages($("sp-map").value);
   });
-  // 子玩法切换（大地图 / 荒岛 / 穿越丛林）——三套同页，只换下拉内容
-  for (const b of document.querySelectorAll(".sp-tab")) {
-    b.addEventListener("click", () => spSetMode(b.dataset.mode));
-  }
+  // 子玩法切换（大地图 / 荒岛 / 穿越丛林）= 点上方三行状态面板的某一行，
+  // 绑定在 spRenderAll 里做（行是每次重渲染的，必须重建时绑）。这里不再有 tab 按钮。
   // 换 2 级地图 → 同样标记为「改过」（此后刷新不再覆盖用户的选择）
   $("sp-pass").addEventListener("change", () => { spPicked[spMode] = true; });
   // 一次探险当前按最多 2 只（官方 max_spirite_num 有 1/2/4 三档，4 只的关卡暂未开）
@@ -2748,11 +2744,14 @@ function spRenderAll(d) {
     ["across", "穿越丛林", acTxt, spLatestTxt(r.across)],
   ];
   box.innerHTML = rows.map(([mode, nm, txt, extra]) => {
-    const running = !!(spAutoModes && spAutoModes[mode] && spAutoModes[mode].running);
+    // 自动运行徽标 + 「累计收获」（原工具栏 chip 已删，并到这里，省一块）
+    const au = (spAutoModes && spAutoModes[mode]) || {};
+    const hv = Number(au.harvests || 0);
     return '<div class="sp-all-row' + (spMode === mode ? " on" : "") + '" data-mode="' + mode + '">'
       + '<span class="n">' + esc(nm) + '</span><span class="v">' + esc(txt) + "</span>"
       + (extra ? '<span class="x">' + esc(extra) + "</span>" : "")
-      + (running ? '<span class="x" style="color:#1e7e34;font-weight:600">● 自动中</span>' : "")
+      + (au.running ? '<span class="x" style="color:#1e7e34;font-weight:600">● 自动中'
+          + (hv ? " · 已收 " + hv : "") + "</span>" : "")
       + "</div>";
   }).join("");
   for (const el of box.querySelectorAll(".sp-all-row")) {
@@ -2762,53 +2761,18 @@ function spRenderAll(d) {
 
 function spRenderState(d) {
   spLastData = d;
-  $("sp-free").textContent = d.free_explore_cnt ?? "-";
-  $("sp-power").textContent = d.power ?? "-";
+  // 2026-09-19 精简：状态只留一套（下方三行面板，三套玩法同屏）。
+  // 工具栏的那几块「免费次数 / 当前探险 / 累计收获」chip 已删，别再往里写（元素不存在会炸）。
+  const pw = $("sp-power");
+  if (pw) pw.textContent = d.power ?? "-";
   spRenderWallet(d);
   const ex = d.explore || {};
   const isl = d.island || {};
-  const ac = d.across || {};
-  const curK = $("sp-cur-k");
-  let txt = "";
-  let active = false;   // 是否有进行中的探险（决定是否允许「收」按钮）
-  if (spMode === "across") {
-    // 穿越丛林 = **即时历练**，没有"进行中"状态；这里显示今日已用次数。
-    // 计数器是 torrid_zone_explore_cnt（实测 act=11 成功一次 +1），上限 10（VIP 15）。
-    if (curK) curK.textContent = "今日历练";
-    const am = Number(ac.daily_max) || 10, au = Number(ac.used ?? 0);
-    txt = au + "/" + am + " 次（剩 " + Math.max(0, am - au) + " 次，每次即时到账，无需收获）";
-  } else if (spMode === "island") {
-    if (curK) curK.textContent = "荒岛探险";
-    const iits = isl.explore_ts || 0;
-    const iput = isl.spirites || [];
-    if (iits && iput.length) {
-      const el = Date.now() / 1000 - iits;
-      const imins = Math.floor(el / 60);
-      const ready = el >= 180;   // 荒岛探险 3 分钟
-      const inames = iput.map((x) => spLabelName(x.id, "灵宠" + x.id)).join(" + ");
-      txt = (ready ? "已结束 · 待收获（" : "进行中（") + imins + " 分）｜ " + inames
-          + " @ " + (isl.place || ("编号 " + isl.seq));
-      active = true;
-    } else {
-      const im = Number(isl.daily_max) || 5, iu = Number(isl.today_cnt ?? 0);
-      txt = "无（今日已探险 " + iu + "/" + im + " 次 · 剩 " + Math.max(0, im - iu) + " 次）";
-    }
-  } else {
-    if (curK) curK.textContent = "当前探险";
-    const ts = ex.explore_ts || 0;
-    const put = ex.put_spirites || [];
-    const where = spPlaceText(d.pass_id, d.section_id);
-    txt = "无（当前 " + where + "）";
-    if (ts && put.length) {
-      active = true;
-      const elapsed = Date.now() / 1000 - ts;
-      const mins = Math.floor(elapsed / 60);
-      const ready = elapsed >= 300;   // 约 5 分钟后可收
-      const names = put.map((x) => spLabelName(x.id, "灵宠" + x.id)).join(" + ");
-      txt = (ready ? "已结束 · 待收获（" : "进行中（") + mins + " 分）｜ " + names + " @ " + where;
-    }
-  }
-  $("sp-cur").textContent = txt;
+  // 「收」按钮是否可用：只有当前玩法**确有进行中的探险**才亮。
+  // 穿越丛林是即时历练（没有进行中状态），永远不亮。
+  const active = spMode === "island"
+    ? !!(isl.explore_ts && (isl.spirites || []).length)
+    : spMode === "map" && !!(ex.explore_ts && (ex.put_spirites || []).length);
   const hb = $("sp-harvest");
   if (hb) hb.disabled = !active;
   // 探测「探险结束」转场（含游戏内完成）：仅在本页实时轮询中、且确有"进行中→无"跳变时才记，
@@ -3046,8 +3010,8 @@ async function spPoll() {
       if (!/进行中/.test(lg.action)) log("灵宠·" + txt, lg.ok ? "ok" : "warn");
     }
     // 当前玩法的运行态 → 按钮 + 状态条
+    // 「累计收获」工具栏 chip 已删，数值并进三行面板的「● 自动中」徽标（见 spRenderAll）。
     const cur = modes[spMode] || {};
-    $("sp-harv").textContent = cur.harvests ?? 0;
     if (cur.state && (cur.state.pass_id !== undefined || cur.state.explore)) spRenderState(cur.state);
     const running = !!cur.running;
     $("sp-start").disabled = running;

@@ -440,6 +440,8 @@
     border-left:3px solid transparent;border-radius:8px;background:#fafbfd;cursor:pointer;font-size:12.5px}
   .sp-all-row:hover{background:#f3f8fc}
   .sp-all-row.on{border-left-color:#2f7cf6;background:#f2f7ff}
+  /* 「当前玩法」要一眼看出来：这行现在是唯一切换入口 + 唯一状态显示 */
+  .sp-all-row.on .n{color:#2f7cf6;font-weight:700}
   .sp-all-row .n{flex:0 0 62px;font-weight:600}
   .sp-all-row .v{flex:0 0 auto}
   .sp-all-row .x{flex:1 1 auto;color:var(--muted);font-size:12px}
@@ -803,10 +805,10 @@
         <div class="lib">
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap">
             <span style="font-weight:600;font-size:13.5px">灵宠探险：</span>
-            <span class="stat-chip" style="padding:6px 10px"><span class="k">免费次数</span><span class="v" id="sp-free">-</span></span>
+            <!-- 2026-09-19 精简：原「免费次数 / 当前探险 / 累计收获」三块 chip 与下方三行状态
+                 面板逐字重复（那份还是三套玩法同屏），删掉；只留**全局**的体力（灵力）。
+                 玩法级状态统一看下方状态行，「累计收获」并进「● 自动中」徽标。 -->
             <span class="stat-chip" style="padding:6px 10px"><span class="k">体力</span><span class="v" id="sp-power">-</span></span>
-            <span class="stat-chip" style="padding:6px 10px"><span class="k" id="sp-cur-k">当前探险</span><span class="v" id="sp-cur">-</span></span>
-            <span class="stat-chip" style="padding:6px 10px"><span class="k">累计收获</span><span class="v" id="sp-harv">0</span></span>
             <button id="sp-refresh" class="btn sm ghost">刷新状态</button>
             <button id="sp-once" class="btn sm primary" style="display:none" title="穿越丛林：花 1 次历练，即时到账">单次历练</button>
             <button id="sp-harvest" class="btn sm ok" disabled>手动收</button>
@@ -821,13 +823,13 @@
           <div class="lib-body sp-grid">
             <div class="sp-col">
             <div class="lpanel">
-              <div class="lp-head"><span class="t">设置</span></div>
+              <!-- 玩法切换只有**一处**：上方状态行（点一行即切）。这里不再放三个 tab 按钮，
+                   标题里显示当前玩法名即可，省下一整行。 -->
+              <div class="lp-head">
+                <span class="t" id="sp-set-title">设置 · 大地图</span>
+                <span class="cnt" style="color:var(--muted)">切玩法：点上方状态行</span>
+              </div>
               <div class="lst" style="padding:12px 14px;display:flex;flex-direction:column;gap:11px;font-size:12.5px">
-                <div style="display:flex;gap:5px">
-                  <button class="btn sm primary sp-tab" data-mode="map" style="flex:1;padding:4px 2px">大地图</button>
-                  <button class="btn sm ghost sp-tab" data-mode="island" style="flex:1;padding:4px 2px">荒岛</button>
-                  <button class="btn sm ghost sp-tab" data-mode="across" style="flex:1;padding:4px 2px">穿越丛林</button>
-                </div>
                 <label style="display:flex;align-items:center;gap:8px">
                   <span id="sp-lab1" style="color:var(--muted);width:62px;flex:0 0 auto">大地图</span>
                   <select id="sp-map" style="flex:1;min-width:0;font-size:12px;padding:4px 6px"></select>
@@ -896,7 +898,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919b"></script>
+<script src="/app.js?v=20260919c"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
