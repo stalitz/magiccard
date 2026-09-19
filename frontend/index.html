@@ -434,17 +434,17 @@
   .pay-it{display:flex;align-items:center;gap:9px;font-size:13px;line-height:1.4;
     padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;
     min-width:0}
-  /* 灵宠探险：三套玩法状态一次全显示（切换 tab 只换高亮，不再请求接口） */
-  .sp-all{display:flex;flex-direction:column;gap:4px;margin:0 0 10px}
-  .sp-all-row{display:flex;align-items:baseline;gap:10px;padding:7px 11px;border:1px solid var(--line);
-    border-left:3px solid transparent;border-radius:8px;background:#fafbfd;cursor:pointer;font-size:12.5px}
+  /* 灵宠探险：三套玩法状态一行横铺（切玩法=点对应格，不再占三行） */
+  .sp-all{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+  .sp-all-row{display:flex;flex-direction:column;gap:4px;flex:1 1 200px;min-width:200px;
+    padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fafbfd;cursor:pointer}
   .sp-all-row:hover{background:#f3f8fc}
-  .sp-all-row.on{border-left-color:#2f7cf6;background:#f2f7ff}
-  /* 「当前玩法」要一眼看出来：这行现在是唯一切换入口 + 唯一状态显示 */
+  .sp-all-row.on{border-color:#2f7cf6;border-width:2px;background:#f2f7ff}
+  /* 「当前玩法」要一眼看出来：这格是唯一切换入口 + 唯一状态显示 */
+  .sp-all-row .n{font-weight:600;font-size:13px}
   .sp-all-row.on .n{color:#2f7cf6;font-weight:700}
-  .sp-all-row .n{flex:0 0 62px;font-weight:600}
-  .sp-all-row .v{flex:0 0 auto}
-  .sp-all-row .x{flex:1 1 auto;color:var(--muted);font-size:12px}
+  .sp-all-row .v{font-size:12px;line-height:1.35;color:var(--text)}
+  .sp-all-row .x{color:var(--muted);font-size:12px;line-height:1.35}
   .pay-it:hover{background:#f3f8fc}
   .pay-it input[type=checkbox]{margin:0;flex:0 0 auto;width:14px;height:14px}
   .pay-nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -898,7 +898,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919c"></script>
+<script src="/app.js?v=20260919d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
