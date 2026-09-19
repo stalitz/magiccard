@@ -67,14 +67,18 @@
   .auto-log .aok{color:#146b3a}.auto-log .aerr{color:#c0392b}.auto-log .at{color:#9aa5b5}
   /* 套卡队列（多套并行） */
   .q-wrap{margin-top:10px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
-  .q-head{background:var(--chip-bg);padding:7px 10px;font-size:12.5px;font-weight:600;
-    display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+  .q-head{background:#e9eef6;padding:7px 10px;font-size:12.5px;font-weight:600;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid #d5dce8}
   .q-table{width:100%;border-collapse:collapse;font-size:12.5px}
-  .q-table th{background:#fafbfd;color:var(--muted);font-weight:600;text-align:left;
-    padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-  .q-table td{padding:6px 10px;border-bottom:1px solid #f1f3f7}
+  .q-table th{background:#f2f5fa;color:var(--muted);font-weight:600;text-align:left;
+    padding:6px 10px;border-bottom:1px solid #d5dce8;white-space:nowrap}
+  .q-table td{padding:6px 10px;border-bottom:1px solid #e6eaf1}
+  .q-table tbody tr:nth-child(even):not(.q-act){background:#fafbfd}
   .q-table tr:last-child td{border-bottom:0}
   .q-table .num{text-align:right;font-variant-numeric:tabular-nums}
+  /* 数值列表头与右对齐的数值同列对齐，否则数值飘到表头左侧、归属不清 */
+  .q-table th:nth-child(n+4):nth-child(-n+6){text-align:right;padding-right:14px}
+  .q-table td.num{padding-right:14px}
   .q-table .q-i{color:var(--muted);width:28px}
   .q-table tr.q-act{background:#f0f9ff}
   .q-table tr.q-act .q-i{color:var(--qq-blue-d);font-weight:700}
@@ -897,7 +901,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919f"></script>
+<script src="/app.js?v=20260919g"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
