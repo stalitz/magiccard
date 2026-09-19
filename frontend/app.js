@@ -2606,15 +2606,7 @@ function spStageInfo() {
 // 切换子玩法：只换下拉内容与标签，页面不动（三套同页）
 function spSetMode(mode) {
   spMode = mode;   // 每个玩法各自记「是否手动改过」，切换 tab 不算改动
-  // 按钮语义随玩法变：穿越丛林是**即时历练**（没有收获步骤，隐藏「收」），
-  // 荒岛的收获走 act=15（大地图才是 act=4）。
-  const onceBtn = $("sp-once");
-  if (onceBtn) onceBtn.style.display = (mode === "across") ? "" : "none";
-  const hb = $("sp-harvest");
-  if (hb) {
-    hb.style.display = (mode === "across") ? "none" : "";
-    hb.textContent = (mode === "island") ? "荒岛收" : "手动收";
-  }
+  // 「单次历练 / 手动收」按钮已随玩法格动态生成（spRenderAll），不再操作固定 id。
   // 玩法切换入口只有**上方状态行**（点一行即切），这里同步设置面板标题里的玩法名。
   const tt = $("sp-set-title");
   if (tt) tt.textContent = "设置 · " + ((SP_MODE_LABELS[mode] || SP_MODE_LABELS.map)[0] || mode);
@@ -2650,11 +2642,8 @@ async function spLoadTable() {
 function initSpiriteOnce() {
   if (spInited) return;
   spInited = true;
-  $("sp-refresh").addEventListener("click", spRefresh);
-  $("sp-harvest").addEventListener("click", spHarvest);
-  $("sp-start").addEventListener("click", spStart);
-  $("sp-once").addEventListener("click", spOnce);
-  $("sp-stop").addEventListener("click", spStop);
+  // 2026-09-19：控制按钮已移入各玩法格内（spRenderAll 动态生成 + 绑定），
+  // 不再有固定 id 的 sp-refresh/sp-harvest/sp-start/sp-once/sp-stop 元素。
   $("sp-clearlog").addEventListener("click", () => {
     $("sp-log").innerHTML = '<div class="empty-tip">日志已清空。</div>';
     spRendered = new Set();
@@ -2738,24 +2727,55 @@ function spRenderAll(d) {
   const acLeft = Math.max(0, acMax - acUsed);
   const acTxt = "今日 " + acUsed + "/" + acMax + " 次 · 剩 " + acLeft + " 次 · 即时到账";
 
+  const pw = d.power ?? "-";
   const rows = [
     ["map", "大地图", mapTxt, ""],
     ["island", "荒岛", islTxt, spLatestTxt(r.island)],
     ["across", "穿越丛林", acTxt, spLatestTxt(r.across)],
   ];
   box.innerHTML = rows.map(([mode, nm, txt, extra]) => {
-    // 自动运行徽标 + 「累计收获」（原工具栏 chip 已删，并到这里，省一块）
     const au = (spAutoModes && spAutoModes[mode]) || {};
     const hv = Number(au.harvests || 0);
-    return '<div class="sp-all-row' + (spMode === mode ? " on" : "") + '" data-mode="' + mode + '">'
+    const running = !!au.running;
+    const on = spMode === mode;
+    // 该玩法专属操作按钮 —— **只在当前选中格内显示**（其余格纯状态，不抢空间）
+    let acts = "";
+    if (on) {
+      const b = ['<span class="sp-pw">⚡ 体力 ' + esc(String(pw)) + "</span>",
+        '<button class="btn sm ghost" data-act="refresh">刷新</button>'];
+      if (mode === "across") {
+        if (acLeft > 0) b.push('<button class="btn sm primary" data-act="once">单次历练</button>');
+      } else {
+        const can = mode === "island" ? (its && iput.length) : (mts && mput.length);
+        if (can) b.push('<button class="btn sm ok" data-act="harvest">手动收</button>');
+      }
+      b.push('<button class="btn sm ok" data-act="start"' + (running ? " disabled" : "") + ">开始自动</button>");
+      b.push('<button class="btn sm ghost" data-act="stop"' + (running ? "" : " disabled") + ">停止</button>");
+      acts = '<div class="sp-acts">' + b.join("") + "</div>";
+    }
+    return '<div class="sp-all-row' + (on ? " on" : "") + '" data-mode="' + mode + '">'
       + '<span class="n">' + esc(nm) + '</span><span class="v">' + esc(txt) + "</span>"
       + (extra ? '<span class="x">' + esc(extra) + "</span>" : "")
-      + (au.running ? '<span class="x" style="color:#1e7e34;font-weight:600">● 自动中'
+      + (running ? '<span class="x" style="color:#1e7e34;font-weight:600">● 自动中'
           + (hv ? " · 已收 " + hv : "") + "</span>" : "")
+      + acts
       + "</div>";
   }).join("");
+  // 整行点击 = 切玩法；格内按钮点击 = 执行该玩法专属操作（阻止冒泡，避免重复切格）
   for (const el of box.querySelectorAll(".sp-all-row")) {
     el.addEventListener("click", () => spSetMode(el.dataset.mode));
+  }
+  for (const el of box.querySelectorAll("[data-act]")) {
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const mode = el.closest(".sp-all-row").dataset.mode;
+      const a = el.dataset.act;
+      if (a === "refresh") spRefresh();
+      else if (a === "harvest") spHarvest(mode);
+      else if (a === "once") spOnce(mode);
+      else if (a === "start") spStart(mode);
+      else if (a === "stop") spStop(mode);
+    });
   }
 }
 
@@ -2773,8 +2793,7 @@ function spRenderState(d) {
   const active = spMode === "island"
     ? !!(isl.explore_ts && (isl.spirites || []).length)
     : spMode === "map" && !!(ex.explore_ts && (ex.put_spirites || []).length);
-  const hb = $("sp-harvest");
-  if (hb) hb.disabled = !active;
+  // 「收」按钮可用性由 spRenderAll 内按 on 格动态生成（有进行中才显示该按钮）
   // 探测「探险结束」转场（含游戏内完成）：仅在本页实时轮询中、且确有"进行中→无"跳变时才记，
   // 这样即便用户在游戏里把灵宠收了，只要灵宠页开着，全局日志也能留下一笔。
   const tsNow = (spMode === "island" ? (isl.explore_ts || 0) : (ex.explore_ts || 0));
@@ -2852,10 +2871,9 @@ function spFmtSend(send, items) {
 // 手动收取已结束的探险。两套玩法的收获接口**不是同一个**：
 //   大地图 → act=4（无进行中时返回 -5）
 //   荒岛   → act=15（无参数；实测会把 hy_explore_ts 归零并真实入包）
-async function spHarvest() {
-  const hb = $("sp-harvest");
-  if (hb) hb.disabled = true;
-  const isIsland = (spMode === "island");
+async function spHarvest(mode) {
+  mode = mode || spMode;
+  const isIsland = (mode === "island");
   const url = isIsland ? "/api/spirite/island/harvest" : "/api/cat/harvest";
   const tag = isIsland ? "荒岛" : "";
   try {
@@ -2878,13 +2896,12 @@ async function spHarvest() {
 
 // 穿越丛林「单次历练」：act=11，**即时到账**（没有收获步骤）。
 // 参数由后端按 (1 级地图, 2 级地图) 换算成 id=1级-1、sub_id=2级-1（0-based，对应官方 open_c/open_s）。
-async function spOnce() {
-  if (spMode !== "across") { spSay("单次历练只在「穿越丛林」玩法下可用", "warn"); return; }
+async function spOnce(mode) {
+  mode = mode || spMode;
+  if (mode !== "across") { spSay("单次历练只在「穿越丛林」玩法下可用", "warn"); return; }
   const seq = Number($("sp-pass").value || 0);
   const found = spAcrossBySeq(seq);
   if (!found) { spSay("请选择要历练的关卡", "warn"); return; }
-  const btn = $("sp-once");
-  if (btn) btn.disabled = true;
   try {
     const d = await (await fetch("/api/spirite/across/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -2899,7 +2916,6 @@ async function spOnce() {
     }
     spTick();
   } catch (e) { spSay("历练异常：" + e, "err"); }
-  finally { if (btn) btn.disabled = false; }
 }
 
 async function spRefresh() {
@@ -2922,13 +2938,15 @@ async function spRefresh() {
   } catch (e) { spSay("查询异常：" + e, "err"); }
 }
 
-async function spStart() {
+async function spStart(mode) {
   // 三套玩法共用同一个自动引擎，由 mode 分派（后端 spirite_auto._loop）：
   //   map    act=3 出发 / act=4 收获（≥5 分钟）
   //   island act=14 出发（id=连续编号 1..48）/ act=15 收获（3 分钟）
   //   across act=11 即时历练（无收获；id=1 级地图-1、sub_id=2 级地图-1）
   // ⚠️ 三套玩法的关卡编号语义不同（map=章内 section_id、island/across=连续 seq），
   //    所以这里按模式取不同的下拉值，绝不能混用。
+  mode = mode || spMode;
+  spSetMode(mode);   // 同步切下拉到该玩法，下方按 spMode 读下拉构造 body
   const checked = [...document.querySelectorAll(".sp-sp:checked")].map((c) => Number(c.value));
   const body = {
     mode: spMode,
@@ -2967,19 +2985,19 @@ async function spStart() {
     spSay(d.message || (d.ok ? "已启动" : "启动失败"), d.ok ? "ok" : "err");
     if (!d.ok) return;
     log(`开始灵宠自动探险：${where}` + (body.dry_run ? "（模拟）" : ""), "ok");
-    $("sp-start").disabled = true;
-    $("sp-stop").disabled = false;
+    // 按钮态由 spPoll → spRenderAll 按 spAutoModes[mode].running 统一刷新
     if (spTimer) clearInterval(spTimer);
     spTimer = setInterval(spPoll, 3000);
     spPoll();
   } catch (e) { spSay("启动异常：" + e, "err"); }
 }
 
-async function spStop() {
+async function spStop(mode) {
+  mode = mode || spMode;
   try {
     const d = await (await fetch("/api/spirite/auto/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: spMode }),
+      body: JSON.stringify({ mode }),
     })).json();
     spSay(d.message || "已停止", d.ok ? "warn" : "info");
     if (d.ok) log("停止灵宠自动探险（" + (SP_MODE_LABELS[spMode] ? SP_MODE_LABELS[spMode][0] : spMode) + "）", "warn");
@@ -3014,8 +3032,7 @@ async function spPoll() {
     const cur = modes[spMode] || {};
     if (cur.state && (cur.state.pass_id !== undefined || cur.state.explore)) spRenderState(cur.state);
     const running = !!cur.running;
-    $("sp-start").disabled = running;
-    $("sp-stop").disabled = !running;
+    // 按钮态（开始/停止 disabled）由下方 spRenderAll 按 spAutoModes[mode].running 统一刷新
     // 刷新三行面板的「自动中」徽标（用上次完整状态，避免随轮询清空）
     if (spLastData) spRenderAll(spLastData);
     if (cur.finished && cur.message && !running) {

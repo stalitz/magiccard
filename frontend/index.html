@@ -445,6 +445,10 @@
   .sp-all-row.on .n{color:#2f7cf6;font-weight:700}
   .sp-all-row .v{font-size:12px;line-height:1.35;color:var(--text)}
   .sp-all-row .x{color:var(--muted);font-size:12px;line-height:1.35}
+  /* 当前选中格内的专属操作区（体力 / 刷新 / 收 / 历练 / 自动开关） */
+  .sp-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:center}
+  .sp-acts .btn{padding:3px 9px;font-size:12px;line-height:1.4}
+  .sp-pw{flex:1 1 100%;font-size:12px;color:var(--muted)}
   .pay-it:hover{background:#f3f8fc}
   .pay-it input[type=checkbox]{margin:0;flex:0 0 auto;width:14px;height:14px}
   .pay-nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -803,21 +807,10 @@
 
       <div id="pane-spirite" class="pane hidden">
         <div class="lib">
-          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap">
-            <span style="font-weight:600;font-size:13.5px">灵宠探险：</span>
-            <!-- 2026-09-19 精简：原「免费次数 / 当前探险 / 累计收获」三块 chip 与下方三行状态
-                 面板逐字重复（那份还是三套玩法同屏），删掉；只留**全局**的体力（灵力）。
-                 玩法级状态统一看下方状态行，「累计收获」并进「● 自动中」徽标。 -->
-            <span class="stat-chip" style="padding:6px 10px"><span class="k">体力</span><span class="v" id="sp-power">-</span></span>
-            <button id="sp-refresh" class="btn sm ghost">刷新状态</button>
-            <button id="sp-once" class="btn sm primary" style="display:none" title="穿越丛林：花 1 次历练，即时到账">单次历练</button>
-            <button id="sp-harvest" class="btn sm ok" disabled>手动收</button>
-            <span class="spacer" style="flex:1"></span>
-            <button id="sp-start" class="btn sm ok">开始自动探险</button>
-            <button id="sp-stop" class="btn sm ghost" disabled>停止</button>
-          </div>
           <!-- 三套玩法的状态**一次全部显示**（同一份 act=1 就含全部玩法状态）：
-               切换 tab 只换高亮与下拉，不再请求接口。 -->
+               每格既是状态显示、也是玩法切换入口（点格即切）；**当前选中格**内还放该玩法
+               专属操作（体力 / 刷新 / 手动收 / 单次历练 / 开始·停止自动），职责清晰，
+               不再单列一行控制按钮。 -->
           <div id="sp-all" class="sp-all"></div>
           <!-- 三栏：栏1=设置/选择，栏2=本次运行日志，栏3=操作日志（全局）。见上方 .sp-grid 注释 -->
           <div class="lib-body sp-grid">
@@ -898,7 +891,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919d"></script>
+<script src="/app.js?v=20260919e"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
