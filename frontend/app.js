@@ -1703,6 +1703,10 @@ function initAutoOnce() {
   $("auto-start").onclick = autoStart;
   $("auto-stop").onclick = autoStop;
   $("auto-req-refresh").onclick = autoRefresh;
+  $("auto-clearlog").onclick = () => {
+    $("auto-log").innerHTML = `<div class="empty-tip">日志已清空（下次「启动」自动恢复记录）。</div>`;
+    autoLogCleared = true;
+  };
   $("auto-theme").onchange = () => { $("auto-tid").value = ""; autoRefresh(); };
   $("auto-tid").oninput = () => { $("auto-theme").value = ""; };
   if ($("auto-queue-add")) $("auto-queue-add").onclick = autoQueueAdd;
@@ -1786,6 +1790,7 @@ async function autoStart() {
     const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
       log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）`, "ok");
+      autoLogCleared = false;   // 重新启动 → 右栏日志恢复记录
       startAutoPoll();
     } else {
       log(`自动炼卡未启动：${d.message || ""}`, "err");
@@ -1928,17 +1933,26 @@ function renderAuto(st, bx) {
             : "") + `</div>`);
     }
   }
-  // 最近日志
-  let logsHtml = "";
-  if (st && (st.log || []).length) {
-    logsHtml = `<div class="auto-log">` + st.log.map((l) => {
-      const t = new Date(l.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
-      const cls = l.ok ? "aok" : (l.action === "异常" || l.action === "完成" ? "aerr" : "aok");
-      const okTxt = l.ok ? "✓" : "✗";
-      return `<span class="at">[${t}]</span> ${okTxt} ${esc(l.action)}：${esc(String(l.detail))}`;
-    }).reverse().join("\n") + `</div>`;
+  body.innerHTML = head.join("");
+  renderAutoLog(st);
+}
+
+// 本次运行日志单独渲染到右栏（2026-09-19）：以前贴在状态卡片下面，队列/偷炉/空位
+// 一多就把日志顶到折叠线以下，看一眼要滚到底。右栏常驻后与状态同时可见。
+let autoLogCleared = false;
+function renderAutoLog(st) {
+  const box = $("auto-log");
+  if (!box || !st || autoLogCleared) return;   // 没启动过就保留初始说明；点过「清空」不再回填
+  const rows = st.log || [];
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty-tip">暂无记录。</div>`;
+    return;
   }
-  body.innerHTML = head.join("") + logsHtml;
+  box.innerHTML = `<div class="auto-log" style="max-height:none;overflow:visible">` + rows.map((l) => {
+    const t = new Date(l.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
+    const okTxt = l.ok ? "✓" : "✗";
+    return `<span class="at">[${t}]</span> ${okTxt} ${esc(l.action)}：${esc(String(l.detail))}`;
+  }).reverse().join("\n") + `</div>`;
 }
 
 // ---------- 卡箱页（换卡箱 / 保险箱：查看、卖卡、互移） ----------

@@ -376,6 +376,18 @@
   #sp-spirites{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));
     gap:6px 10px}
 
+  /* ===== 自动炼卡两栏：运行状态 | 本次运行日志 =====
+     2026-09-19 用户反馈：引擎日志原本贴在状态卡片**下面**，状态一多（队列/偷炉/空位）
+     就被顶到折叠线以下，看一眼日志要滚到底。拆两栏后状态与日志各自独立滚动、同时可见。 */
+  .au-grid{grid-template-columns:minmax(0,1fr) minmax(300px,380px);
+    grid-template-areas:"run log"}
+  .au-col{display:flex;flex-direction:column;min-height:0;min-width:0}
+  .au-col:nth-child(1){grid-area:run}
+  .au-col:nth-child(2){grid-area:log}
+  .au-col>.lpanel{flex:1 1 auto;min-height:160px}
+  /* 日志高度交给栏，滚动交给 .lst；不再各自限高（限高会和栏高打架） */
+  #auto-log{max-height:none}
+
   /* 中等宽度（三栏挤不开）：卡友列表 + 日志一行两栏，自动换卡/付出卡整行铺在下面 */
   @media (max-width:1240px){
     .ex-grid{grid-template-columns:minmax(0,1fr) minmax(268px,320px);
@@ -385,6 +397,10 @@
     .sp-grid{grid-template-columns:minmax(320px,400px) minmax(0,1fr);
       grid-template-rows:minmax(0,1.15fr) minmax(0,0.85fr);
       grid-template-areas:"set run" "glob glob"}
+    /* 自动炼卡页：状态与日志上下堆叠，各占一段高度 */
+    .au-grid{grid-template-columns:minmax(0,1fr);
+      grid-template-rows:minmax(0,1.25fr) minmax(0,0.75fr);
+      grid-template-areas:"run" "log"}
   }
   @media (max-width:1080px){
     .cards-grid{grid-template-columns:minmax(0,1fr)}
@@ -401,6 +417,10 @@
       grid-template-areas:"set" "run" "glob";overflow-y:auto}
     .sp-col>.lpanel{min-height:280px}
     #sp-log,#sp-globallog{max-height:240px}
+    /* 自动炼卡页窄屏同样堆叠，靠整页滚 */
+    .au-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;
+      grid-template-areas:"run" "log";overflow-y:auto}
+    .au-col>.lpanel{min-height:280px}
   }
   /* ===== 付出卡分组列表（加载我的卡）===== */
   .pay-group{margin:12px 0 6px;padding:0}
@@ -607,15 +627,31 @@
             <button id="auto-req-refresh" class="btn sm">刷新空位</button>
           </div>
 
-          <div class="lib-body" style="grid-template-columns:minmax(0,1fr)">
-            <div class="lpanel">
-              <div class="lp-head">
-                <span class="t" id="auto-title">运行状态</span>
-                <span class="cnt" id="auto-state-cnt"></span>
-                <div class="spacer"></div>
+          <!-- 两栏：栏1=运行状态，栏2=本次运行日志（各自独立滚动）。见上方 .au-grid 注释 -->
+          <div class="lib-body au-grid">
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t" id="auto-title">运行状态</span>
+                  <span class="cnt" id="auto-state-cnt"></span>
+                  <div class="spacer"></div>
+                </div>
+                <div class="lst" style="padding:12px 16px" id="auto-body">
+                  <div class="empty-tip">正在加载可刷套卡…</div>
+                </div>
               </div>
-              <div class="lst" style="padding:12px 16px" id="auto-body">
-                <div class="empty-tip">正在加载可刷套卡…</div>
+            </div>
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">本次运行日志</span>
+                  <div class="spacer"></div>
+                  <button id="auto-clearlog" class="btn sm ghost">清空</button>
+                </div>
+                <div class="lst" id="auto-log" style="padding:10px 14px">
+                  <div class="empty-tip">启动后，引擎每一步（炼卡 / 买卡 / 收卡 / 偷炉 / 翻牌）都记在这里；
+                    换卡结果等全局记录见右侧<b>操作日志</b>。</div>
+                </div>
               </div>
             </div>
           </div>
@@ -860,7 +896,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919a"></script>
+<script src="/app.js?v=20260919b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
