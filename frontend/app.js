@@ -1510,7 +1510,7 @@ async function runCardQuery() {
         attrTags(c),
       ].join("");
       const rec = c.recipe
-        ? `<div class="sub"><span class="tag refinable" style="margin-right:4px">配方</span>${esc(c.recipe.mats.join(" + "))}　耗时 ${fmtDur(c.recipe.secs)}</div>`
+        ? `<div class="sub"><span class="tag refinable" style="margin-right:4px">配方</span>${esc(matsWithCount(c.recipe.mats))}　耗时 ${fmtDur(c.recipe.secs)}</div>`
         : (c.own ? "" : '<div class="sub">基础素材卡（无合成配方，只能抽卡/获得）</div>');
       return `<div class="it" data-tid="${c.theme_id}" data-cid="${c.id}">
         <div class="r1"><span class="nm">${esc(c.name)}</span>
@@ -1607,7 +1607,7 @@ async function openTheme(tid, focusCid = null) {
        </div>` +
       d.cards.map((c) => {
         const rec = c.recipe
-          ? `<div class="recipe">炼成 ${esc(c.name)} ＝ ${c.recipe.mats.map((m) => `${esc(m.name)}<span class="v-badge" style="background:#eef4fa;color:#66738a">${m.price}</span>`).join(" + ")}　<span class="eq">耗时 ${fmtDur(c.recipe.secs)}</span></div>`
+          ? `<div class="recipe">炼成 ${esc(c.name)} ＝ ${aggMats(c.recipe.mats).map((m) => `${esc(m.name)}<span class="v-badge" style="background:#eef4fa;color:#66738a">${m.price}${m.n > 1 ? "×" + m.n : ""}</span>`).join(" + ")}　<span class="eq">耗时 ${fmtDur(c.recipe.secs)}</span></div>`
           : '<div class="recipe">基础素材卡 · 无配方（靠抽卡/活动获得，用于合成上面的卡）</div>';
         const used = c.used_by.length
           ? `<div class="recipe">↳ 被用作素材去炼：${c.used_by.map((u) => `${esc(u.name)}<span class="v-badge" style="background:#eef4fa;color:#66738a">${u.price}</span>`).join("、")}</div>`
@@ -2091,15 +2091,40 @@ function fmtSynSecs(s) {
   return `${m}分`;
 }
 
+// 配方里同一张卡可能占多个材料槽（需 ×2）——聚合为一张 + ×N，不再重复显示
+function aggMats(mats) {
+  const out = [];
+  const idx = new Map();
+  for (const m of mats) {
+    const key = m.card_id ?? m.id ?? m.name;
+    if (idx.has(key)) { idx.get(key).n++; }
+    else { const e = { ...m, n: 1 }; out.push(e); idx.set(key, e); }
+  }
+  return out;
+}
+function matsWithCount(names) {
+  const out = [];
+  const idx = new Map();
+  for (const nm of names) {
+    if (idx.has(nm)) { idx.get(nm).n++; }
+    else { const e = { nm, n: 1 }; out.push(e); idx.set(nm, e); }
+  }
+  return out.map((e) => (e.n > 1 ? `${e.nm}×${e.n}` : e.nm)).join(" + ");
+}
+
 function synMatHtml(m, tid) {
+  // 游戏炼卡窗口式：一张卡只显示一次，×N=配方需要几张；旁边标「有x/缺x」。
+  // 不再渲染嵌套 children —— 中间卡在弹窗里已有自己的顶级条目，嵌套只会让同一张卡重复出现多次。
+  const need = m.need || 1;
+  const lack = m.lack ?? (m.owned ? 0 : need);
   let h = `<div class="syn-mat${m.owned ? " has" : " miss"}">
     <span class="dot"></span>${esc(m.name)} <span class="mp">${m.price || 0}面额</span>
-    <span class="cnt">${m.owned ? "×" + m.count : "缺"}</span>`;
+    <span class="cnt">×${need}</span>`
+    + (m.owned
+        ? `<span class="cnt" style="background:#e8f6ee;color:#1a7a4a">有${m.count}</span>`
+        : `<span class="cnt" style="background:#fdecea;color:#c0392b">缺${lack}</span>`);
   if (m.buyable) {
-    h += `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${tid}" title="这张是未下架在售的 10 面额卡，可直接从商店买一张补齐">买</button>`;
-  }
-  if (m.children && m.children.length) {
-    h += `<div class="syn-children">${m.children.map((c) => synMatHtml(c, tid)).join("")}</div>`;
+    h += `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${tid}" title="这张是未下架在售的 10 面额卡，可从商店买一张补齐">买</button>`;
   }
   h += `</div>`;
   return h;

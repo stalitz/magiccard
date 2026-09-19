@@ -285,18 +285,33 @@ def synthesis_for_card(card_id: int, xml_text: str = "") -> dict:
         nm = str(mc[2]) if mc else f"卡{m}"
         pr = int(mc[3]) if mc else 0
         cnt = owned.get(m, 0)
-        # 缺料 + 面值 10 + 该套未下架在售 => 可从商店直接买来补齐
-        return {"card_id": m, "name": nm, "price": pr,
-                "owned": cnt > 0, "count": cnt, "children": [],
-                "buyable": 1 if (pr == 10 and theme_id in bt and cnt == 0) else 0}
+        return {"card_id": m, "name": nm, "price": pr, "count": cnt,
+                "need": 1, "lack": 1, "owned": False,
+                "children": [], "buyable": 0}
 
     def build_node(t: int, depth: int) -> dict:
         mats, secs = recipes[t]
-        real = [m for m in mats if m > 0]
+        # 同一配方里同一张卡可能出现多个槽位（如 [x, x, y] = 需 x×2），
+        # 聚合成「一张卡 ×need」，与游戏炼卡窗口的角标一致，不再重复显示
+        need: dict[int, int] = {}
+        order: list[int] = []
+        for m in mats:
+            if m > 0:
+                if m not in need:
+                    need[m] = 0
+                    order.append(m)
+                need[m] += 1
         mlist = []
         ok = True
-        for m in real:
+        for m in order:
             d = mat_detail(m)
+            have = d["count"]
+            nd = need[m]
+            d["need"] = nd
+            d["lack"] = max(0, nd - have)
+            d["owned"] = have >= nd
+            # 缺料 + 面值 10 + 该套未下架在售 => 可从商店直接买来补齐
+            d["buyable"] = 1 if (d["price"] == 10 and theme_id in bt and d["lack"] > 0) else 0
             if not d["owned"]:
                 ok = False
             if depth < 3 and m in recipes:
