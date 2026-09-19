@@ -344,7 +344,7 @@
   .tier-lab b{font-size:13.5px;color:var(--qq-blue-d)}
   .tier-lab i{font-size:11px;color:var(--muted);font-style:normal}
   .tier-cards{flex:1 1 auto;display:flex;flex-wrap:wrap;gap:5px}
-  .tchip{position:relative;display:inline-flex;align-items:center;padding:3px 9px 3px 16px;
+  .tchip{position:relative;display:inline-flex;align-items:center;gap:4px;padding:3px 9px 3px 16px;
     border:1px solid #cfd7e3;border-radius:6px;background:#fff;font-size:12.5px;
     line-height:1.5;cursor:pointer;user-select:none}
   .tchip .q{position:absolute;left:3px;top:50%;transform:translateY(-50%);font-size:10px;
@@ -357,18 +357,39 @@
   .tchip.no .q{background:#c98d86}
   .tchip.base{border-style:dashed;background:#fafbfd}
   .tchip.craft{opacity:.55;background:#eef1f5;border-color:#c9d2de}
-  .tchip.sel{outline:2px solid var(--qq-blue);outline-offset:1px;font-weight:600}
-  .tchip.mat{border-color:#f0b429;background:#fffbf0}
-  .syn-cap{margin-top:8px;padding:7px 10px;border:1px dashed #c9d2de;border-radius:8px;
-    background:#fbfcfe;font-size:12.5px;display:flex;align-items:center;gap:6px;
-    flex-wrap:wrap;min-height:34px;line-height:1.7}
-  .syn-cap .op{color:var(--muted)}
-  .syn-cap .muted{color:var(--muted)}
-  .mchip{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:6px;
-    border:1px solid #cfd7e3;background:#fff;font-size:12px;cursor:pointer}
-  .mchip i{font-style:normal;font-size:11px;color:var(--muted)}
-  .mchip.ok{border-color:#8fd2a6;background:#f1fbf5}
-  .mchip.no{border-color:#e3c9c5;background:#fdf6f5}
+  /* 选中卡 = 蓝框；它的 3 张下级材料**就地**换色框（对齐游戏界面：不另起一行列材料）
+     用 box-shadow 描边，避免改 border 宽度导致整行抖动 */
+  .tchip.sel{border-color:#2f7cf6;background:#eef5ff;box-shadow:0 0 0 2px #2f7cf6;font-weight:600;z-index:2}
+  .tchip.m1{border-color:#e08c1b;background:#fff8ec;box-shadow:0 0 0 2px #e08c1b;z-index:2}
+  .tchip.m2{border-color:#7a5af8;background:#f5f2ff;box-shadow:0 0 0 2px #7a5af8;z-index:2}
+  .tchip.m3{border-color:#0f9b8e;background:#eefaf8;box-shadow:0 0 0 2px #0f9b8e;z-index:2}
+  /* 点基础素材卡时，把「用到它的父卡」框出来（灰虚框） */
+  .tchip.pframe{border-style:dashed;border-color:#9aa6b8;background:#f6f8fb;box-shadow:0 0 0 2px #c3cddb;z-index:2}
+  /* 材料格内注入的角标：配方序号 / 需求张数 / 有·缺 */
+  .tchip .inj{font-style:normal;flex:0 0 auto}
+  .tchip .mi{width:14px;height:14px;line-height:14px;text-align:center;border-radius:50%;
+    font-size:10px;color:#fff}
+  .tchip .mi.m1{background:#e08c1b}
+  .tchip .mi.m2{background:#7a5af8}
+  .tchip .mi.m3{background:#0f9b8e}
+  .mn{font-style:normal;font-size:10.5px;font-weight:600;color:#b9770b;background:#fff3dd;
+    border-radius:4px;padding:0 4px}
+  .mh{font-style:normal;font-size:10.5px;font-weight:600;border-radius:4px;padding:0 4px}
+  .mh.ok{color:#1a7a4a;background:#e8f6ee}
+  .mh.no{color:#c0392b;background:#fdecea}
+  .tchip .buy-btn{font-size:10.5px;padding:0 5px;line-height:15px;border-radius:4px}
+  /* 图例（写在顶部说明行里） */
+  .synth-sub .lg{display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+    border-radius:50%;font-size:10px;color:#fff;margin:0 2px 0 5px;font-style:normal}
+  .synth-sub .lg1{background:#e08c1b}
+  .synth-sub .lg2{background:#7a5af8}
+  .synth-sub .lg3{background:#0f9b8e}
+  /* 底部只留一行「动作行」：选中卡 + 耗时/持有 + 炼卡（材料已在上方框出，不再重复列一遍） */
+  .syn-act{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;
+    background:#fbfcfe;font-size:12.5px;display:flex;align-items:center;gap:8px;
+    flex-wrap:wrap;min-height:36px}
+  .syn-act .who{font-weight:700;font-size:13px}
+  .syn-act .muted{color:var(--muted)}
   .tag{font-size:11px;border-radius:8px;padding:0 7px;font-weight:600}
   .tag.ok{background:#e6f7ec;color:#1a8a4a}
   .tag.no{background:#fdeeee;color:#c0392b}
@@ -912,7 +933,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919m"></script>
+<script src="/app.js?v=20260919n"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

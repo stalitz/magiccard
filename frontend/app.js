@@ -1637,7 +1637,10 @@ function renderSynTiers(d) {
                          : `<span class="tag no">炉位已满</span>`)
     + `</div>`;
   h += `<div class="synth-sub">按面值分层，每张卡只列一次（左上角数字＝你持有几张）。`
-    + `点任意一张卡 → 它的 3 张下级材料会在下方就地框出，不重复铺开。</div>`;
+    + `点任意一张卡 → <b>它需要的下级材料就在上面直接框出来</b>`
+    + `<span class="lg lg1">①</span><span class="lg lg2">②</span><span class="lg lg3">③</span>`
+    + `＝配方第 1/2/3 张（橙/紫/青框），角标 <i class="mn">×2</i>＝需 2 张，`
+    + `<i class="mh ok">有</i>绿字＝够、<i class="mh no">缺</i>红字＝不够。</div>`;
   if (!total) {
     h += `<div class="syn-empty">该套卡没有卡。</div>`;
     return h;
@@ -1654,7 +1657,7 @@ function renderSynTiers(d) {
         }).join("")
       + `</span></div>`;
   }
-  h += `</div><div class="syn-cap"></div>`;
+  h += `</div><div class="syn-act"></div>`;
   return h;
 }
 
@@ -1668,55 +1671,94 @@ function mountSynView(root, d, rerender) {
   synSelect(root, d.clicked_card_id, rerender);   // 默认选中你点开的那张卡
 }
 
+// 材料框色：配方第 1/2/3 张各一色（对齐游戏界面「材料就地变色框」的做法）
+const SYN_MAT_CLS = ["m1", "m2", "m3"];
+const SYN_MAT_ORD = ["①", "②", "③"];
+
 function synSelect(root, cid, rerender) {
   const d = root.__syn || {};
   const flat = [];
   for (const t of (d.tiers || [])) for (const c of t.cards) flat.push(c);
   const me = flat.find((c) => c.card_id === Number(cid));
+  // 先清掉上一次的标注（框色 + 注入的角标/买按钮），避免叠加
   for (const c of root.querySelectorAll(".tchip")) {
-    c.classList.toggle("sel", Number(c.dataset.cid) === Number(cid));
-    c.classList.remove("mat");
+    c.classList.remove("sel", "pframe", ...SYN_MAT_CLS);
+    for (const el of c.querySelectorAll(".inj")) el.remove();
   }
-  const cap = root.querySelector(".syn-cap");
-  if (!cap) return;
-  if (!me) { cap.innerHTML = `<span class="muted">点上方任意一张卡 → 这里显示它的下级材料</span>`; return; }
+  const act = root.querySelector(".syn-act");
+  if (!act) return;
+  if (!me) { act.innerHTML = `<span class="muted">点上方任意一张卡 → 它的下级材料会在上面直接框出</span>`; return; }
+  const selEl = root.querySelector(`.tchip[data-cid="${me.card_id}"]`);
+  if (selEl) selEl.classList.add("sel");
+
+  // 基础素材卡：无配方。把「用到它的父卡」在上方框出来（虚框），说明文字留一行。
   if (!me.target) {
-    const used = flat.filter((c) => (c.mats || []).some((m) => m.card_id === me.card_id))
-                     .map((c) => c.name);
-    cap.innerHTML = `<b>${esc(me.name)}</b> 是基础素材卡（无配方，靠抽卡 / 商店 / 活动获得）`
-      + `　<span class="muted">持有 ${me.own} 张</span>`
-      + (used.length ? `<span class="muted">· 被用作素材去炼：</span>` + used.map((n) => `<span class="mchip">${esc(n)}</span>`).join("") : "");
+    const parents = flat.filter((c) => (c.mats || []).some((m) => m.card_id === me.card_id));
+    for (const p of parents) {
+      const el = root.querySelector(`.tchip[data-cid="${p.card_id}"]`);
+      if (el) el.classList.add("pframe");
+    }
+    act.innerHTML = `<span class="who">${esc(me.name)}</span>`
+      + `<span class="muted">基础素材卡（无配方，靠抽卡 / 商店 / 活动获得）· 持有 ${me.own}</span>`
+      + (parents.length
+          ? `<span class="muted">· 被 ${parents.length} 个配方用作素材（上方虚框）</span>`
+          : `<span class="muted">· 当前没有被任何配方用到</span>`);
     return;
   }
-  const matIds = new Set(me.mats.map((m) => m.card_id));
-  for (const c of root.querySelectorAll(".tchip")) {
-    if (matIds.has(Number(c.dataset.cid))) c.classList.add("mat");
-  }
-  let h = `<b>${esc(me.name)}</b><span class="op">＝</span>`
-    + me.mats.map((m) => `<span class="mchip ${m.owned ? "ok" : "no"}" data-cid="${m.card_id}" title="点它继续看下级材料">${esc(m.name)}`
-        + (m.need > 1 ? `<i>×${m.need}</i>` : "")
-        + `<i>${m.owned ? "有" + m.count : "缺" + m.lack}</i></span>`
-        + (m.buyable ? `<button class="mini-btn buy-btn syn-buy" data-cid="${m.card_id}" data-tid="${d.theme ? d.theme.id : ""}">买</button>` : ""))
-      .join(`<span class="op">+</span>`);
-  h += `<span class="muted">耗时 ${fmtDur(me.secs)} · 持有 ${me.own}</span>`;
-  h += me.refinable
-    ? (d.free_stoves > 0
-        ? `<button class="btn sm primary syn-refine" data-tid="${me.card_id}">炼卡</button>`
-        : `<button class="btn sm primary syn-refine" data-tid="${me.card_id}" disabled title="当前炉位已满，腾出空炉后即可炼">炉满</button>`)
-    : `<span class="tag no">缺料</span>`;
-  cap.innerHTML = h;
-  // 材料名可点：就地跳到那张卡继续看它的下级（逐层下钻，任何卡片始终只出现一次）
-  for (const el of cap.querySelectorAll(".mchip[data-cid]")) {
-    el.onclick = (ev) => { ev.stopPropagation(); synSelect(root, Number(el.dataset.cid), rerender); };
-  }
-  for (const b of cap.querySelectorAll(".syn-refine")) {
+
+  // 有配方：3 张下级材料**就在上面的分层清单里直接框出来**（不再另外列一行）
+  const outside = [];   // 兜底：万一有材料不属于本套卡（清单里没有那一格），仍要看得见
+  me.mats.forEach((m, i) => {
+    const slot = Math.min(i, 2);
+    const el = root.querySelector(`.tchip[data-cid="${m.card_id}"]`);
+    if (!el) { outside.push({ m, slot }); return; }
+    el.classList.add(SYN_MAT_CLS[slot]);
+    const ord = document.createElement("i");
+    ord.className = "inj mi " + SYN_MAT_CLS[slot];
+    ord.textContent = SYN_MAT_ORD[slot];
+    el.appendChild(ord);
+    if (m.need > 1) {
+      const mn = document.createElement("i");
+      mn.className = "inj mn";
+      mn.textContent = "×" + m.need;
+      el.appendChild(mn);
+    }
+    const mh = document.createElement("i");
+    mh.className = "inj mh " + (m.owned ? "ok" : "no");
+    mh.textContent = m.owned ? "有" + m.count : "缺" + m.lack;
+    el.appendChild(mh);
+    if (m.buyable) {
+      const b = document.createElement("button");
+      b.className = "inj mini-btn buy-btn syn-buy";
+      b.dataset.cid = m.card_id;
+      b.dataset.tid = d.theme ? d.theme.id : "";
+      b.textContent = "买";
+      b.title = "这张是未下架在售的 10 面额卡，可买一张补齐";
+      el.appendChild(b);
+    }
+  });
+
+  act.innerHTML = `<span class="muted">已选</span><span class="who">${esc(me.name)}</span>`
+    + `<span class="muted">耗时 ${fmtDur(me.secs)} · 持有 ${me.own}</span>`
+    + outside.map(({ m, slot }) => `<span class="tchip ${SYN_MAT_CLS[slot]}" style="cursor:default">`
+        + `<i class="mi ${SYN_MAT_CLS[slot]}">${SYN_MAT_ORD[slot]}</i>${esc(m.name)}`
+        + (m.need > 1 ? `<i class="mn">×${m.need}</i>` : "")
+        + `<i class="mh ${m.owned ? "ok" : "no"}">${m.owned ? "有" + m.count : "缺" + m.lack}</i>`
+        + `</span>`).join("")
+    + (me.refinable
+        ? (d.free_stoves > 0
+            ? `<button class="btn sm primary syn-refine" data-tid="${me.card_id}">炼卡</button>`
+            : `<button class="btn sm primary syn-refine" data-tid="${me.card_id}" disabled title="当前炉位已满，腾出空炉后即可炼">炉满</button>`)
+        : `<span class="tag no">缺料</span>`);
+  for (const b of act.querySelectorAll(".syn-refine")) {
     b.onclick = async (ev) => {
       ev.stopPropagation();
       await doRefine(Number(b.dataset.tid), b);
       if (rerender) await rerender();
     };
   }
-  for (const b of cap.querySelectorAll(".syn-buy")) {
+  // 「买」按钮在材料格里，点它不能触发选中
+  for (const b of root.querySelectorAll(".syn-buy")) {
     b.onclick = async (ev) => {
       ev.stopPropagation();
       const ok = await doBuy(Number(b.dataset.cid), Number(b.dataset.tid), b);

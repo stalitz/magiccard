@@ -41,6 +41,8 @@ const sandbox = {
 
   const names = [];
   for (const t of d.tiers) for (const c of t.cards) names.push(c.name);
+  // 只统计分层清单区域：动作行里出现一次「已选 X」是正常的，不该算重复
+  const gridHtml = root.querySelector(".tier-rows").innerHTML;
   const html = root.innerHTML;
 
   // 1) 每张卡的「卡片格」数量（tchip 里含 data-cid，正文里不该再出现卡名）
@@ -50,26 +52,30 @@ const sandbox = {
   const dup = [];
   for (const t of d.tiers) {
     for (const c of t.cards) {
-      // 卡名在整段 HTML 里出现几次（含 title 属性一次 = 2 次以内算正常）
-      const n = html.split(c.name).length - 1;
+      // 卡名在**分层清单**里出现几次（含 title 属性一次 = 2 次以内算正常）
+      const n = gridHtml.split(c.name).length - 1;
       if (n > 2) dup.push(`${c.name}×${n}`);
     }
   }
   console.log("重复出现（>2 次）的卡:", dup.length ? dup.join(", ") : "无 ✓");
 
-  // 2) 材料是否只在「选中那张卡」的说明行里出现，而不是每张卡都铺一遍
-  console.log("说明行:", root.querySelector(".syn-cap").textContent.trim());
-  console.log("被框出的材料格:", [...root.querySelectorAll(".tchip.mat")].map((e) => e.textContent.trim()).join(" / "));
+  // 2) 材料必须是**在上方清单里就地换色框出**，不是另列一行
+  console.log("动作行:", root.querySelector(".syn-act").textContent.trim());
+  const framed = [...root.querySelectorAll(".tchip.m1,.tchip.m2,.tchip.m3")]
+    .map((e) => `${e.className.replace(/tchip\s*/, "")}·${e.textContent.trim()}`);
+  console.log("被框出的材料格:", framed.length ? framed.join(" / ") : "（无）");
   console.log("选中格:", (root.querySelector(".tchip.sel") || {}).textContent);
+  console.log("动作行里的兜底材料格（应为 0）:",
+    root.querySelectorAll(".syn-act .tchip").length);
 
-  // 3) 下钻：点说明行里的第一张材料，看是否切到那张卡（逐层看路径，零重复）
-  const m = root.querySelector(".mchip[data-cid]");
+  // 3) 下钻：点一个框出来的材料格，看是否切到那张卡（逐层看路径，零重复）
+  const m = root.querySelector(".tchip.m1[data-cid],.tchip.m2[data-cid],.tchip.m3[data-cid]");
   if (!m) {
-    console.log("\n（该卡是基础素材卡，说明行里没有被用作素材的可点项，跳过下钻）");
+    console.log("\n（该卡没有材料可下钻，跳过）");
   } else {
-    console.log(`\n点材料「${m.textContent.trim()}」→ 说明行变为:`);
+    console.log(`\n点材料「${m.textContent.trim()}」→ 动作行变为:`);
     m.onclick({ stopPropagation() {} });
-    console.log("  ", root.querySelector(".syn-cap").textContent.trim());
+    console.log("  ", root.querySelector(".syn-act").textContent.trim());
   }
 
   console.log("\n===== 渲染结构（层级行）=====");
