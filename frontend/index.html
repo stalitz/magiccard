@@ -68,22 +68,20 @@
   /* 套卡队列（多套并行） */
   .q-wrap{margin-top:10px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
   .q-head{background:#e9eef6;padding:7px 10px;font-size:12.5px;font-weight:600;
-    display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:2px solid #c4cdda}
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .q-table{width:100%;border-collapse:collapse;font-size:12.5px}
+  /* 纵向（列）分隔线：表头与各内容单元格右侧都加竖线，列归属清晰；不做横向行分隔 */
   .q-table th{background:#f2f5fa;color:var(--muted);font-weight:600;text-align:left;
-    padding:6px 10px;border-bottom:1px solid #d5dce8;white-space:nowrap}
-  .q-table td{padding:6px 10px;border-bottom:1px solid #e6eaf1}
-  /* 纵向分隔：每行一个明显底色（奇偶交替），并加竖向列分隔线 */
-  .q-table tbody tr:nth-child(odd){background:#ffffff}
-  .q-table tbody tr:nth-child(even){background:#e8f0fb}
-  .q-table td{border-right:1px solid #eef1f6}
+    padding:6px 10px;white-space:nowrap;border-right:1px solid #d5dce8}
+  .q-table th:last-child{border-right:0}
+  .q-table td{padding:6px 10px;border-right:1px solid #e6eaf1}
   .q-table td:last-child{border-right:0}
-  .q-table tr:last-child td{border-bottom:0}
   .q-table .num{text-align:right;font-variant-numeric:tabular-nums}
   /* 数值列表头与右对齐的数值同列对齐，否则数值飘到表头左侧、归属不清 */
   .q-table th:nth-child(n+4):nth-child(-n+6){text-align:right;padding-right:14px}
   .q-table td.num{padding-right:14px}
   .q-table .q-i{color:var(--muted);width:28px}
+  /* 当前执行的那套：浅蓝绿高亮（保留，非斑马纹） */
   .q-table tr.q-act{background:#f0f9ff !important}
   .q-table tr.q-act .q-i{color:var(--qq-blue-d);font-weight:700}
   /* 状态栏各区块卡片化：运行徽标 / 计划 / 队列 / 空位 / 偷炉 各自独立卡片，分隔清晰、归属明确 */
@@ -905,7 +903,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919i"></script>
+<script src="/app.js?v=20260919j"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
