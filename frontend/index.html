@@ -295,6 +295,38 @@
   .ex-peer .ph .rescan{flex:0 0 auto;margin-left:auto}
   .ex-peer.dead{opacity:.55}
 
+  /* 挖地页：8 行 × 7 列地层网格（手动点格子 + 自动挖） */
+  .dg-wrap{display:flex;flex-direction:column;gap:8px}
+  .dg-row{display:flex;align-items:center;gap:6px}
+  .dg-ln{flex:0 0 52px;font-size:11px;color:var(--muted);font-family:ui-monospace,Menlo,monospace;
+    text-align:right;padding-right:2px}
+  .dg-cells{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;flex:1 1 auto;min-width:0}
+  .dg-cell{position:relative;height:52px;border-radius:7px;border:1px solid var(--line);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    font-size:10.5px;line-height:1.25;text-align:center;padding:2px;cursor:default;
+    overflow:hidden;color:var(--text);background:#fff}
+  .dg-cell.dig{cursor:pointer}
+  .dg-cell.dig:hover{border-color:#2f7cf6;box-shadow:0 1px 6px rgba(47,124,246,.18)}
+  .dg-cell.t0{background:#f4f7fa}                       /* 空地（已挖开） */
+  .dg-cell.t1{background:#eef2ff}                       /* 特殊格 */
+  .dg-cell.t2{background:#e3c08a;border-color:#c99a5b}  /* 土（可挖） */
+  .dg-cell.t3{background:#d3dae2;border-color:#98a4b2}  /* 石（可挖） */
+  .dg-cell.t4{background:#fff3bf;border-color:#f0b429}  /* 已挖出的礼物（待收） */
+  .dg-cell.t5{background:#6b7480;border-color:#495057;color:#fff} /* 岩石（不可挖） */
+  .dg-cell.fog{opacity:.62;border-style:dashed}         /* 未探索（gift 字段缺失） */
+  .dg-cell .gt{font-weight:600;font-size:10.5px;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis;max-width:100%}
+  .dg-cell .tt{font-size:9.5px;color:var(--muted);margin-top:1px}
+  .dg-cell.t5 .tt{color:#e6e9ee}
+  .dg-cell.pick{cursor:pointer;box-shadow:inset 0 0 0 2px #f0b429}
+  .dg-cell.pick:hover{border-color:#e8a33d}
+  .dg-cell.busy{opacity:.5;pointer-events:none}
+  .dg-legend{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;color:var(--muted);
+    align-items:center;padding:2px 0 6px}
+  .dg-legend i{display:inline-block;width:11px;height:11px;border-radius:3px;
+    border:1px solid var(--line);margin-right:3px;vertical-align:-1px}
+  .dg-res{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;color:var(--muted)}
+
   /* 卡箱页 */
   .cb-box{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .cb-head{padding:9px 14px;background:#f4f8fc;font-weight:600;font-size:13.5px;color:var(--text);
@@ -531,6 +563,8 @@
           <button class="btn sm ghost" data-pane="auto">自动炼卡</button>
           <button class="btn sm ghost" data-pane="exchange">换卡</button>
           <button class="btn sm ghost" data-pane="spirite">灵宠探险</button>
+          <button class="btn sm ghost" data-pane="travel">猫咪旅行</button>
+          <button class="btn sm ghost" data-pane="dig">挖地</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
         <span class="spacer"></span>
@@ -923,10 +957,131 @@
           </div>
         </div>
       </div>
+
+      <!-- 子页：猫咪旅行（独立玩法，2026-09-20） -->
+      <div id="pane-travel" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
+            <span style="font-weight:600;font-size:13.5px">猫咪旅行：</span>
+            <span style="font-size:12px;color:var(--muted)">4 猫各喂 1 种 A 级食物</span>
+            <input id="travel-foodnum" class="num-in" type="number" value="4" min="1" style="width:56px" title="每只猫投喂数量（默认 4，不够自动去商店买）">
+            <label class="check" title="只算参数、不发真实请求"><input type="checkbox" id="travel-dryrun"> 模拟</label>
+            <label class="check" title="只收获已返回的猫、不出发空闲猫"><input type="checkbox" id="travel-harvestonly"> 只收获</label>
+            <button id="travel-run" class="btn sm ok" title="收获已返回猫 + 用今日剩余免费次数出发空闲猫 + 收三叶草 + 去好友浇水 + 领每日任务">跑一轮</button>
+            <button id="travel-harvest" class="btn sm ok" title="手动收获：领取所有已返回猫的旅行礼物（act=23）">收获旅行</button>
+            <button id="travel-clover" class="btn sm">收三叶草</button>
+            <button id="travel-water" class="btn sm" title="只浇「已种三叶草且未成熟、今日未浇过」的好友（act=21，每个好友每天一次）">去浇水</button>
+            <button id="travel-tasks" class="btn sm">领每日任务</button>
+            <button id="travel-friends" class="btn sm" title="拉取「已开通猫咪旅行」的好友列表（只读，act=12）">好友列表</button>
+            <button id="travel-refresh" class="btn sm primary">刷新状态</button>
+            <span class="sep"></span>
+            <button id="travel-auto-start" class="btn sm ok">开始自动</button>
+            <button id="travel-auto-stop" class="btn sm danger hidden">停止自动</button>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              间隔<input id="travel-interval" class="num-in" type="number" value="600" min="60" style="width:60px">秒</label>
+          </div>
+
+          <div class="lib-body au-grid">
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">旅行状态</span>
+                  <span class="cnt" id="travel-cnt"></span>
+                  <div class="spacer"></div>
+                </div>
+                <div class="lst" id="travel-state" style="padding:12px 14px">
+                  <div class="empty-tip">点「刷新状态」查看猫咪旅行进度。</div>
+                </div>
+              </div>
+              <div class="lpanel" style="margin-top:12px">
+                <div class="lp-head">
+                  <span class="t">已开通好友</span>
+                  <span class="cnt" id="travel-friends-cnt"></span>
+                  <div class="spacer"></div>
+                  <button id="travel-friends-reload" class="btn sm ghost">拉取</button>
+                </div>
+                <div class="lst" id="travel-friends-box" style="padding:10px 14px">
+                  <div class="empty-tip">点「好友列表」拉取 —— 只列已开通猫咪旅行的好友；只有「已种三叶草且未成熟」的才可浇水，且每个好友每天只能浇一次。</div>
+                </div>
+              </div>
+            </div>
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">操作日志</span>
+                  <div class="spacer"></div>
+                  <button id="travel-clearlog" class="btn sm ghost">清空</button>
+                </div>
+                <div class="lst" id="travel-log" data-op-log style="padding:10px 14px">
+                  <div class="empty-tip">无记录。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 子页：挖地（card_user_dig，独立玩法） -->
+      <div id="pane-dig" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
+            <span style="font-weight:600;font-size:13.5px">挖地：</span>
+            <span id="dig-res" style="font-size:12px;color:var(--muted)"></span>
+            <span class="sep"></span>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              工具
+              <select id="dig-tool" class="num-in" style="width:96px">
+                <option value="1">锄头</option>
+                <option value="2">一字型炸药</option>
+                <option value="3">九宫格炸药</option>
+              </select>
+            </label>
+            <button id="dig-collect" class="btn sm ok" title="act=18：收走所有已露出的礼物">一键收获</button>
+            <button id="dig-machines" class="btn sm" title="act=7：只收已到期的矿机槽">收矿机</button>
+            <button id="dig-refresh" class="btn sm primary">刷新</button>
+            <span class="sep"></span>
+            <button id="dig-auto-start" class="btn sm ok">开始自动</button>
+            <button id="dig-auto-stop" class="btn sm danger hidden">停止自动</button>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              上限<input id="dig-max" class="num-in" type="number" value="30" min="1" style="width:60px">次</label>
+            <label class="check" title="没土可挖时用九宫格炸药把地层往下推（会消耗 jgg_tnt）">
+              <input type="checkbox" id="dig-tnt"> 允许用炸药</label>
+          </div>
+
+          <div class="lib-body au-grid">
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">地层网格</span>
+                  <span class="cnt" id="dig-cnt"></span>
+                  <div class="spacer"></div>
+                  <span id="dig-auto-tag" style="font-size:11px;color:var(--muted)"></span>
+                </div>
+                <div class="lst" id="dig-grid" style="padding:12px 14px">
+                  <div class="empty-tip">点「刷新」加载地层。格子可点：锄头挖土/石，炸药只能扔在已挖开的空格上。</div>
+                </div>
+              </div>
+            </div>
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">操作日志</span>
+                  <div class="spacer"></div>
+                  <button id="dig-clearlog" class="btn sm ghost">清空</button>
+                </div>
+                <div class="lst" id="dig-log" data-op-log style="padding:10px 14px">
+                  <div class="empty-tip">无记录。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260919p"></script>
+<script src="/app.js?v=20260920h"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

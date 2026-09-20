@@ -32,6 +32,8 @@ from . import spirite_maps as spm
 from . import spirite_progress as spg
 from .auto_refine import AutoRefine, parse_full
 from . import daily
+from . import travel_elf_auto as te
+from . import dig_auto as dg
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_XIYOU, EP_WORLD_SANGUO)
@@ -1466,6 +1468,251 @@ async def across_run(body: dict):
             "result": res}
 
 
+# ---- 猫咪旅行自动循环（2026-09-20 HAR 实证） ----
+# 端点 card_travel_elf_main（只读状态）/ card_travel_elf（act=5 出发 / 23 领取礼物）。
+# 仅收录已实证动作（见 travel_elf_auto.py 顶部注释 + REFERENCE.md 猫咪旅行段）。
+
+
+@app.get("/api/travel/state")
+async def travel_state():
+    """猫咪旅行只读状态：猫状态 + 免费次数 + 食物持有 + A级食物 + 每日任务。"""
+    if err := _require_login():
+        return err
+    try:
+        st = await te.get_state(_session)
+        if st is None:
+            return {"ok": False, "message": "读取状态失败"}
+        now = int(__import__("time").time())
+        elves = []
+        for c in st.get("travel_elf_arr") or []:
+            end = int(c.get("travel_end_ts") or 0)
+            if end > 0 and now < end:
+                status = "traveling"
+            elif end > 0:
+                status = "returned"   # 已返回，待收获
+            else:
+                status = "idle"       # 空闲，可出发
+            elves.append({
+                "elf_id": c.get("elf_id"),
+                "status": status,
+                "travel_end_ts": end,
+                "travel_limit_cnt": c.get("travel_limit_cnt"),
+                "food_id": c.get("food_id"),
+                "food_num": c.get("food_num"),
+            })
+        # 食物持有（act=3）+ A 级食物（静态配置解析）
+        try:
+            food_owned = await te.get_food_config(_session)
+        except Exception:  # noqa: BLE001
+            food_owned = {}
+        a_grade = te.resolve_a_grade_foods()
+        # 每日任务（act=32；task_bits = 已领取掩码）
+        try:
+            info = await te.get_daily_tasks(_session)
+        except Exception:  # noqa: BLE001
+            info = {"tasks": [], "bits": 0}
+        bits = int(info.get("bits") or 0)
+        task_rows = []
+        for t in info.get("tasks") or []:
+            idx = int(t.get("index") or 0)
+            cnt = int(t.get("cnt") or 0)
+            lim = te.DAILY_TASK_LIMIT.get(idx, 0)
+            claimed = bool(bits & (1 << idx))
+            task_rows.append({
+                "index": t.get("index"), "cnt": cnt, "type": t.get("type"),
+                "limit": lim, "claimed": claimed,
+                "done": bool(lim and cnt >= lim),
+                "claimable": bool(lim and cnt >= lim and not claimed),
+            })
+        # 浇水记录（main 的 travel_watered_arr = 今日已浇过水的好友 [{ts,uin}]）
+        watered = st.get("travel_watered_arr") or []
+        # 免费旅行次数口径（唯一判定入口 te.compute_free_counts）：
+        #   main.free_cnt = 今日**已用**次数；上限 = 猫数 × 3（4 猫 = 12，每猫每日 3 次）；
+        #   剩余 = Σ max(0, 3 − 该猫已旅行次数)。⚠️ travel_cnt_limit=8 不是这个上限。
+        fc = te.compute_free_counts(st)
+        free_limit, free_used, free_left = fc["free_limit"], fc["free_used"], fc["free_left"]
+        # 可浇好友（act=12 只读筛选：已开通 + 已种三叶草未成熟 + 今日未浇）
+        try:
+            col = await te.collect_water_targets(_session)
+            water_open = col.get("opened")
+            water_targets = col.get("targets") or []
+            water_rows = col.get("all") or []
+        except Exception:  # noqa: BLE001
+            water_open, water_targets, water_rows = None, [], []
+        return {"ok": True,
+                "free_cnt": st.get("free_cnt"),
+                "free_limit": free_limit,
+                "free_used": free_used,
+                "free_left": free_left,
+                "free_per_cat_limit": fc.get("per_cat_limit"),
+                "pay_cnt": st.get("pay_cnt"),
+                "dui_cnt": st.get("dui_cnt"),          # 兑换旅行次数（SWF 面板「兑换旅行次数：」）
+                "day_limit_cnt": st.get("day_limit_cnt"),
+                "clover_num": st.get("clover_num"),
+                "fenmo_num": st.get("fenmo_num"),
+                "can_water_times": st.get("can_water_times"),
+                "watered_today": len(watered),
+                "watered_uins": [str(x.get("uin")) for x in watered],
+                "water_open": water_open,
+                "water_targets": water_targets,
+                "water_rows": water_rows,
+                "food_owned": food_owned,
+                "food_names": te.resolve_food_names(),
+                "a_grade_foods": a_grade,
+                "task_bits": bits,
+                "tasks": task_rows,
+                "elves": elves}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"查询异常：{e}"}
+
+
+@app.post("/api/travel/run")
+async def travel_run(body: dict | None = None):
+    """跑一轮猫咪旅行：收获已返回猫 → 免费次数出发空闲猫(各喂一种A级食物,不够则购买)
+       → 收三叶草 → 给好友浇水 → 领取已完成的每日任务。
+
+    body 可选：
+      food_num?: 4          每只猫投喂数量（默认 4）
+      harvest_only?: false  只收获不出发
+      dry_run?: false       只算参数不发请求（先验证逻辑）
+      do_clover?: true      是否收三叶草（act=4）
+      do_water?: true       是否去好友家浇水（act=12 拉已开通列表 → 逐个 act=21）
+      do_tasks?: true       是否领取已完成的每日任务（act=33）
+    ⚠️ 会真实消耗免费旅行次数、购买食物、发起旅行/领取礼物/浇水，谨慎调用。
+    """
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        out = await te.run_once(
+            _session,
+            food_num=int(b.get("food_num") or te.DEFAULT_FOOD_NUM),
+            harvest_only=bool(b.get("harvest_only")),
+            dry_run=bool(b.get("dry_run")),
+            do_clover=bool(b.get("do_clover", True)),
+            do_water=bool(b.get("do_water", True)),
+            do_tasks=bool(b.get("do_tasks", True)),
+        )
+        return {"ok": bool(out) and all(i.get("ok") for i in out),
+                "dry_run": bool(b.get("dry_run")), "items": out}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"运行异常：{e}"}
+
+
+@app.post("/api/travel/clover")
+async def travel_clover():
+    """单独收三叶草（act=4）。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await te.harvest_clover(_session)
+        return {"ok": r.get("code") == 0, "code": r.get("code"),
+                "clover_num": r.get("clover_num"),
+                "message": r.get("message") or r.get("desc") or ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/travel/harvest")
+async def travel_harvest(body: dict | None = None):
+    """手动收获旅行：领取已返回猫的礼物（act=23）。
+
+    body 可选：elf_id?: 只收该只猫（不传=收获所有已返回的猫）。
+    ⚠️ 真实动作：会给已返回的猫领礼物并让该猫回到空闲。
+    """
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        eid = b.get("elf_id")
+        items = await te.harvest_returned(_session, elf_id=int(eid) if eid else None)
+        return {"ok": all(i.get("ok") for i in items), "items": items}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/travel/friends")
+async def travel_friends():
+    """拉取「已开通猫咪旅行玩法」的好友列表 + 各自三叶草状态（act=12，只读）。
+
+    猫咪旅行不是所有好友都开通：客户端把**全量好友**（card_user_list）发给 act=12，
+    服务端只回**开通者**（uin_tag_arr）。每条带 `data`：
+      - `None`         → 未种三叶草 → 不能浇
+      - `"<ts>_0"`     → 已种，ts=成熟时间；ts>now = 未成熟（可浇）
+    外加「是否今日已浇」（自己 main 的 travel_watered_arr）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        col = await te.collect_water_targets(_session)
+        if not col.get("opened"):
+            return {"ok": False, "message": "未取到已开通猫咪旅行的好友"}
+        friends = col.get("all") or []
+        return {"ok": True, "total": col.get("opened"), "count": len(friends),
+                "watered_today": col.get("watered_today"),
+                "waterable": len(col.get("targets") or []),
+                "targets": col.get("targets") or [],
+                "friends": friends}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/travel/water")
+async def travel_water(body: dict | None = None):
+    """去好友家浇水跑一轮（逐个 act=21）。
+
+    目标 = act=12 里**已开通 + 已种三叶草且未成熟 + 今日未浇过**的好友（自动排除自己）。
+    规则（用户明确）：只有种了三叶草且未成熟才能浇；每个好友每天只浇一次；
+    每人每天被浇次数有上限（浇前读好友主页 can_water_times，为 0 跳过）。
+    body 可选：only?: 指定 uin 列表（不传=按规则自动筛）。
+    """
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        col = await te.collect_water_targets(_session)
+        only = b.get("only")
+        targets = [str(u) for u in only] if only else list(col.get("targets") or [])
+        if not targets:
+            return {"ok": True, "opened": col.get("opened"), "targets": 0,
+                    "ok_cnt": 0, "fail": 0, "skipped": 0, "stopped": False,
+                    "results": [],
+                    "message": f"无可浇好友（已开通 {col.get('opened')} 个，今日已浇 "
+                               f"{col.get('watered_today')} 个，其余未种三叶草/已成熟）"}
+        r = await te.water_targets(_session, targets)
+        return {"ok": (r.get("ok_cnt") or 0) > 0, "opened": col.get("opened"),
+                "targets": len(targets), "tried": r.get("tried"),
+                "ok_cnt": r.get("ok_cnt"), "fail": r.get("fail"),
+                "skipped": r.get("skipped"), "stopped": r.get("stopped"),
+                "results": r.get("results"),
+                "message": "连续被拒，已提前收手" if r.get("stopped") else ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/travel/tasks")
+async def travel_tasks():
+    """领取可领的每日任务（act=32 查 + act=33 领；cnt>=limit 且未领过才领）。"""
+    if err := _require_login():
+        return err
+    try:
+        info = await te.get_daily_tasks(_session)
+        bits = int(info.get("bits") or 0)
+        claimed = []
+        for t in info.get("tasks") or []:
+            idx = int(t.get("index") or 0)
+            cnt = int(t.get("cnt") or 0)
+            lim = te.DAILY_TASK_LIMIT.get(idx, 0)
+            if lim and cnt >= lim and not (bits & (1 << idx)):
+                r = await te.claim_daily_task(_session, idx)
+                claimed.append({"index": idx, "ok": r.get("code") == 0,
+                                "code": r.get("code"),
+                                "message": r.get("message") or r.get("desc") or ""})
+        return {"ok": True, "claimed": claimed}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 # ---- 灵宠探险自动循环（2026-09-14）----
 
 
@@ -1529,6 +1776,85 @@ async def spirite_auto_status():
         st["mode"] = m
         modes[m] = st
     return {"ok": True, "modes": modes}
+
+
+# ---- 挖地（card_user_dig，2026-09-20 抓包 + 真机实证）----
+# 端点语义见 backend/dig_auto.py 顶部注释：act=1 状态 / act=2 挖格子 / act=18 一键收获 /
+# act=7 收矿机。前端独立页 #pane-dig（网格手动点 + 自动挖）。
+
+
+@app.get("/api/dig/state")
+async def dig_state():
+    """挖地只读状态：8×7 网格 + 资源 + 自动挖进度。"""
+    if err := _require_login():
+        return err
+    try:
+        st = await dg.get_state(_session)
+        if st is None:
+            return {"ok": False, "message": "读取挖地状态失败（可能限流，稍后重试）"}
+        st["ok"] = True
+        st["auto"] = dg.auto_status()
+        return st
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/cell")
+async def dig_cell(body: dict):
+    """挖一格。body: {line, col, dig_type}（dig_type 1=锄头 2=一字型炸药 3=九宫格炸药）。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        r = await dg.dig_cell(_session, int(b.get("line")), int(b.get("col")),
+                              int(b.get("dig_type") or 1))
+        r["state_auto"] = dg.auto_status()
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/collect")
+async def dig_collect():
+    """act=18 一键收获：收走所有已露出的礼物。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await dg.collect(_session)
+        st = await dg.get_state(_session)
+        r["state"] = st
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/machines")
+async def dig_machines():
+    """act=7 收矿机产出（只收到期的槽）。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await dg.collect_machines(_session)
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/auto/start")
+async def dig_auto_start(body: dict = None):
+    """启动自动挖。body: {max_digs, use_tnt}（默认只用锄头，不碰炸药）。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    return dg.start_auto(_session, int(b.get("max_digs") or 50), bool(b.get("use_tnt")))
+
+
+@app.post("/api/dig/auto/stop")
+async def dig_auto_stop():
+    if err := _require_login():
+        return err
+    return dg.stop_auto()
 
 
 class NoCacheStaticFiles(StaticFiles):

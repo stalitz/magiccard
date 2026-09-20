@@ -290,6 +290,8 @@ function switchPane(pane) {
   $("pane-auto").classList.toggle("hidden", pane !== "auto");
   $("pane-exchange").classList.toggle("hidden", pane !== "exchange");
   $("pane-spirite").classList.toggle("hidden", pane !== "spirite");
+  $("pane-travel").classList.toggle("hidden", pane !== "travel");
+  $("pane-dig").classList.toggle("hidden", pane !== "dig");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
@@ -300,10 +302,503 @@ function switchPane(pane) {
   if (pane === "exchange") initExchangeOnce();
   if (pane === "spirite") { initSpiriteOnce(); spStartLive(); }
   else spStopLive();
+  if (pane === "travel") initTravelOnce();
+  else travelStopAuto();
+  if (pane === "dig") initDigOnce();
+  else digStopPoll();
 }
 document.querySelectorAll(".subnav .btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
 });
+
+// ---------- 猫咪旅行（独立玩法页，2026-09-20） ----------
+let travelInited = false;
+let travelAutoTimer = null;
+
+// 每日任务名（来自 travel_day_task XML，实证）
+const TRAVEL_TASK_NAMES = {
+  1: "猫咪旅行次数", 2: "猫咪旅行次数", 3: "商城兑换次数", 4: "商城兑换次数",
+  5: "给好友浇水次数", 6: "给好友浇水次数", 7: "收获三叶草次数", 8: "使用兑换旅行次数",
+};
+
+function travelStatusText(c) {
+  const now = Math.floor(Date.now() / 1000);
+  if (c.status === "traveling") return `旅行中 · 剩 ${fmtLeft(Math.max(0, c.travel_end_ts - now))}`;
+  if (c.status === "returned") return "已返回 · 待收获";
+  return "空闲 · 可出发";
+}
+
+function renderTravelState(r) {
+  const elves = r.elves || [];
+  const names = r.food_names || {};
+  const traveling = elves.filter((c) => c.status === "traveling").length;
+  const idle = elves.filter((c) => c.status === "idle").length;
+  const returned = elves.filter((c) => c.status === "returned").length;
+  // ⚠️ 口径（2026-09-20 定案，三层证据）：main.free_cnt = 今日**已用**次数（不是剩余）。
+  //    ① HAR 里每次 act=5 出发 free_cnt +1；② 每日任务 index1「猫咪旅行次数」进度 == free_cnt；
+  //    ③ 好友 327904123 满额帧：四猫 travel_limit_cnt 各 3、free_cnt=12 → 上限 = 猫数 × 3。
+  //    每猫每日 3 次（travel_limit_cnt），剩余 = Σ max(0, 3 − 该猫已旅行次数)。
+  //    ⚠️ travel_house.travel_cnt_limit=8 不是这个上限（早期误判）。另有 兑换(dui_cnt)/付费(pay_cnt) 两池。
+  const used = r.free_used != null ? r.free_used : (r.free_cnt || 0);
+  const limit = r.free_limit || 12;
+  const perCap = r.free_per_cat_limit || 3;
+  const left = r.free_left != null ? r.free_left : Math.max(0, limit - used);
+  $("travel-cnt").textContent = `免费旅行次数 剩 ${left}（今日已旅行 ${used}/${limit}） · 兑换 ${r.dui_cnt ?? "?"} · 付费 ${r.pay_cnt} · 在旅行 ${traveling} · 空闲 ${idle}`;
+  if (!elves.length) {
+    $("travel-state").innerHTML = '<div class="empty-tip">未读到猫咪数据。</div>';
+    return;
+  }
+  const aGrade = r.a_grade_foods || [];
+  const owned = r.food_owned || {};
+  let html = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;font-size:12px">
+    <span class="chip">三叶草 ${r.clover_num}</span>
+    <span class="chip">粉末 ${r.fenmo_num}</span>
+    <span class="chip" title="免费旅行次数 = 每日上限（猫数×3，4 猫=12） − 今日已旅行次数(main.free_cnt)。免费次数次日清零。每猫每日上限 ${perCap} 次。">免费旅行次数 剩 ${left}（今日已旅行 ${used}/${limit}）</span>
+    <span class="chip" title="main.dui_cnt：兑换旅行次数（游戏面板「兑换旅行次数：」，用三叶草/积分兑换得来，不清零）">兑换旅行次数 ${r.dui_cnt ?? "?"}</span>
+    <span class="chip" title="main.pay_cnt：付费次数（游戏面板付费次数，不清零）">付费次数 ${r.pay_cnt}</span>
+    <span class="chip" title="travel_watered_arr：今日已浇过水的好友">今日已浇 ${r.watered_today ?? 0}${r.water_open != null ? ` / 已开通 ${r.water_open}` : ""}</span>
+    <span class="chip" title="可浇 = 已开通 + 已种三叶草且未成熟 + 今日未浇过">可浇好友 ${(r.water_targets || []).length}</span>
+    ${returned ? `<span class="chip" style="border-color:#e8a33d;color:#b8792a">待收获 ${returned}</span>` : ""}
+  </div>`;
+
+  if (aGrade.length) {
+    html += `<div style="margin-bottom:12px;font-size:12px">
+      <div style="color:#556;margin-bottom:5px">A 级食物（每只猫自动分配其一，不足自动购买）</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">`;
+    for (const fid of aGrade) {
+      const nm = names[fid] || `食物${fid}`;
+      html += `<span class="chip" style="border-color:#12b7f5">${esc(nm)} ×${owned[fid] || 0}</span>`;
+    }
+    html += `</div></div>`;
+  }
+
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px">';
+  for (const c of elves) {
+    const border = c.status === "traveling" ? "#12b7f5" : (c.status === "returned" ? "#e8a33d" : "#b6c0cc");
+    const fname = c.food_id ? (names[c.food_id] || `食物${c.food_id}`) : "—";
+    // 每猫今日已旅行次数 / 上限（travel_limit_cnt，上限 3）——到顶的猫本轮不会再出发
+    const pc = c.travel_limit_cnt != null ? Number(c.travel_limit_cnt) : null;
+    const capFull = pc != null && pc >= perCap;
+    const capCol = capFull ? "#c92a2a" : "#889";
+    html += `<div style="border:1px solid ${border};border-radius:10px;padding:10px 12px;background:#fff">
+      <div style="font-weight:600;margin-bottom:4px">猫咪 ${c.elf_id}</div>
+      <div style="font-size:12px;color:#556">${travelStatusText(c)}</div>
+      <div style="font-size:11px;color:#889;margin-top:4px">食物 ${esc(fname)} ×${c.food_num || 0}</div>
+      ${pc != null ? `<div style="font-size:11px;color:${capCol};margin-top:2px" title="travel_limit_cnt：该猫今日已旅行次数，每猫每日上限 ${perCap} 次">今日 ${pc}/${perCap} 次${capFull ? " · 已到顶" : ""}</div>` : ""}
+    </div>`;
+  }
+  html += "</div>";
+
+  const tasks = r.tasks || [];
+  if (tasks.length) {
+    html += `<div style="margin-top:14px;font-size:12px">
+      <div style="color:#556;margin-bottom:5px">每日任务（非花钱项自动做 + 领）</div>
+      <div style="display:flex;flex-direction:column;gap:3px">`;
+    for (const t of tasks) {
+      const nm = TRAVEL_TASK_NAMES[t.index] || `任务${t.index}`;
+      const col = t.claimable ? "#2f9e44" : (t.claimed ? "#9aa6b2" : "#889");
+      const tail = t.claimed ? "已领" : (t.claimable ? `${t.cnt}/${t.limit} 可领` : `${t.cnt}/${t.limit}`);
+      html += `<div style="display:flex;justify-content:space-between;color:${col}">
+        <span>#${t.index} ${esc(nm)}</span>
+        <span>${tail}</span></div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  $("travel-state").innerHTML = html;
+}
+
+async function loadTravelState() {
+  const box = $("travel-state");
+  if (!box) return;
+  try {
+    const r = await fetch("/api/travel/state").then((x) => x.json());
+    if (!r.ok) { box.innerHTML = `<div class="empty-tip">读取失败：${esc(r.message || "未知错误")}</div>`; return; }
+    renderTravelState(r);
+  } catch (e) {
+    box.innerHTML = `<div class="empty-tip">请求异常：${esc(e.message)}</div>`;
+  }
+}
+
+async function travelRun(harvestOnly) {
+  const dry = $("travel-dryrun").checked;
+  const foodNum = parseInt($("travel-foodnum").value, 10) || 4;
+  const btn = $("travel-run");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/travel/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        food_num: foodNum, harvest_only: !!harvestOnly, dry_run: dry,
+        do_clover: true, do_water: true, do_tasks: true,
+      }),
+    }).then((x) => x.json());
+    if (!r.ok) { log(`[旅行] 运行失败：${r.message || "未知"}`, "err"); return; }
+    for (const it of (r.items || [])) log(`[旅行] ${it.text}`, it.ok ? "ok" : "err");
+    if (r.dry_run) log("[旅行] 模拟运行，未发真实请求。", "info");
+  } catch (e) {
+    log(`[旅行] 请求异常：${esc(e.message)}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+    await loadTravelState();
+  }
+}
+
+async function travelClover() {
+  const r = await fetch("/api/travel/clover", { method: "POST" })
+    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  const busy = (r.message || "").includes("busy");
+  if (r.ok) log(`[旅行] 收三叶草：成功（现 ${r.clover_num ?? "?"}）`, "ok");
+  else if (busy) log("[旅行] 收三叶草：暂无可收（无成熟三叶草）。", "info");
+  else log(`[旅行] 收三叶草失败：${r.message || "未知"}`, "err");
+  await loadTravelState();
+}
+
+async function travelWater() {
+  const btn = $("travel-water");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/travel/water", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (r.opened === undefined) {
+      log(`[旅行] 去浇水：${r.message || "失败"}`, "err");
+    } else if (!r.targets) {
+      log(`[旅行] 去浇水：${r.message || "无可浇好友"}`, "info");
+    } else {
+      const extra = (r.skipped ? `，跳过 ${r.skipped} 个（好友已被浇满）` : "")
+        + (r.stopped ? "（连续被拒，已收手）" : "");
+      log(`[旅行] 去浇水：目标 ${r.targets} 个 → 成功 ${r.ok_cnt}、失败 ${r.fail}${extra}`
+        + `｜已开通 ${r.opened} 个`, r.ok ? "ok" : "err");
+      for (const x of (r.results || [])) {
+        if (x.skipped) log(`[旅行]   · ${x.uin}：跳过（${x.reason}）`, "info");
+      }
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+    await loadTravelState();
+    await travelFriendsList(true);
+  }
+}
+
+// 手动收获旅行（act=23）：领取所有已返回猫的礼物
+async function travelHarvest() {
+  const btn = $("travel-harvest");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/travel/harvest", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (!r.items) { log(`[旅行] 收获旅行失败：${r.message || "未知"}`, "err"); return; }
+    for (const it of r.items) log(`[旅行] ${it.text}`, it.ok ? "ok" : "err");
+  } finally {
+    if (btn) btn.disabled = false;
+    await loadTravelState();
+  }
+}
+
+// 已开通好友列表（act=12 只读）：不是所有好友都开了猫咪旅行，这里只列开通的
+let travelFriendsCache = null;
+
+function renderTravelFriends() {
+  const box = $("travel-friends-box"), cnt = $("travel-friends-cnt");
+  if (!box) return;
+  const r = travelFriendsCache;
+  if (!r) { if (cnt) cnt.textContent = ""; return; }
+  if (!r.ok) {
+    box.innerHTML = `<div style="font-size:12px;color:#c92a2a">拉取失败：${esc(r.message || "未知")}</div>`;
+    return;
+  }
+  if (cnt) cnt.textContent = `已开通 ${r.count} · 可浇 ${r.waterable ?? 0} · 今日已浇 ${r.watered_today}`;
+  const ST = {
+    waterable: { col: "#2f9e44", text: "可浇" },
+    watered: { col: "#12b7f5", text: "今日已浇" },
+    no_clover: { col: "#9aa6b2", text: "未种三叶草" },
+    ripe: { col: "#e8a33d", text: "已成熟" },
+    self: { col: "#c8d0d8", text: "我自己" },
+  };
+  const fmt = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} `
+      + `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  let html = `<div style="font-size:12px;color:#556;margin-bottom:6px">
+    已开通 <b>${r.count}</b> 个 · 可浇 <b>${r.waterable ?? 0}</b> 个
+    （规则：已种三叶草且<b>未成熟</b>，且今日未浇过）</div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px">`;
+  for (const f of (r.friends || [])) {
+    const st = ST[f.status] || { col: "#889", text: f.status || "" };
+    const tip = f.status === "waterable"
+      ? `可浇 · 三叶草成熟于 ${fmt(f.ripe_ts)}`
+      : (f.reason || st.text) + (f.ripe_ts ? ` · 成熟于 ${fmt(f.ripe_ts)}` : "");
+    html += `<span class="chip" style="border-color:${st.col};color:${st.col};font-size:11px"
+      title="${esc(tip)}">${esc(String(f.uin))} · ${esc(st.text)}</span>`;
+  }
+  html += "</div>";
+  box.innerHTML = html;
+}
+
+async function travelFriendsList(silent) {
+  const btn = $("travel-friends");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/travel/friends").then((x) => x.json())
+      .catch((e) => ({ ok: false, message: e.message }));
+    travelFriendsCache = r;
+    renderTravelFriends();
+    if (!silent) log(`[旅行] 好友列表：已开通 ${r.count ?? 0} 个，其中可浇 ${r.waterable ?? 0} 个（已种未成熟 · 今日未浇）。`, r.ok ? "ok" : "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function travelTasks() {
+  const r = await fetch("/api/travel/tasks", { method: "POST" })
+    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  if (!r.ok) { log(`[旅行] 领每日任务：${r.message || "失败"}`, "err"); }
+  else if (!(r.claimed || []).length) { log("[旅行] 领每日任务：暂无可领（未完成）。", "info"); }
+  else for (const c of r.claimed) log(`[旅行] 领每日任务#${c.index}：${c.ok ? "成功" : (c.message || "失败")}`, c.ok ? "ok" : "err");
+  await loadTravelState();
+}
+
+function travelStartAuto() {
+  if (travelAutoTimer) return;
+  const sec = parseInt($("travel-interval").value, 10) || 600;
+  travelAutoTimer = setInterval(() => travelRun(false), sec * 1000);
+  $("travel-auto-start").classList.add("hidden");
+  $("travel-auto-stop").classList.remove("hidden");
+  log(`[旅行] 自动循环已启动（每 ${sec} 秒一轮：收获+免费出发+三叶草+浇水+每日任务）。`, "ok");
+  travelRun(false);
+}
+
+function travelStopAuto() {
+  if (travelAutoTimer) { clearInterval(travelAutoTimer); travelAutoTimer = null; }
+  const s = $("travel-auto-start"), st = $("travel-auto-stop");
+  if (s) s.classList.remove("hidden");
+  if (st) st.classList.add("hidden");
+  log("[旅行] 自动循环已停止。", "info");
+}
+
+function initTravelOnce() {
+  if (travelInited) { loadTravelState(); return; }
+  travelInited = true;
+  $("travel-run").onclick = () => travelRun($("travel-harvestonly").checked);
+  $("travel-harvest").onclick = travelHarvest;
+  $("travel-clover").onclick = travelClover;
+  $("travel-water").onclick = travelWater;
+  $("travel-tasks").onclick = travelTasks;
+  $("travel-friends").onclick = () => travelFriendsList(false);
+  $("travel-friends-reload").onclick = () => travelFriendsList(false);
+  $("travel-refresh").onclick = loadTravelState;
+  $("travel-auto-start").onclick = travelStartAuto;
+  $("travel-auto-stop").onclick = travelStopAuto;
+  $("travel-clearlog").onclick = () => { logClear(); };
+  loadTravelState();
+  renderTravelFriends();
+}
+
+// ---------- 挖地（card_user_dig，独立玩法页，2026-09-20） ----------
+// 端点语义：act=1 读网格 / act=2 挖格子(line,col,dig_type) / act=18 一键收获 / act=7 收矿机。
+// dig_type：1=锄头(挖土 type2 / 石 type3)　2=一字型炸药　3=九宫格炸药（2/3 只能扔在已挖开的空格 type0 上）
+// type：0=空地 1=特殊 2=土 3=石 4=已挖出的礼物(待收) 5=岩石(不可挖)
+let digInited = false;
+let digPollTimer = null;
+let digBusy = false;
+let digAutoRunning = false;
+
+const DIG_TYPE_LABEL = { 0: "空地", 1: "特殊", 2: "土", 3: "石", 4: "半开", 5: "岩石" };
+
+const DIG_TYPE_COLOR = { 0: "#f4f7fa", 2: "#e3c08a", 3: "#d3dae2", 4: "#fff3bf", 5: "#6b7480" };
+
+function digLegendHtml() {
+  const L = [[0, "空地"], [2, "土·可挖"], [3, "石·要挖2次"], [4, "半开·再挖"], [5, "岩石·不可挖"]];
+  return `<div class="dg-legend">图例：`
+    + L.map(([t, n]) => `<span><i style="background:${DIG_TYPE_COLOR[t]}"></i>${n}</span>`).join("")
+    + `<span style="color:#98a4b2">虚线格 = 未探索</span></div>`;
+}
+
+function renderDigGrid(st) {
+  const box = $("dig-grid");
+  const cnt = $("dig-cnt");
+  if (!box || !st) return;
+  if (cnt) cnt.textContent = `可挖 ${st.diggable_cnt ?? 0} · 待收 ${st.pending_cnt ?? 0} · 第 ${st.dig_index ?? "?"} 层`;
+  const rows = st.rows || [];
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty-tip">没有地层数据。</div>`;
+    return;
+  }
+  let html = digLegendHtml() + `<div class="dg-wrap">`;
+  for (const r of rows) {
+    html += `<div class="dg-row"><div class="dg-ln">${r.line}</div><div class="dg-cells">`;
+    for (const c of r.cells) {
+      const cls = ["dg-cell", `t${c.type}`];
+      if (c.diggable) cls.push("dig");
+      if (c.pending) cls.push("pick");   // 已挖平 + 有礼物 → 点它一键收获
+      if (!c.known) cls.push("fog");
+      const tip = `${r.line} 行 ${c.j} 列 · ${DIG_TYPE_LABEL[c.type] || ("type" + c.type)}`
+        + (c.gift_name ? ` · ${c.gift_name}${c.gift_num ? "×" + c.gift_num : ""}` : "")
+        + (c.diggable ? "（点击挖）" : (c.pending ? "（点击收获）" : ""));
+      const main = c.gift_name || (DIG_TYPE_LABEL[c.type] || ("#" + c.type));
+      const sub = c.gift_name
+        ? (c.pending ? "待收" : (c.gift_num ? "×" + c.gift_num : DIG_TYPE_LABEL[c.type] || ""))
+        : "";
+      html += `<div class="${cls.join(" ")}" data-line="${r.line}" data-col="${c.j}" title="${esc(tip)}">`
+        + `<span class="gt">${esc(main)}</span>`
+        + (sub ? `<span class="tt">${esc(sub)}</span>` : "")
+        + `</div>`;
+    }
+    html += `</div></div>`;
+  }
+  html += `</div>`;
+  box.innerHTML = html;
+  box.querySelectorAll(".dg-cell.dig").forEach((el) => {
+    el.onclick = () => digClick(parseInt(el.dataset.line, 10), parseInt(el.dataset.col, 10), el);
+  });
+  box.querySelectorAll(".dg-cell.pick").forEach((el) => {
+    el.onclick = () => digCollect();
+  });
+}
+
+async function loadDigState(silent) {
+  try {
+    const r = await fetch("/api/dig/state").then((x) => x.json());
+    if (!r.ok) {
+      if (!silent) log(`[挖地] 读状态失败：${r.message || "未知"}`, "err");
+      return null;
+    }
+    renderDigGrid(r);
+    if ($("dig-res")) {
+      $("dig-res").innerHTML = [
+        `锄头 <b>${r.chutou ?? "?"}</b>`,
+        `一字型炸药 <b>${r.line_tnt ?? "?"}</b>`,
+        `九宫格炸药 <b>${r.jgg_tnt ?? "?"}</b>`,
+        `矿石币 <b>${r.kuangshi_bi ?? "?"}</b>`,
+        `碎金石 <b>${r.sui_jinshi ?? "?"}</b>`,
+        `金币 <b>${r.cash ?? "?"}</b>`,
+      ].map((s) => `<span class="chip" style="cursor:default;font-size:11.5px">${s}</span>`).join("");
+    }
+    const a = r.auto || {};
+    // 自动跑起来后把轮询调密（3s），停了就回到 8s
+    if (!!a.running !== digAutoRunning) {
+      digAutoRunning = !!a.running;
+      digStopPoll();
+      digStartPoll();
+    }
+    const tag = $("dig-auto-tag");
+    if (tag) {
+      tag.textContent = a.running
+        ? `自动挖中 ${a.digs}/${a.max_digs}（收获 ${a.collected}）`
+        : (a.finished || "");
+    }
+    const s = $("dig-auto-start"), st = $("dig-auto-stop");
+    if (s) s.classList.toggle("hidden", !!a.running);
+    if (st) st.classList.toggle("hidden", !a.running);
+    for (const m of (a.msgs || [])) {
+      // 只在首次出现时写全局日志：用文本去重，避免轮询重复刷
+      if (!window._digSeen) window._digSeen = new Set();
+      const k = String(m.ts) + m.text;
+      if (!window._digSeen.has(k)) { window._digSeen.add(k); log(`[挖地] ${m.text}`, m.kind || "info"); }
+    }
+    return r;
+  } catch (e) {
+    if (!silent) log(`[挖地] 请求异常：${esc(e.message)}`, "err");
+    return null;
+  }
+}
+
+async function digClick(line, col, el) {
+  if (digBusy) return;
+  digBusy = true;
+  if (el) el.classList.add("busy");
+  try {
+    const dt = parseInt($("dig-tool").value, 10) || 1;
+    const r = await fetch("/api/dig/cell", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line, col, dig_type: dt }),
+    }).then((x) => x.json());
+    if (r.text) log(`[挖地] ${r.text}`, r.ok ? "ok" : "err");
+    if (r.state) renderDigGrid(r.state);
+    else await loadDigState(true);
+  } catch (e) {
+    log(`[挖地] 挖格子异常：${esc(e.message)}`, "err");
+  } finally {
+    digBusy = false;
+    if (el) el.classList.remove("busy");
+  }
+}
+
+async function digCollect() {
+  const btn = $("dig-collect");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/dig/collect", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (r.ok) log(`[挖地] 一键收获：${r.text || "暂无可收"}`, "ok");
+    else log(`[挖地] 一键收获失败：${r.message || "未知"}`, "err");
+    if (r.state) renderDigGrid(r.state);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function digMachines() {
+  const btn = $("dig-machines");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/dig/machines", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (r.count === 0) log(`[挖地] ${r.text || "矿机暂无到期产出"}`, "info");
+    else log(`[挖地] ${r.text || "收矿机完成"}`, r.ok ? "ok" : "err");
+    if (r.state) renderDigGrid(r.state);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function digStartAuto() {
+  const maxDigs = parseInt($("dig-max").value, 10) || 30;
+  const useTnt = $("dig-tnt").checked;
+  const r = await fetch("/api/dig/auto/start", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_digs: maxDigs, use_tnt: useTnt }),
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  if (!r.ok) { log(`[挖地] 启动自动失败：${r.message || "未知"}`, "err"); return; }
+  window._digSeen = new Set();
+  log(`[挖地] 自动挖已启动：上限 ${maxDigs} 次，炸药${useTnt ? "开" : "关"}。`, "ok");
+  digAutoRunning = true;
+  await loadDigState(true);
+}
+
+async function digStopAuto() {
+  const r = await fetch("/api/dig/auto/stop", { method: "POST" })
+    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  log(`[挖地] ${r.message || "已停止"}`, "info");
+  await loadDigState(true);
+}
+
+function digStartPoll() {
+  if (digPollTimer) return;
+  digPollTimer = setInterval(() => loadDigState(true), digAutoRunning ? 3000 : 8000);
+}
+
+function digStopPoll() {
+  if (digPollTimer) { clearInterval(digPollTimer); digPollTimer = null; }
+}
+
+function initDigOnce() {
+  if (!digInited) {
+    digInited = true;
+    $("dig-refresh").onclick = () => loadDigState(false);
+    $("dig-collect").onclick = digCollect;
+    $("dig-machines").onclick = digMachines;
+    $("dig-auto-start").onclick = digStartAuto;
+    $("dig-auto-stop").onclick = digStopAuto;
+    if ($("dig-clearlog")) $("dig-clearlog").onclick = () => logClear();
+  }
+  loadDigState(false);
+  digStartPoll();
+}
 
 // ---------- 游戏状态（总览） ----------
 function fmtLeft(sec) {
