@@ -65,6 +65,11 @@ EP_PROPS_INFO   = "card_market_props_info"       # 道具持有清单（2026-09-
                                                  # 返回 <prop type="1" subtype="N" count="X">，
                                                  # subtype 即道具卡 id（见 propCard_v_26.xml）
                                                  # 主界面加载时必调，无参数即可
+# ---- 2026-09-20 探明：猫咪旅行（独立小游戏，产「一起去XX」套卡）----
+# HAR 坐实：动作端点 card_travel_elf（act 系：5 出发 / 23 领取礼物 / 4 收三叶草 /
+# 33 领任务奖 / 3 出发配置）；状态/配置端点 card_travel_elf_main（POST 无参 → 完整 JSON）。
+EP_TRAVEL_ELF      = "card_travel_elf"            # 动作端点（act=5/23/4/33/3...）
+EP_TRAVEL_ELF_MAIN = "card_travel_elf_main"       # 状态/配置（POST 无参，只读）
 # 注：EP_SPIRITE（精灵/猫咪探险）的 act 是"操作码"而非活动号：
 #   act=1 查询（可带 opuin）｜act=3 提交探险（section_id+ids+pass_id 必须齐全）｜act=4 收获宝箱
 
