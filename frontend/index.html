@@ -615,6 +615,7 @@
           <button class="btn sm ghost" data-pane="spirite">灵宠探险</button>
           <button class="btn sm ghost" data-pane="travel">猫咪旅行</button>
           <button class="btn sm ghost" data-pane="dig">挖地</button>
+          <button class="btn sm ghost" data-pane="gift">礼物/变卡</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
         <span class="spacer"></span>
@@ -1149,10 +1150,59 @@
         </div>
       </div>
 
+      <!-- 子页：礼物 / 变卡（card.qzone.qq.com，songli.har 实证） -->
+      <div id="pane-gift" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
+            <span style="font-weight:600;font-size:13.5px">礼物 / 变卡：</span>
+            <button id="gift-refresh" class="btn sm primary">刷新礼物箱</button>
+            <span id="gift-box-info" class="muted" style="font-size:12px"></span>
+            <span class="sep"></span>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              上限<input id="gift-upper" class="num-in" type="number" value="45" min="1" style="width:56px">件</label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              下限<input id="gift-lower" class="num-in" type="number" value="25" min="1" style="width:56px">件</label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
+              变卡目标<input id="gift-dst" class="num-in" type="number" value="26117" style="width:92px" title="变出的 40 面卡 id，改成你正在炼的套卡对应卡">（dstid）</label>
+            <label class="check" title="勾上=礼物箱快满时自动收礼+变卡（用礼物卡变40面卡替代买10面卡）；不选=只手动">
+              <input type="checkbox" id="gift-prefer"> 优先取礼物卡变（自动）</label>
+            <button id="gift-auto-start" class="btn sm ok hidden">开始自动</button>
+            <button id="gift-auto-stop" class="btn sm danger hidden">停止自动</button>
+          </div>
+          <div class="lib-body au-grid">
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">礼物箱 + 手动变卡</span>
+                  <span class="cnt" id="gift-cnt"></span>
+                  <div class="spacer"></div>
+                </div>
+                <div class="lst" id="gift-box" style="padding:12px 14px;display:flex;flex-direction:column;gap:14px">
+                  <div id="gift-list"><div class="empty-tip">点「刷新礼物箱」查看收到的礼物与可变的卡。</div></div>
+                  <div id="gift-manual"></div>
+                </div>
+              </div>
+            </div>
+            <div class="au-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">操作日志</span>
+                  <div class="spacer"></div>
+                  <button id="gift-clearlog" class="btn sm ghost">清空</button>
+                </div>
+                <div class="lst" id="gift-log" data-op-log style="padding:10px 14px">
+                  <div class="empty-tip">无记录。</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260921a"></script>
+<script src="/app.js?v=20260921d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

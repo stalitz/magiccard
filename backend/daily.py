@@ -7,6 +7,7 @@
 import xml.etree.ElementTree as ET
 
 from .constants import EP_MONEY_DRAW, err_msg
+from . import gift as _gift
 
 
 def _xml_attrs(raw: str) -> dict:
@@ -36,9 +37,28 @@ async def _daily_gift(session) -> dict:
     return {"ok": False, "code": code, "text": r.get("message") or err_msg(code)}
 
 
+async def _daily_send_gift(session) -> dict:
+    """每日送礼：freegift_send 送 48 面卡（freegift_id=81）给好友。
+
+    2026-09-20 songli.har 实证：端点 freegift/freegift_send 在 card.qzone.qq.com，
+    参数 freegift_id=81 = 送 48 面卡；friends 为 `;` 分隔的 uin 列表。响应
+    ecode=0 即成功（无「今日已送」码——送礼理论上每天可送多人，故以「发出人数>0」
+    判定成功；若好友列表为空或接口拒，按失败处理）。
+    """
+    r = await _gift.gift_send(session, friends=None, freegift_id=_gift.FREEGIFT_ID_48)
+    sent = r.get("sent", 0)
+    failed = r.get("failed", 0)
+    if sent > 0:
+        return {"ok": True, "code": 0,
+                "text": f"送礼成功 {sent} 人" + (f"（{failed} 人失败）" if failed else "")}
+    return {"ok": False, "code": r.get("code", -1),
+            "text": r.get("message") or "送礼失败（好友列表空或接口拒绝）"}
+
+
 # (key, 中文名, 执行函数) —— 加项必须先在上面写明实证依据
 ACTIONS = [
     ("gift", "每日登陆礼包", _daily_gift),
+    ("sendgift", "每日送礼（48卡）", _daily_send_gift),
 ]
 
 

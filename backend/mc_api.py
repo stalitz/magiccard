@@ -29,8 +29,10 @@ if not logger.handlers:
     logger.propagate = False
 
 from .constants import (  # noqa: F401
-    MC_BASE_URL, EP_MAINPAGE, EP_REFINE, EP_CANCEL, EP_REFINED_GET, EP_STEAL_GET,
+    MC_BASE_URL, QZONE_BASE_URL, EP_MAINPAGE, EP_REFINE, EP_CANCEL, EP_REFINED_GET, EP_STEAL_GET,
     EP_REGISTER, EP_RANDOM_GET, EP_PAI_OPEN, EP_SELL, EP_MOVE,
+    EP_FREEGIFT_SEND, EP_FREEGIFT_LIST, EP_FREEGIFT_TAKE, EP_FREEGIFT_FRDS,
+    EP_TRANSFER,
     calc_gtk, err_msg,
 )
 
@@ -165,6 +167,40 @@ class LoginSession:
             await self._reset_client(cli)
             resp = await self.client.post(url, data=data, cookies=ck)
             return parse_response(resp.text)
+
+    async def qzone(self, method: str, endpoint: str, **params) -> dict:
+        """发请求到 **card.qzone.qq.com** 域（免费礼物 / 变卡等）。
+
+        与 post() 不同：
+          - 基址是 QZONE_BASE_URL（不是 card.show.qq.com）
+          - 默认带 appid=365（空间 appid）
+          - 响应可能是 JSONP（`frameElement.callback({...})` / `_Callback({...})`，
+            包在 <script> 里）也可能是标准 <QQHOME> XML —— parse_qzone 自动判别。
+        连接自愈逻辑同 post()。
+        """
+        data = dict(params)
+        data.setdefault("g_tk", calc_gtk(self._session_key()))
+        data.setdefault("appid", 365)
+        if self.uin:
+            data.setdefault("uin", self.uin)
+        method = method.lower()
+        url = QZONE_BASE_URL + endpoint
+        ck = self._inject_qq_cookies()
+        cli = self.client
+        try:
+            if method == "get":
+                resp = await cli.get(url, params=data, cookies=ck)
+            else:
+                resp = await cli.post(url, data=data, cookies=ck)
+            return parse_qzone(resp.text)
+        except RETRYABLE as e:
+            logger.warning("QZONE %s %s 连接失败，重建连接池重试：%r", method, endpoint, e)
+            await self._reset_client(cli)
+            if method == "get":
+                resp = await self.client.get(url, params=data, cookies=ck)
+            else:
+                resp = await self.client.post(url, data=data, cookies=ck)
+            return parse_qzone(resp.text)
 
     async def _reset_client(self, seen: Optional[httpx.AsyncClient] = None) -> None:
         """丢弃陈旧连接池并重建 client，cookie 原样迁移。
@@ -627,6 +663,48 @@ class LoginSession:
             "下一步：定位游戏侧会话的获取方式（不引入重型浏览器依赖）。"
         )
         return out
+
+
+def parse_qzone(text: str) -> dict:
+    """解析 card.qzone.qq.com 的两种响应：
+
+      - JSONP：`<script>...frameElement.callback({...});</script>`（freegift_send/take 实测）
+        或裸 `_Callback({...})`（freegift_get_list/get_frds 实测），包在 HTML 里。
+        成功码在 ecode / code。
+      - 标准 <QQHOME> XML（变卡 card_user_transfer_card，`<?xml` 开头）—— 复用 parse_response。
+
+    注意：freegift_send/take 的真实响应是 `<html><head>..<script>frameElement.callback({..});
+    </script></html>`，**以 `<` 开头**，必须**先**抽 JSONP 再退化到 XML 解析，否则会被
+    parse_response 当成坏 XML 丢弃。
+    """
+    t = (text or "").strip()
+    # JSONP 优先：无论外层是否包 <html><script>，只要出现 callback(...) 就抽 JSON。
+    # 贪婪 \{.*\} 配合回调名前缀，能正确吃掉嵌套对象的 `}`（末尾 `);` 紧接最终 `}`）。
+    cb = re.search(
+        r"(?:frameElement\.callback|_Callback|callback)\s*\(\s*(\{.*\})\s*\)\s*;?",
+        t, re.S,
+    )
+    if cb:
+        try:
+            d = json.loads(cb.group(1))
+        except (json.JSONDecodeError, ValueError):
+            return {"code": -1, "message": "JSONP 解析失败", "raw": t[:500]}
+        code = d.get("ecode", d.get("code", 0))
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            code = -1
+        return {
+            "code": code,
+            "message": d.get("msg", d.get("desc", "")),
+            "data": d,
+            "raw": t,
+        }
+    # 标准 <QQHOME> XML（变卡 card_user_transfer_card）
+    if t.startswith("<"):
+        return parse_response(t)
+    # 兜底：当普通文本返回，交给调用方判断
+    return {"code": -1, "message": "无法识别的响应", "raw": t[:500]}
 
 
 def parse_response(xml_text: str) -> dict:

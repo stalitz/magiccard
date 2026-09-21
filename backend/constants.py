@@ -30,7 +30,7 @@ EP_MOVE         = "card_user_storage_exchange"   # 移动卡（换卡箱 <-> 保
 EP_THEME_LIST   = "card_user_theme_list"         # 套卡主题列表
 EP_COLLECTION_ADD = "card_collection_add"        # 卡片放入集卡册
 EP_EXCHANGE_CARD  = "card_user_exchangecard"     # 变卡（换卡）
-EP_TRANSFER     = "card_user_transfer_card"      # 赠卡
+EP_TRANSFER     = "card_user_transfer_card"      # 变卡（魔变）
 EP_MONEY_DRAW   = "card_user_money_draw"         # 每日登陆礼包
 EP_PAI_OPEN     = "card_pai_open"                # 翻牌
 EP_MISSION_COMPLETE = "card_mission_complete"    # 完成任务
@@ -70,6 +70,18 @@ EP_PROPS_INFO   = "card_market_props_info"       # 道具持有清单（2026-09-
 # 33 领任务奖 / 3 出发配置）；状态/配置端点 card_travel_elf_main（POST 无参 → 完整 JSON）。
 EP_TRAVEL_ELF      = "card_travel_elf"            # 动作端点（act=5/23/4/33/3...）
 EP_TRAVEL_ELF_MAIN = "card_travel_elf_main"       # 状态/配置（POST 无参，只读）
+
+# ---- 2026-09-20 探明：免费礼物 + 变卡（独立域名 card.qzone.qq.com）----
+# 来自 songli.har：freegift_* 与 card_user_transfer_card 全部在
+#   https://card.qzone.qq.com/cgi-bin/  （不是 card.show.qq.com）
+# freegift 系列响应是 **JSONP**（`frameElement.callback({...})` / `_Callback({...})`，
+# 包在 <script> 里）；变卡（card_user_transfer_card）响应是标准 <QQHOME> XML。
+# 两个端点都用同一套 qq.com cookie + skey 算的 g_tk，复用 LoginSession 的 cookie 即可。
+QZONE_BASE_URL     = "https://card.qzone.qq.com/cgi-bin/"
+EP_FREEGIFT_SEND   = "freegift/freegift_send"     # 送礼（日常送 48 卡：freegift_id=81）
+EP_FREEGIFT_LIST   = "freegift/freegift_get_list" # 礼物箱列表（上限 50，超出按 time 丢老的）
+EP_FREEGIFT_TAKE   = "freegift/freegift_take"     # 收礼：action=1→itemid7774 / action=2→itemid7773
+EP_FREEGIFT_FRDS   = "freegift/freegift_get_frds" # 好友列表（送礼对象的 uin 池）
 # 注：EP_SPIRITE（精灵/猫咪探险）的 act 是"操作码"而非活动号：
 #   act=1 查询（可带 opuin）｜act=3 提交探险（section_id+ids+pass_id 必须齐全）｜act=4 收获宝箱
 
