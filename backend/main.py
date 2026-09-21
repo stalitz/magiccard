@@ -33,7 +33,6 @@ from . import spirite_progress as spg
 from .auto_refine import AutoRefine, parse_full
 from . import daily
 from . import gift as gf
-from .gift import GiftAuto
 from . import travel_elf_auto as te
 from . import dig_auto as dg
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
@@ -56,7 +55,6 @@ _session.restore()
 _auto: AutoRefine | None = None
 
 # 礼物箱→变卡 自动循环（单例）
-_gift_auto: GiftAuto | None = None
 
 
 # 二维码缓存：避免页面刷新/多端取码互相作废
@@ -301,7 +299,9 @@ async def auto_status():
 
 @app.post("/api/auto/start")
 async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0,
-                    steal: int = 1, steal_friend: str = ""):
+                    steal: int = 1, steal_friend: str = "",
+                    gift_drain: int = 0, gift_dst: int = 0,
+                    gift_upper: int = 0, gift_lower: int = 0):
     """启动自动炼卡（**可多套并行**）。先按**实时库存算净需求**做启动预检。
 
     · `tids` = 逗号分隔的套卡 id 列表（队列，按序轮转，空着的炉位给各套分着用）；
@@ -329,6 +329,15 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     eng.steal_enabled = bool(steal)
     if steal_friend.strip():
         eng.preferred_steal_friend = steal_friend.strip()
+    # 礼物箱 → 变卡（可选环节）：勾选后，每 tick 在「缺素材、准备买卡」之前先看礼物箱，
+    # 箱件数 ≥ gift_upper 就收礼+变卡到 gift_lower，变出的 40 面卡直接当素材（省掉买卡+炼卡）。
+    eng.gift_drain = bool(gift_drain)
+    if gift_dst:
+        eng.gift_dst = int(gift_dst)
+    if gift_upper:
+        eng.gift_upper = int(gift_upper)
+    if gift_lower:
+        eng.gift_lower = int(gift_lower)
 
     mp = await _session.post(EP_MAINPAGE, code="", opuin=_session.uin)
     if mp.get("code") != 0:
@@ -1201,73 +1210,33 @@ async def gift_take_change_api(body: dict):
 async def gift_change_api(body: dict):
     """手动变卡（card_user_transfer_card）。
 
-    body: {srcid, dstid, prop?}
+    body: {srcid, dstid, prop?, slotid?, slottype?}
       srcid = 源：48 面礼物卡(7773/7774/7775…) / 卡箱卡 id / 道具卡 id（100/200/600 面额）
-      dstid = 目标卡 id（默认 26117 = 40 面卡）
-      prop  > 0 → 按「道具卡变卡」形态调用
-    服务端会**自动读 mainpage 定位源卡在换卡箱/保险箱里的真实槽位**
-    （固定槽位会返 -32002「找不到相应的记录」，2026-09-21 实证）。
+      dstid = 目标卡 id（默认 26117 = 40 面卡）。**只要是面额比源卡小的卡都行**，
+              不必和自动炼卡同一套；某些套卡本身不支持变 → 服务端直接拒（按返回码报错）。
+      prop  > 0 → 走「道具卡变卡」形态（HAR 实证：prop 与 srcid 都填道具 subtype，
+              如 prop=7&srcid=7=100面值卡；此时道具卡不在卡箱里，跳过槽位定位、直接发）。
+    普通卡箱卡：服务端要**源卡的真实槽位**，这里自动读 mainpage 定位
+      （固定槽位会返 -32002「找不到相应的记录」，2026-09-21 实证）。
     成功率约 50%，失败按返回判定。会真实消耗 srcid。
     """
     if err := _require_login():
         return err
     b = body or {}
+    srcid = int(b.get("srcid") or 0)
+    dstid = int(b.get("dstid") or gf.DEFAULT_CHANGE_DST)
+    prop = int(b.get("prop") or 0)
     try:
-        return await gf.change_any(
-            _session, int(b.get("srcid") or 0),
-            int(b.get("dstid") or gf.DEFAULT_CHANGE_DST),
-            prop=int(b.get("prop") or 0))
+        if prop > 0:
+            # 道具卡变卡：道具卡在道具箱、不占卡箱槽位，slotid/slottype 传 0 即可（见 HAR）
+            return await gf.change_card(
+                _session, srcid, dstid,
+                slotid=int(b.get("slotid") or 0), kind=int(b.get("kind") or 0),
+                type_=int(b.get("type") or 2),
+                slottype=int(b.get("slottype") or 0), prop=prop)
+        return await gf.change_any(_session, srcid, dstid)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"变卡异常：{e}"}
-
-
-@app.post("/api/gift/auto/start")
-async def gift_auto_start(body: dict | None = None):
-    """启动礼物箱→变卡自动循环（勾选「优先取礼物卡变」时启用）。
-
-    body: {upper?, lower?, dstid?, interval?, action?}
-      upper = 礼物箱件数达到此值开始收+变（默认 45，快满）
-      lower = 降到此值停（默认 25，约一半）
-      dstid = 变卡目标卡（默认 26117 = 40 面卡）
-    循环：件数>=upper 时收礼+变卡直到<=lower；之后休眠 interval 秒等礼物箱再满。
-    """
-    global _gift_auto
-    if err := _require_login():
-        return err
-    b = body or {}
-    dstid = int(b.get("dstid") or gf.DEFAULT_CHANGE_DST)
-    upper = int(b.get("upper") or 45)
-    lower = int(b.get("lower") or 25)
-    interval = int(b.get("interval") or 120)
-    action = int(b.get("action") or 2)
-    if _gift_auto is None or not _gift_auto.running:
-        _gift_auto = GiftAuto(_session, dstid=dstid, upper=upper,
-                              lower=lower, interval=interval, action=action)
-        _gift_auto.start()
-    else:
-        # 运行中改参数：停了重建
-        _gift_auto.stop()
-        _gift_auto = GiftAuto(_session, dstid=dstid, upper=upper,
-                              lower=lower, interval=interval, action=action)
-        _gift_auto.start()
-    return {"ok": True, **_gift_auto.status()}
-
-
-@app.post("/api/gift/auto/stop")
-async def gift_auto_stop():
-    """停止礼物箱→变卡自动循环。"""
-    global _gift_auto
-    if _gift_auto is not None:
-        _gift_auto.stop()
-    return {"ok": True, "running": False}
-
-
-@app.get("/api/gift/auto/status")
-async def gift_auto_status():
-    """礼物箱→变卡自动循环状态。"""
-    if _gift_auto is None:
-        return {"running": False}
-    return _gift_auto.status()
 
 
 @app.get("/api/world/status")
@@ -2091,11 +2060,18 @@ async def set_item_name(body: dict):
 
 @app.post("/api/dig/auto/start")
 async def dig_auto_start(body: dict = None):
-    """启动自动挖。body: {max_digs, use_tnt}（默认只用锄头，不碰炸药）。"""
+    """启动自动挖。body: {max_digs, use_tnt, clear_margin}。
+
+    决策走 dig_plan.plan()（见 backend/dig_plan.py）：穷举落点×工具按「收益/代价」贪心，
+    按「探明 > 挖平礼物格 > 免费炸弹 > 下推」排序，并硬性排除会让未清地块滚出窗口的动作。
+    use_tnt 默认 True —— 炸药是算法的主力（一字型横向摊开探明、九宫格秒石并下推）。
+    """
     if err := _require_login():
         return err
     b = body or {}
-    return dg.start_auto(_session, int(b.get("max_digs") or 50), bool(b.get("use_tnt")))
+    ut = True if b.get("use_tnt") is None else bool(b.get("use_tnt"))
+    cm = int(b.get("clear_margin") if b.get("clear_margin") is not None else 1)
+    return dg.start_auto(_session, int(b.get("max_digs") or 50), ut, cm)
 
 
 @app.post("/api/dig/auto/stop")

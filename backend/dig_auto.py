@@ -55,6 +55,7 @@ import asyncio
 import time
 
 from . import card_query as cq
+from . import dig_plan as dplan
 from . import item_dict as iid
 
 EP_DIG = "card_user_dig"
@@ -565,45 +566,35 @@ def _alog(text: str, kind: str = "info"):
         _auto["msgs"] = _auto["msgs"][-_AUTO_LOG_MAX:]
 
 
-def _pick_cell(rows: list) -> tuple | None:
-    """锄头：选下一格 —— **最深行优先**（往下推进才能出新区域），同深度优先带礼物的。"""
-    cand = [(r["line"], c) for r in rows for c in r["cells"] if c["diggable"]]
-    if not cand:
-        return None
-    cand.sort(key=lambda x: (-x[0], 0 if x[1].get("gift_type") else 1, x[1].get("j") or 0))
-    return cand[0][0], cand[0][1]["j"]
+async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
+                    collect_every: int = 8, clear_margin: int = 1):
+    """自动挖循环 —— 决策全部交给 `dig_plan.plan()`（纯函数、可离线验收）。
 
+    每轮：
+      1) 有待收（已挖平 + 有礼物）→ 先 act=18 全收。**推进前必收**：行滚出窗口后
+         服务端会整行压平，其上没收的礼物永久收不回来（实测踩过一次）。
+      2) 规划器算下一个动作（穷举所有合法落点 × 3 种工具，按「收益/代价」贪心）：
+         探明 > 挖平礼物格 > 免费炸弹回本 > 下推；**会丢东西的动作硬性排除**。
+      3) 执行；连续失败 3 次停。
 
-def _pick_tnt_cell(rows: list) -> tuple | None:
-    """炸药落点：最深一行的已挖开空格，优先中间列（一字型 ±2 / 九宫格 ±1 都不出界）。"""
-    cand = [(r["line"], c) for r in rows for c in r["cells"] if c["tntable"]]
-    if not cand:
-        return None
-    cand.sort(key=lambda x: (-x[0], abs((x[1].get("j") or 0) - 3)))
-    return cand[0][0], cand[0][1]["j"]
-
-
-async def auto_loop(session, max_digs: int = 50, use_tnt: bool = False,
-                    collect_every: int = 8):
-    """自动挖循环。
-
-    - 默认只用锄头；use_tnt=True 才会在「没土可挖」时用炸药往下推
-      （先一字型 line_tnt，不够再九宫格 jgg_tnt）。
-    - fog 格挖不动，往下推进**只能靠炸药**把上一行炸开。
+    use_tnt=False 表示只用锄头（规划器不会再选一字型/九宫格）。
+    clear_margin = 推进时额外要求多干净几行（1 = 多留一行缓冲）。
     """
     _auto.update({"running": True, "stop": False, "digs": 0, "collected": 0,
                   "cost": {"chutou": 0, "line_tnt": 0, "jgg_tnt": 0},
                   "msgs": [], "started": time.time(), "max_digs": max_digs,
                   "use_tnt": use_tnt, "finished": None})
-    _alog(f"自动挖启动：上限 {max_digs} 次，炸药 {'开' if use_tnt else '关'}", "ok")
+    _alog(f"自动挖启动：上限 {max_digs} 次，炸药 {'开' if use_tnt else '关（只锄头）'}，"
+          f"清账缓冲 {clear_margin} 行", "ok")
+    bomb_bad = set()      # 引爆失败过的炸弹格，不再重试
     try:
         while not _auto["stop"] and _auto["digs"] < max_digs:
             st = await get_state(session)
             if st is None:
                 _alog("读状态失败，停止", "err")
                 break
-            # 1) 有露出的礼物先收（每 collect_every 次挖也强制收一次）
-            if st["pending_cnt"] > 0 or (_auto["digs"] and _auto["digs"] % collect_every == 0):
+            # 1) 收：只要有待收就先收干净（这是「不丢东西」的唯一保险）
+            if st["pending_cnt"] > 0:
                 c = await collect(session)
                 if c["ok"] and c["text"]:
                     _auto["collected"] += 1
@@ -612,63 +603,55 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = False,
                     _alog(f"一键收获失败：{c['message']}", "err")
                 if _auto["stop"]:
                     break
-            # 2) 锄头挖（最深行优先）
-            pick = _pick_cell(st["rows"])
-            if pick:
-                if int(st.get("chutou") or 0) <= 0:
-                    _alog("锄头用尽，停止", "err")
-                    break
-                r = await dig_cell(session, pick[0], pick[1], 1)
-                if r["ok"]:
-                    _auto["digs"] += 1
-                    _auto["cost"]["chutou"] += 1
-                else:
-                    _alog(r["text"], "err")
-                    _auto["_fail"] = _auto.get("_fail", 0) + 1
-                    if _auto["_fail"] >= 3:
-                        _alog("连续失败 3 次，停止", "err")
-                        break
-                    continue
+            # 2) 规划
+            tools = {"chutou": st.get("chutou"), "line_tnt": st.get("line_tnt"),
+                     "jgg_tnt": st.get("jgg_tnt")}
+            res = dplan.plan(st["rows"], tools, use_tnt=use_tnt,
+                             clear_margin=clear_margin, exclude=bomb_bad)
+            act = res.get("action")
+            if not act:
+                _auto["finished"] = res.get("reason") or "没事可做"
+                _alog(f"停止：{_auto['finished']}", "info")
+                break
+            # 3) 执行
+            dt, line, col = act["dig_type"], act["line"], act["col"]
+            r = await dig_cell(session, line, col, dt)
+            if r["ok"]:
+                _auto["digs"] += 1
+                cost = (res.get("eval") or {}).get("cost") or 1
+                key = dplan.TOOL_KEY.get(dt)
+                if key:
+                    _auto["cost"][key] += cost
                 _auto["_fail"] = 0
-                continue
-            # 3) 没土可挖：用炸药把 fog 行炸开，往下推进
-            if use_tnt:
-                oc = _pick_tnt_cell(st["rows"])
-                if oc:
-                    done = False
-                    for dt in (2, 3):
-                        info = DIG_TYPES[dt]
-                        if int(st.get(info["key"]) or 0) <= 0:
-                            continue
-                        r = await dig_cell(session, oc[0], oc[1], dt)
-                        if r["ok"]:
-                            _auto["digs"] += 1
-                            _auto["cost"][info["key"]] += 1
-                            new_idx = (r.get("state") or {}).get("dig_index")
-                            _alog(f"扔{info['name']} ({oc[0]},{oc[1]}) → 地层推进到第 {new_idx} 层"
-                                  f"（余 {(r.get('state') or {}).get(info['key'])}）", "ok")
-                            done = True
-                            break
-                        _alog(f"{info['name']}失败：{r['text']}", "err")
-                    if done:
-                        continue
-                    _auto["finished"] = "炸药用尽 / 都扔不动"
-                    _alog("炸药用尽或都扔不动，停止", "info")
+                new_idx = (r.get("state") or {}).get("dig_index")
+                _alog(f"{dplan.TOOL_NAME[dt]}@({line},{col}) → {res['reason']}"
+                      + (f"｜地层 D{res['dig_index']}→{new_idx}" if new_idx != res["dig_index"] else ""),
+                      "ok")
+            else:
+                if act["tier"] == 0:
+                    bomb_bad.add((line, col))
+                    _alog(f"引爆炸弹 {dt}@({line},{col}) 失败（code={r.get('code')}），"
+                          f"改用常规工具：{r['text']}", "warn")
+                    continue
+                _alog(r["text"], "err")
+                _auto["_fail"] = _auto.get("_fail", 0) + 1
+                if _auto["_fail"] >= 3:
+                    _alog("连续失败 3 次，停止", "err")
                     break
-            _auto["finished"] = "没有可挖的格子了（勾选「允许用炸药」可炸开未探索行继续推进）"
-            _alog("没有可挖的格子了，停止（勾选「允许用炸药」可继续往下推进）", "info")
-            break
+                continue
     finally:
         _auto["running"] = False
         _alog(f"自动挖结束：共挖 {_auto['digs']} 次，收获 {_auto['collected']} 次", "ok")
 
 
-def start_auto(session, max_digs: int = 50, use_tnt: bool = False) -> dict:
+def start_auto(session, max_digs: int = 50, use_tnt: bool = True,
+               clear_margin: int = 1) -> dict:
     if _auto["running"]:
         return {"ok": False, "message": "自动挖已在运行"}
     _auto["_fail"] = 0
-    asyncio.ensure_future(auto_loop(session, max_digs, use_tnt))
+    asyncio.ensure_future(auto_loop(session, max_digs, use_tnt, 8, clear_margin))
     return {"ok": True, "message": f"已启动（上限 {max_digs} 次）"}
+
 
 
 def stop_auto() -> dict:

@@ -292,7 +292,6 @@ function switchPane(pane) {
   $("pane-spirite").classList.toggle("hidden", pane !== "spirite");
   $("pane-travel").classList.toggle("hidden", pane !== "travel");
   $("pane-dig").classList.toggle("hidden", pane !== "dig");
-  $("pane-gift").classList.toggle("hidden", pane !== "gift");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
@@ -307,8 +306,6 @@ function switchPane(pane) {
   else travelStopAuto();
   if (pane === "dig") initDigOnce();
   else digStopPoll();
-  if (pane === "gift") initGiftOnce();
-  else giftStopAuto();
 }
 document.querySelectorAll(".subnav .btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
@@ -913,13 +910,16 @@ async function digNameItem(key) {
 async function digStartAuto() {
   const maxDigs = parseInt($("dig-max").value, 10) || 30;
   const useTnt = $("dig-tnt").checked;
+  const marginEl = $("dig-margin");
+  const clearMargin = marginEl ? (parseInt(marginEl.value, 10) || 0) : 1;
   const r = await fetch("/api/dig/auto/start", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_digs: maxDigs, use_tnt: useTnt }),
+    body: JSON.stringify({ max_digs: maxDigs, use_tnt: useTnt, clear_margin: clearMargin }),
   }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
   if (!r.ok) { log(`[挖地] 启动自动失败：${r.message || "未知"}`, "err"); return; }
   window._digSeen = new Set();
-  log(`[挖地] 自动挖已启动：上限 ${maxDigs} 次，炸药${useTnt ? "开" : "关"}。`, "ok");
+  log(`[挖地] 自动挖已启动：上限 ${maxDigs} 次，炸药${useTnt ? "开" : "关"}，`
+    + `清账缓冲 ${clearMargin} 行。`, "ok");
   digAutoRunning = true;
   await loadDigState(true);
 }
@@ -961,187 +961,6 @@ function initDigOnce() {
   loadDigState(false);
   digStartPoll();
 }
-
-// ---------- 礼物 / 变卡（card.qzone.qq.com，songli.har 实证） ----------
-let giftInited = false;
-let giftPollTimer = null;
-
-function giftStopAuto() {
-  if (giftPollTimer) { clearInterval(giftPollTimer); giftPollTimer = null; }
-}
-
-function initGiftOnce() {
-  if (!giftInited) {
-    giftInited = true;
-    $("gift-refresh").onclick = loadGiftInbox;
-    // 注意：gift-take-all 在 loadGiftInbox 重写 innerHTML 后重新绑定；
-    //       gift-change 在 renderGiftManual 内绑定。这里不能提前绑定（元素尚不存在，会 null 报错）。
-    $("gift-clearlog").onclick = () => logClear();
-    // 自动循环：勾选「优先取礼物卡变」即启动，取消即停止
-    $("gift-prefer").onchange = (e) => { e.target.checked ? startGiftAuto() : stopGiftAuto(); };
-    $("gift-auto-start").onclick = startGiftAuto;
-    $("gift-auto-stop").onclick = stopGiftAuto;
-    renderGiftManual();
-  }
-  loadGiftInbox();
-  renderGiftProps();
-  giftStartStatusPoll();
-}
-
-async function loadGiftInbox() {
-  try {
-    const r = await (await fetch("/api/gift/inbox")).json();
-    if (!r.ok && r.code !== 0) { $("gift-list").innerHTML = `<div class="empty-tip">读取失败：${r.message || r.code}</div>`; return; }
-    const cap = r.cap || 50, count = r.count || 0;
-    $("gift-box-info").textContent = `礼物箱 ${count}/${cap} 件`;
-    const gifts = r.gifts || [];
-    if (!gifts.length) {
-      $("gift-list").innerHTML = `<div class="empty-tip">礼物箱为空。先去「一键日常」送礼，或等好友回送。</div>`;
-      return;
-    }
-    const rows = gifts.map((g) => {
-      const t = g.time ? new Date(g.time * 1000).toLocaleString("zh-CN") : "?";
-      return `<div class="ex-hit">
-        <div class="cnm">${g.nick || g.sender} <span style="color:var(--muted);font-weight:400">(${g.sender})</span></div>
-        <div class="pay" style="flex:1">${t}</div>
-        <button class="btn xs ok" onclick="giftTakeChange(${g.index_id},2)" title="收下这条礼物并立刻变卡（产出哪张48面礼物卡由礼物本身决定）">收→变卡</button>
-      </div>`;
-    }).join("");
-    $("gift-list").innerHTML = `<div class="ex-peer"><div class="ph"><span class="nick">收到的礼物</span>
-      <span class="want">${count}/${cap}</span><span class="spacer"></span>
-      <button class="btn xs" id="gift-take-all">全部收→变卡</button></div>
-      <div class="hits">${rows}</div></div>`;
-    // 重新绑定（innerHTML 重写后按钮需重新取引用）
-    $("gift-take-all").onclick = giftTakeAll;
-  } catch (e) {
-    $("gift-list").innerHTML = `<div class="empty-tip">读取异常：${e}</div>`;
-  }
-}
-
-// 收礼 + 变卡一步完成（服务端读 mainpage 定位源卡真实槽位，避免 -32002）
-async function giftTakeChange(index_id, action) {
-  const dst = Number($("gift-dst").value) || 26117;
-  log(`收礼物 #${index_id} → 变卡 dst=${dst}…`, "info");
-  const r = await (await fetch("/api/gift/take_change", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ index_id, action, dstid: dst }),
-  })).json();
-  if (r.stage === "take" && !r.ok) { log(`收礼失败 #${index_id}：${r.message || r.code}`, "err"); return; }
-  if (r.ok) log(`收礼变卡成功：${r.itemid} → ${dst}`, "ok");
-  else log(`收到礼物卡 ${r.itemid}，变卡失败（约50%概率，可再点一次）：${r.message || r.code}`, "warn");
-  loadGiftInbox();
-}
-
-async function giftTakeAll() {
-  const dst = Number($("gift-dst").value) || 26117;
-  const r = await (await fetch("/api/gift/inbox")).json();
-  const gifts = (r.gifts || []).slice().sort((a, b) => a.time - b.time);
-  if (!gifts.length) { log("礼物箱为空", "info"); return; }
-  log(`批量收→变卡：${gifts.length} 件，目标 dst=${dst}`, "info");
-  let okN = 0, badN = 0;
-  for (const g of gifts) {
-    const t = await (await fetch("/api/gift/take_change", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ index_id: g.index_id, action: 2, dstid: dst }),
-    })).json();
-    if (t.ok) { okN++; log(`收礼变卡成功：${t.itemid} → ${dst}`, "ok"); }
-    else { badN++; log(`#${g.index_id} 失败（${t.stage || "?"}）：${t.message || t.code}`, "warn"); }
-  }
-  log(`批量结束：成功 ${okN}、失败 ${badN}`, "info");
-  loadGiftInbox();
-}
-
-// 手动变卡表单（只渲染一次，避免刷新时清空输入）
-function renderGiftManual() {
-  $("gift-manual").innerHTML = `
-    <div class="cb-box">
-      <div class="cb-head">手动变卡 <span class="cb-cap">srcid → dstid</span></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 2px;font-size:12.5px">
-        <span>源卡 srcid</span><input id="gift-src" class="num-in" type="number" style="width:100px" placeholder="7773/卡箱id/道具id">
-        <span>目标 dstid</span><input id="gift-dst2" class="num-in" type="number" style="width:100px" value="26117" title="与上方「变卡目标」一致">
-        <span>道具prop</span><input id="gift-prop" class="num-in" type="number" style="width:80px" value="0" title="可选，留0=不带">
-        <button id="gift-change" class="btn sm ok">变卡</button>
-      </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;padding:0 2px 6px;font-size:12px;color:var(--muted)">
-        快捷源：
-        <button class="btn xs" onclick="giftSetSrc(7773)">蚕丝7773</button>
-        <button class="btn xs" onclick="giftSetSrc(7774)">五彩线7774</button>
-        <span style="margin-left:8px">我的道具卡（100/200/600 面额候选）：</span>
-        <span id="gift-props" class="chiprow">加载中…</span>
-      </div>
-      <div style="font-size:11.5px;color:var(--muted);padding:2px 2px 8px">变卡成功率约 50%，失败按返回判定。dstid 填你正在炼的套卡对应的 40 面卡 id（默认 26117 涡旋仪）。</div>
-    </div>`;
-  $("gift-change").onclick = giftManualChange;
-}
-
-function giftSetSrc(v) { $("gift-src").value = v; }
-
-// 道具卡（100/200/600 面值卡）作为变卡素材：HAR 实测 card_user_transfer_card
-// 是 prop=<subtype>&srcid=<subtype> 同时带两份，所以这里把 srcid 和 prop 都设成该 id。
-function giftSetSrcProp(v) { $("gift-src").value = v; $("gift-prop").value = v; }
-
-async function renderGiftProps() {
-  try {
-    const r = await (await fetch("/api/props")).json();
-    const props = r.props || [];
-    if (!props.length) { $("gift-props").innerHTML = "（无道具卡）"; return; }
-    $("gift-props").innerHTML = props.map((p) =>
-      `<span class="chip" onclick="giftSetSrcProp(${p.id})" title="subtype=${p.id}，点此把 srcid 与 prop 都设为该道具卡（对齐 HAR 的 prop=7&srcid=7 用法）">${p.name || "道具" + p.id} ×${p.count}</span>`
-    ).join("");
-  } catch (e) {
-    $("gift-props").innerHTML = "加载失败";
-  }
-}
-
-async function giftManualChange() {
-  const srcid = Number($("gift-src").value);
-  const dstid = Number($("gift-dst2").value) || Number($("gift-dst").value) || 26117;
-  if (!srcid) { log("请填写源卡 srcid（或点上方快捷源）", "err"); return; }
-  const prop = Number($("gift-prop").value) || 0;
-  log(`手动变卡：${srcid} → ${dstid}` + (prop ? `（prop=${prop}）` : ""), "info");
-  const r = await (await fetch("/api/gift/change", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ srcid, dstid, prop }),
-  })).json();
-  if (r.ok) log(`变卡成功：${srcid} → ${dstid}`, "ok");
-  else log(`变卡失败：${r.message || r.code}`, "warn");
-}
-
-function startGiftAuto() {
-  const body = {
-    upper: Number($("gift-upper").value) || 45,
-    lower: Number($("gift-lower").value) || 25,
-    dstid: Number($("gift-dst").value) || 26117,
-  };
-  fetch("/api/gift/auto/start", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  }).then((x) => x.json()).then((s) => {
-    log(s.running ? `礼物→变卡自动已启动（>=${body.upper}件收变，<=${body.lower}件停）` : "启动失败", "ok");
-    giftStartStatusPoll();
-  });
-}
-
-function stopGiftAuto() {
-  fetch("/api/gift/auto/stop", { method: "POST" }).then(() => log("已停止礼物→变卡自动", "info"));
-  giftStopAuto();
-}
-
-function giftStartStatusPoll() {
-  giftStopAuto();
-  giftPollTimer = setInterval(async () => {
-    try {
-      const s = await (await fetch("/api/gift/auto/status")).json();
-      const running = !!s.running;
-      $("gift-box-info").textContent =
-        `礼物箱→变卡：${running ? "自动运行中" : "未运行"}` +
-        (s.last && s.last.note ? `｜${s.last.note}` : "");
-      $("gift-prefer").checked = running;
-      $("gift-auto-start").classList.toggle("hidden", running);
-      $("gift-auto-stop").classList.toggle("hidden", !running);
-    } catch (e) { /* 忽略轮询异常 */ }
-  }, 3000);
-}
-
 // ---------- 游戏状态（总览） ----------
 function fmtLeft(sec) {
   if (sec <= 0) return "已完成";
@@ -2687,10 +2506,16 @@ async function autoStart() {
   // 偷炉（借好友空炉多并行一炉）：开关 + 常去好友 QQ。留空则后端从好友列表最后一名往回找空炉。
   const steal = $("auto-steal").checked ? 1 : 0;
   const sf = ($("auto-steal-friend").value || "").trim();
+  // 礼物箱 → 变卡（可选环节，并入炼卡，不再是独立自动化）
+  const gd = $("auto-gift-drain").checked ? 1 : 0;
+  const gdst = parseInt($("auto-gift-dst").value, 10) || 26117;
+  const gup = parseInt($("auto-gift-upper").value, 10) || 45;
+  const glow = parseInt($("auto-gift-lower").value, 10) || 25;
   $("auto-start").disabled = true;
   try {
     const qs = `tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}&steal=${steal}`
-      + (sf ? `&steal_friend=${encodeURIComponent(sf)}` : "");
+      + (sf ? `&steal_friend=${encodeURIComponent(sf)}` : "")
+      + `&gift_drain=${gd}&gift_dst=${gdst}&gift_upper=${gup}&gift_lower=${glow}`;
     const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
       log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）`, "ok");
@@ -2867,6 +2692,7 @@ function initCardBoxOnce() {
   if (cardboxInitDone) return;
   cardboxInitDone = true;
   $("cb-refresh").onclick = () => loadCardBox(true);
+  if ($("cb-change-by-prop")) $("cb-change-by-prop").onclick = cbChangeByProp;
   // 点卡箱里任意一张卡 -> 弹窗显示所属套卡的合成路径；卖/移按钮区域不触发
   document.getElementById("pane-cardbox").addEventListener("click", (e) => {
     if (e.target.closest(".cbacts")) return;
@@ -2921,6 +2747,8 @@ function cbCardHtml(c, boxType) {
     <div class="cb-route">点击查看合成路径 ▸</div>
     <div class="cbacts">
       ${sellBtn}
+      <button class="btn sm ghost" data-act="change" data-box="${boxType}" data-id="${c.id}" data-name="${esc(c.name || "")}"
+              title="把这**箱里的这张卡**变卡（card_user_transfer_card）。成功率约 50%，失败不消耗；源卡槽位自动定位">变卡</button>
       <button class="btn sm ghost" data-act="move" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}">${toName}</button>
     </div>
   </div>`;
@@ -2959,7 +2787,22 @@ async function onCbAction(e) {
   const id = Number(b.dataset.id);
   b.disabled = true;
   try {
-    if (act === "sell") {
+    if (act === "change") {
+      // 变卡：源 = 箱里这张卡（服务端要真实槽位 → 后端 change_any 自己读 mainpage 定位）
+      const dst = Number($("cb-dst").value) || 26117;
+      const nm = b.dataset.name || ("卡#" + id);
+      if (!confirm(`确定把「${nm}」变卡成 id=${dst}？\n\n成功率约 50%，失败不消耗任何东西。`)) {
+        b.disabled = false; return;
+      }
+      log(`变卡：${nm}(id=${id}) → dst=${dst} …`, "info");
+      const d = await (await fetch("/api/gift/change", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ srcid: id, dstid: dst }),
+      })).json();
+      if (d.ok) log(`变卡成功：${nm} → ${dst}`, "ok");
+      else log(`变卡失败（约 50% 概率，可重试；若报 -32002 说明这张卡不在箱里或该目标不支持）：`
+        + `${d.message || d.code}`, "warn");
+    } else if (act === "sell") {
       const price = Number(b.dataset.price || 0);
       if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {
         b.disabled = false; return;
@@ -2978,6 +2821,40 @@ async function onCbAction(e) {
   } catch (err) {
     log("卡箱操作异常：" + err, "err");
     b.disabled = false;
+  }
+}
+
+// ---------- 用「道具卡」变卡（100 / 200 / 600 面值卡，在道具箱里、不在卡箱）----------
+// HAR 实证：这类调用 prop 与 srcid 都填道具 subtype（如 prop=7&srcid=7），且不占卡箱槽位。
+async function cbChangeByProp() {
+  const hint = $("cb-change-hint");
+  const dst = Number($("cb-dst").value) || 26117;
+  hint.textContent = "读道具箱…";
+  try {
+    const d = await (await fetch("/api/props")).json();
+    const props = (d.props || []).filter((p) => (p.count || 0) > 0);
+    if (!props.length) { hint.textContent = "道具箱里没有可用的道具卡"; return; }
+    const list = props.map((p) => `  ${p.id} = ${p.name} ×${p.count}`).join("\n");
+    const ans = prompt(`用哪张道具卡变卡？（目标卡 id=${dst}）\n\n道具箱可用：\n${list}\n\n`
+      + `输入道具卡 id：`, String(props[0].id));
+    if (ans === null) { hint.textContent = ""; return; }
+    const pid = Number(ans) || props[0].id;
+    const nm = (props.find((p) => Number(p.id) === pid) || {}).name || ("道具#" + pid);
+    hint.textContent = `变卡中（${nm}）…`;
+    log(`变卡（道具卡）：${nm}(id=${pid}) → dst=${dst} …`, "info");
+    const r = await (await fetch("/api/gift/change", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ srcid: pid, dstid: dst, prop: pid }),
+    })).json();
+    if (r.ok) { log(`变卡成功：${nm} → ${dst}`, "ok"); hint.textContent = `成功：${nm} → ${dst}`; }
+    else {
+      log(`变卡失败（约 50% 概率）：${r.message || r.code}`, "warn");
+      hint.textContent = `失败：${r.message || r.code}`;
+    }
+    await loadCardBox();
+  } catch (e) {
+    hint.textContent = "异常：" + e;
+    log("道具卡变卡异常：" + e, "err");
   }
 }
 
