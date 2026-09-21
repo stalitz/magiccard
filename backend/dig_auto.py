@@ -52,9 +52,7 @@
       （被拒响应不带状态字段，重试不会重复扣道具）。
 """
 import asyncio
-import re
 import time
-import urllib.request
 
 from . import card_query as cq
 from . import item_dict as iid
@@ -142,35 +140,43 @@ async def _act(session, retries: int = 3, **params) -> dict:
     return last
 
 
-# ───────────────────────── 道具卡名字（propCard） ─────────────────────────
+# ───────────────────────── 挖地道具名字（大类 70） ─────────────────────────
+# ⚠️ act=1 的 `new_prop[].id` 是**大类 70** 的类内编号，**不是** propCard 的道具卡 id。
+# 2026-09-21 实证（此前用 propCard 取名 → 挖地「道具卡」名字全错，用户抓出）：
+#   - new_prop id=4/5 与挖地网格礼物 `70_4`/`70_5` 同域（绿晶石/红晶石）；
+#     用户仓库截图「蓝晶石x114、绿晶石x110、红晶石x78」↔ new_prop 3/4/5 的 num 逐条吻合。
+#   - propCard_v_26.xml 的 id 2~13 是商店道具卡（升炉卡/开箱卡/小魔瓶/100面值卡…），
+#     与挖地道具纯属**编号撞车**，不可复用。
+# 名字来源：客户端 WaDiModule_v_32.swf 内嵌文案（蓝/绿/红晶石、钉子、铁锤、铁块、铜爵…）
+# 按仓库 id 升序对齐，写进 data/item_names_extra.json（人工核实层，官方静态配置查不到 70 类）。
+DIG_MAT_TYPE = 70
 
-_PROP_URL = "http://appimg2.qq.com/card/mk/propCard_v_26.xml"
-_props: dict | None = None
+
+def dig_prop_name(pid) -> str:
+    """挖地道具箱 `new_prop[].id` → 名字（大类 70）。查不到返回空串（前端回落 `道具#N`）。"""
+    try:
+        return iid.item_name(DIG_MAT_TYPE, int(pid))
+    except (TypeError, ValueError):
+        return ""
 
 
-def prop_names() -> dict:
-    """道具箱 `new_prop[].id` → 名字。来自官方静态配置 propCard.xml（权威、免登录）。
-
-    ⚠️ 该文件后半段有重复 id（48 出现 8 次、还有 23~30 的绝版套卡兑换段），
-    这里**只认第一次出现**（前半段才是道具卡主表）。
-    """
-    global _props
-    if _props is None:
-        try:
-            raw = urllib.request.urlopen(_PROP_URL, timeout=15).read().decode("utf-8", "ignore")
-            m = {}
-            for mm in re.finditer(r'<items[^>]*id="(\d+)"[^>]*name="([^"]*)"', raw):
-                m.setdefault(int(mm.group(1)), mm.group(2))
-            _props = m
-        except Exception:  # noqa: BLE001
-            _props = {}
-    return _props
+# 挖地活动（activity_info id=3 `wadihuodong`）里 **48_1148 是「积分」** —— 挖地额外获得的
+# 数字 1/5/10/50（活动文案「参与挖地层挖地能够额外获得数字：1，5，10，50」实证；
+# 客户端 WaDiModule_v_32.swf 内嵌文案含「积分」，activity_info 的 `jf_name="积分"` 同证）。
+# item_dict 通用表把 48_1148 映射成其它名字，故在**挖地上下文**里显式覆盖为「积分」。
+_DIG_GIFT_OVERRIDE = {(48, 1148): "积分"}
 
 
 def _gift_name(gift_type, gift_id):
     """礼物名。查不到名就退回编号显示，**绝不猜名**（项目铁律）。"""
     if not gift_type:
         return ""
+    try:
+        _key = (int(gift_type), int(gift_id))
+    except (TypeError, ValueError):
+        _key = None
+    if _key in _DIG_GIFT_OVERRIDE:
+        return _DIG_GIFT_OVERRIDE[_key]
     nm = iid.item_name(gift_type, gift_id)
     if nm:
         return nm
@@ -187,8 +193,10 @@ def _gift_name(gift_type, gift_id):
 
 
 def _bag_view(d: dict) -> dict:
-    """act=1 的 new_prop / new_card → 道具箱视图。"""
-    names = prop_names()
+    """act=1 的 new_prop / new_card → 道具箱视图。
+
+    `new_prop[].id` 是**大类 70** 的类内编号（见 DIG_MAT_TYPE 段注释），不是 propCard id。
+    """
     props = []
     for p in (d.get("new_prop") or []):
         try:
@@ -196,7 +204,7 @@ def _bag_view(d: dict) -> dict:
         except (TypeError, ValueError):
             continue
         props.append({"id": pid, "num": int(p.get("num") or 0),
-                      "name": names.get(pid) or f"道具#{pid}"})
+                      "name": dig_prop_name(pid) or f"道具#{pid}"})
     cards = []
     try:
         idx = cq.indexes()
