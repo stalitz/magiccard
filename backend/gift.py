@@ -42,6 +42,10 @@ logger = logging.getLogger("mc.gift")
 FREEGIFT_ID_48 = 81
 # 礼物箱上限（songli.har get_list 实测 + 用户口述；服务端会按 time 丢老件）。
 GIFT_BOX_CAP = 50
+# 送礼：**每次调用最多 5 个好友**（用户口述 + 实测），所以按 5 人拆批。
+SEND_BATCH = 5
+# 送礼默认只送前 30 人（好友里僵尸号多，全送没意义；用户 2026-09-21 指定 30）。
+SEND_LIMIT = 30
 # 变卡默认目标（HAR 实证：srcid=7773 → dstid=26117 涡旋仪，40 面卡）。
 # 用户可在 UI 改成自己正在炼的套卡对应的 40 面卡 id。
 DEFAULT_CHANGE_DST = 26117
@@ -75,11 +79,13 @@ async def gift_friends(session: LoginSession) -> dict:
 
 
 async def gift_send(session: LoginSession, friends: Optional[list] = None,
-                    freegift_id: int = FREEGIFT_ID_48) -> dict:
-    """送 48 面卡（freegift_id=81）给一批好友。会真实发出，谨慎调用。
+                    freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT) -> dict:
+    """送 48 面卡（freegift_id=81）给好友。会真实发出，谨慎调用。
 
-    friends 留空 → 自动拉好友列表全送（按 10 人一批，对齐 HAR 的批量习惯）。
-    返回逐批结果 + 成功/失败计数。
+    ⚠️ 实测服务端**每次调用最多接受 5 个好友**（>5 人一起发不生效），所以按 5 人一批拆。
+    每天似乎没有总量上限，理论上能把全部好友送完；但好友里僵尸号很多，默认只送前 30 人
+    （`limit`，可传 0 表示不限、全送）。
+    friends 留空 → 自动拉好友列表。
     """
     if not friends:
         fr = await gift_friends(session)
@@ -91,8 +97,11 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
     if not friends:
         return {"ok": False, "code": -1, "message": "好友列表为空",
                 "batches": [], "sent": 0, "failed": 0}
+    total_friends = len(friends)
+    if limit and limit > 0:
+        friends = friends[:limit]
 
-    batches = [friends[i:i + 10] for i in range(0, len(friends), 10)]
+    batches = [friends[i:i + SEND_BATCH] for i in range(0, len(friends), SEND_BATCH)]
     results = []
     sent = 0
     failed = 0
@@ -117,7 +126,8 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
         # 批间稍歇，避免触发限流
         await asyncio.sleep(0.4)
     return {"ok": failed == 0, "batches": results, "sent": sent, "failed": failed,
-            "message": f"已送 {sent} 人，失败 {failed} 人"}
+            "friends_total": total_friends,
+            "message": f"已送 {sent} 人（好友共 {total_friends} 人），失败 {failed} 人"}
 
 
 async def gift_inbox(session: LoginSession) -> dict:
@@ -262,100 +272,53 @@ async def take_and_change(session: LoginSession, index_id: int,
             "result": ch.get("result")}
 
 
-# ---- 自动循环：礼物箱快满 → 收礼 + 变卡，降到一半就停 ----
-# 勾选「优先取礼物卡变」即启用本循环。产出 40 面卡进卡箱，自动炼卡引擎自然当素材用。
-class GiftAuto:
-    """礼物箱→变卡 自动循环（后台任务）。
 
-    策略（对齐用户口述）：
-      - 礼物箱件数 >= upper（快满）→ 开始收礼 + 变卡
-      - 一直收到件数 <= lower（剩一半）或礼物取完为止
-      - 取完一轮后休眠 interval 秒，等礼物箱又被填满（新礼物到达）再触发
-    变卡约 50% 成功：失败的条目记日志后跳过，不阻塞后续。
+# ───────────── 供「自动炼卡」调用：礼物箱快满 → 收礼 + 变卡 ─────────────
+# 2026-09-21 用户定调：不做独立自动化，做成**自动炼卡里的一个可选环节**。
+# 变出来的 40 面卡直接进卡箱，引擎本来就读卡箱当素材 → 不用买 10 面卡、也不用自己炼。
+
+DEFAULT_UPPER = 45      # 礼物箱快满阈值（箱上限 50，留几格缓冲）
+DEFAULT_LOWER = 25      # 收到这个件数就停手（约一半）
+
+
+async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
+                         upper: int = DEFAULT_UPPER, lower: int = DEFAULT_LOWER,
+                         action: int = 2, max_take: int = 30) -> dict:
+    """礼物箱件数 ≥ upper 时，从最老的开始「收礼 + 变卡」，降到 ≤ lower 停手。
+
+    设计成自动炼卡的一个前置环节：由调用方在「缺素材、准备买卡」之前调用。
+    变卡约 50% 成功 → 失败的记下来继续，不阻塞；收礼失败（多半该条已失效）同样跳过。
     """
+    inb = await gift_inbox(session)
+    if not inb.get("ok"):
+        return {"ok": False, "message": inb.get("message") or "读礼物箱失败"}
+    count = inb["count"]
+    if count < upper:
+        return {"ok": True, "skipped": True, "box": count, "upper": upper, "took": 0,
+                "changed": 0,
+                "message": f"礼物箱 {count}/{GIFT_BOX_CAP}，未到 {upper}，本环节跳过"}
 
-    def __init__(self, session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
-                 upper: int = 45, lower: int = 25, interval: int = 120,
-                 action: int = 2):
-        self.session = session
-        self.dstid = dstid
-        self.upper = upper
-        self.lower = lower
-        self.interval = interval
-        self.action = action
-        self.running = False
-        self._task: Optional[asyncio.Task] = None
-        self.last = {"count": 0, "took": 0, "changed": 0, "failed": 0,
-                     "at": 0, "note": "未启动"}
-
-    def status(self) -> dict:
-        return {"running": self.running, "dstid": self.dstid,
-                "upper": self.upper, "lower": self.lower, "interval": self.interval,
-                **self.last}
-
-    def start(self) -> None:
-        if self.running:
-            return
-        self.running = True
-        self._task = asyncio.create_task(self._loop())
-
-    def stop(self) -> None:
-        self.running = False
-        if self._task is not None:
-            self._task.cancel()
-            self._task = None
-
-    async def _loop(self) -> None:
-        try:
-            while self.running:
-                try:
-                    await self._drain_once()
-                except Exception as e:  # noqa: BLE001
-                    logger.exception("礼物自动变卡异常")
-                    self.last["note"] = f"异常：{e}"
-                for _ in range(max(1, self.interval)):
-                    if not self.running:
-                        return
-                    await asyncio.sleep(1)
-        finally:
-            self.running = False
-
-    async def _drain_once(self) -> None:
-        box = await gift_inbox(self.session)
-        gifts = box.get("gifts") or []
-        count = len(gifts)
-        self.last["count"] = count
-        self.last["at"] = int(time.time())
-        if count < self.upper:
-            self.last["note"] = f"礼物箱 {count} 件 < 上限 {self.upper}，暂不处理"
-            return
-        took = changed = failed = 0
-        # 从最老的（time 最小）开始取，直到 <= lower 或取完
-        for g in list(gifts):
-            if not self.running:
-                break
-            if (count - took) <= self.lower:
-                break
-            # 收礼 + 变卡一步完成（内部读 mainpage 定位源卡真实槽位，避免 -32002）
-            r = await take_and_change(self.session, g["index_id"], self.dstid, self.action)
-            if r.get("stage") == "take" and not r.get("ok"):
-                self.last["note"] = (f"收礼失败 index={g['index_id']} "
-                                     f"code={r.get('code')} {r.get('message')}")
-                failed += 1
-                # 收礼失败多半是这条已失效，继续下一条而非卡死
-                await asyncio.sleep(0.3)
-                continue
-            took += 1
-            if r.get("ok"):
-                changed += 1
-            else:
-                failed += 1
-                self.last["note"] = (f"变卡失败 src={r.get('itemid')}→dst={self.dstid} "
-                                     f"code={r.get('code')}（约50%概率，下轮再试）")
-            await asyncio.sleep(0.5)
-        self.last["took"] = took
-        self.last["changed"] = changed
-        self.last["failed"] = failed
-        self.last["note"] = (f"处理完：收 {took} 件、变成功 {changed} 张"
-                             + (f"、失败 {failed} 张" if failed else "")
-                             + f"；礼物箱剩约 {count - took} 件")
+    gifts = sorted(inb["gifts"], key=lambda g: g.get("time") or 0)   # 最老的先收
+    took = changed = failed = 0
+    last = ""
+    for g in gifts[:max_take]:
+        if count - took <= lower:
+            break
+        r = await take_and_change(session, g["index_id"], dstid, action)
+        if r.get("stage") == "take" and not r.get("ok"):
+            failed += 1
+            last = f"收礼 #{g['index_id']} 失败 code={r.get('code')}"
+            await asyncio.sleep(0.3)
+            continue
+        took += 1
+        if r.get("ok"):
+            changed += 1
+        else:
+            failed += 1
+            last = f"变卡失败（约 50% 概率）code={r.get('code')}"
+        await asyncio.sleep(0.4)
+    return {"ok": True, "skipped": False, "box_before": count, "box_after": count - took,
+            "took": took, "changed": changed, "failed": failed, "dstid": dstid,
+            "last": last,
+            "message": f"礼物箱 {count}→{count - took}：收 {took} 件、变成功 {changed} 张"
+                       f"（dst={dstid}）" + (f"；{last}" if last else "")}

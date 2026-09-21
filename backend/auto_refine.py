@@ -59,6 +59,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from . import gift as gf
 from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_STEAL,
                         EP_USER_LIST, err_msg)
 
@@ -386,6 +387,13 @@ class AutoRefine:
         self._friend_cache: dict = {}         # uin -> (empty_count, ts)：好友炉空槽缓存
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
+        # 礼物箱 → 变卡（可选环节，勾选才做）。2026-09-21 用户定调：
+        # 不做独立自动化，做成炼卡流程里的一步 —— 缺素材、准备买卡之前先看礼物箱。
+        self.gift_drain = False              # 勾选项
+        self.gift_dst = gf.DEFAULT_CHANGE_DST  # 变卡目标（默认 26117 = 40 面卡）
+        self.gift_upper = gf.DEFAULT_UPPER   # 箱件数 ≥ 此值开始收+变
+        self.gift_lower = gf.DEFAULT_LOWER   # 降到 ≤ 此值停手
+        self.gift_last: dict | None = None   # 最近一次本环节的结果（status 透传）
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
         self.steal_blocked: str = ""          # 本轮「能偷却没偷」的原因，供面板显示
         # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
@@ -482,6 +490,12 @@ class AutoRefine:
                         detail += f"｜原始响应 {self.last_pai_raw[:220]}"
                     steps.append({"action": "翻牌", "ok": dr.get("ok"), "detail": detail})
                     self._log("翻牌", bool(dr.get("ok")), detail)
+
+        # 1.5) 礼物箱快满 → 收礼 + 变卡成目标卡（可选环节）
+        #      变出来的 40 面卡直接进卡箱 → 下面第 2 步重读状态时就当素材了，
+        #      于是本来要「买 10 面卡 + 自己炼」的那一步可以直接省掉。
+        if self.gift_drain:
+            await self._gift_drain(steps)
 
         # 2) 重新取状态（收卡后库存变了）。mainpage 偶发 code=-1（服务端抖动），
         #    重试一次再放弃，避免白丢一个 tick。
@@ -728,6 +742,34 @@ class AutoRefine:
                for m, n in need_cnt.items()):
             return None
         return st, stock, slots, pending, need_cnt, need_buy
+
+    async def _gift_drain(self, steps: list[dict]) -> None:
+        """礼物箱快满 → 收礼 + 变卡（自动炼卡的可选环节，见 gf.drain_gift_box）。
+
+        只在「箱件数 ≥ upper」时才动，变卡约 50% 成功、失败不阻塞 —— 所以这里
+        除了写日志不改变 tick 的成败，绝不让炼卡主流程因为变卡失败而中断。
+        """
+        try:
+            r = await gf.drain_gift_box(self.s, dstid=int(self.gift_dst),
+                                        upper=int(self.gift_upper),
+                                        lower=int(self.gift_lower))
+        except Exception as e:  # noqa: BLE001
+            self._log("礼物变卡", False, f"异常：{e}")
+            steps.append({"action": "礼物变卡", "ok": False, "detail": str(e)})
+            return
+        self.gift_last = r
+        if not r.get("ok"):
+            self._log("礼物变卡", False, r.get("message") or "失败")
+            steps.append({"action": "礼物变卡", "ok": False,
+                          "detail": r.get("message") or "失败"})
+            return
+        if r.get("skipped"):
+            # 没到阈值：不写日志（每 tick 都写会刷屏），只在 status 里留个快照
+            return
+        ok = (r.get("changed") or 0) > 0
+        self._log("礼物变卡", ok, r.get("message") or "")
+        steps.append({"action": "礼物变卡", "ok": ok,
+                      "detail": r.get("message") or ""})
 
     async def _read_state(self):
         """读主界面 -> (st, stock, slots, pending)。失败返回 None。"""
@@ -1000,6 +1042,9 @@ class AutoRefine:
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,
+                "gift": {"enabled": self.gift_drain, "dst": self.gift_dst,
+                         "upper": self.gift_upper, "lower": self.gift_lower,
+                         "last": self.gift_last},
                 "steal": {"enabled": self.steal_enabled,
                            "preferred": self.preferred_steal_friend,
                            "last_steal": self.last_steal,
