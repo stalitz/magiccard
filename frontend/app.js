@@ -608,7 +608,7 @@ let digBusy = false;
 let digAutoRunning = false;
 
 const DIG_TYPE_LABEL = { 0: "空地", 1: "特殊", 2: "土", 3: "石", 4: "半开", 5: "岩石" };
-const DIG_TOOL_NAME = { 1: "锄头", 2: "一字型炸药", 3: "九宫格炸药" };
+const DIG_TOOL_NAME = { 1: "锄头", 2: "一字型炸药", 3: "九宫格炸药", 4: "超级炸药" };
 
 const DIG_TYPE_COLOR = { 0: "#f4f7fa", 2: "#e3c08a", 3: "#d3dae2", 4: "#fff3bf", 5: "#6b7480" };
 
@@ -616,15 +616,18 @@ function digLegendHtml() {
   const L = [[0, "空地"], [2, "土·可挖"], [3, "石·要挖2次"], [4, "半开·再挖"], [5, "岩石·不可挖"]];
   return `<div class="dg-legend">图例：`
     + L.map(([t, n]) => `<span><i style="background:${DIG_TYPE_COLOR[t]}"></i>${n}</span>`).join("")
+    + `<span><i style="background:#ffd6d6;border-color:#e05a5a"></i>超级炸药格（点它就地引爆：菱形，横/纵被石头挡住、斜角能炸石头）</span>`
     + `<span style="color:#98a4b2">虚线格 = 未探索</span></div>`;
 }
 
 function digTool() { return parseInt(($("dig-tool") || {}).value || "1", 10) || 1; }
 
-// 当前工具下「这一格能不能点」：锄头点土/石，炸药点已挖开的空格
+// 当前工具下「这一格能不能点」：锄头点土/石，炸药点已挖开的空格，超级炸药点「超级炸药格」
 function digCellActive(c, tool) {
+  if (c.super_tnt) return tool === 4 ? "dig" : "";   // 超级炸药是格子属性，只能用 dig_type=4 点它
   if (c.pending) return "pick";                 // 不管什么工具，露出的礼物都能收
   if (tool === 1) return c.diggable ? "dig" : "";
+  if (tool === 4) return "";                    // 没有炸药格的格子，超级炸药无处可落
   return c.tntable ? "dig" : "";                // 2/3 炸药：落点必须是已挖开的空格
 }
 
@@ -651,14 +654,18 @@ function renderDigGrid(st) {
       const cls = ["dg-cell", `t${c.type}`];
       if (act === "dig") cls.push("dig");
       if (act === "pick") cls.push("pick");
+      if (c.super_tnt) cls.push("super");
       if (!c.known) cls.push("fog");
       const tip = `${r.line} 行 ${c.j} 列 · ${DIG_TYPE_LABEL[c.type] || ("type" + c.type)}`
+        + (c.super_tnt ? " · 超级炸药格（就地点燃：菱形，上下左右各2格·遇石头被挡；斜角1格·能炸石头）" : "")
         + (c.gift_name ? ` · ${c.gift_name}${c.gift_num ? "×" + c.gift_num : ""}` : "")
         + (act === "dig" ? `（点击用${toolName}）` : (act === "pick" ? "（点击收获）" : ""));
-      const main = c.gift_name || (DIG_TYPE_LABEL[c.type] || ("#" + c.type));
-      const sub = c.gift_name
-        ? (c.pending ? "待收" : (c.gift_num ? "×" + c.gift_num : DIG_TYPE_LABEL[c.type] || ""))
-        : "";
+      const main = c.super_tnt ? "💣超级炸药"
+        : (c.gift_name || (DIG_TYPE_LABEL[c.type] || ("#" + c.type)));
+      const sub = c.super_tnt ? "就地引爆"
+        : (c.gift_name
+          ? (c.pending ? "待收" : (c.gift_num ? "×" + c.gift_num : DIG_TYPE_LABEL[c.type] || ""))
+          : "");
       html += `<div class="${cls.join(" ")}" data-line="${r.line}" data-col="${c.j}" title="${esc(tip)}">`
         + `<span class="gt">${esc(main)}</span>`
         + (sub ? `<span class="tt">${esc(sub)}</span>` : "")

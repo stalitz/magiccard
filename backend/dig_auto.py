@@ -282,6 +282,10 @@ def parse_grid(d: dict) -> list:
             gt = c.get("gift_type") if known else None
             gid = c.get("gift_id") if known else None
             gn = c.get("gift_num") if known else None
+            # 超级炸药 = **格子属性**（不是可收道具）。服务端 act=1 实测不下发该字段，
+            # 这里防御式探测：任一候选字段为真，或 gift_type=67。
+            is_super = (int(gt or 0) == dplan.SUPER_GIFT_TYPE
+                        or any(c.get(k) for k in dplan.SUPER_KEYS))
             cells.append({
                 "j": c.get("j"),
                 "type": t,
@@ -295,7 +299,9 @@ def parse_grid(d: dict) -> list:
                 # 炸药落点 = 已探索 且 已挖平的空格
                 "tntable": known and t == 0,
                 # 待收 = 已挖平(type 0) 且格子里有礼物 → act=18 才能收
-                "pending": bool(known and gt) and t == 0,
+                # ⚠️ 超级炸药(67) 收不走，不算待收
+                "pending": bool(known and gt) and t == 0 and not is_super,
+                "super_tnt": is_super,
             })
         rows.append({"line": int(k), "cells": cells})
     return rows
@@ -573,11 +579,14 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
     每轮：
       1) 有待收（已挖平 + 有礼物）→ 先 act=18 全收。**推进前必收**：行滚出窗口后
          服务端会整行压平，其上没收的礼物永久收不回来（实测踩过一次）。
-      2) 规划器算下一个动作（穷举所有合法落点 × 3 种工具，按「收益/代价」贪心）：
-         探明 > 挖平礼物格 > 免费炸弹回本 > 下推；**会丢东西的动作硬性排除**。
+      2) 规划器算下一个动作（穷举所有合法落点 × 工具，按「收益/代价」贪心）：
+         先引爆格子上的超级炸药（免费；菱形 13 格，但**横/纵被石头挡住、斜角能炸石头**：
+         实际命中常 < 13）> 探明 > 挖平礼物格 > 下推；
+         **会丢东西的动作硬性排除**。
       3) 执行；连续失败 3 次停。
 
     use_tnt=False 表示只用锄头（规划器不会再选一字型/九宫格）。
+      ⚠️ 超级炸药格不受此开关影响 —— 它是格子属性、不耗库存，用户明确要求优先点掉。
     clear_margin = 推进时额外要求多干净几行（1 = 多留一行缓冲）。
     """
     _auto.update({"running": True, "stop": False, "digs": 0, "collected": 0,

@@ -314,6 +314,7 @@
   .dg-cell.t4{background:#fff3bf;border-color:#f0b429}  /* 已挖出的礼物（待收） */
   .dg-cell.t5{background:#6b7480;border-color:#495057;color:#fff} /* 岩石（不可挖） */
   .dg-cell.fog{opacity:.62;border-style:dashed}         /* 未探索（gift 字段缺失） */
+  .dg-cell.super{background:#ffd6d6;border-color:#e05a5a;color:#a01f1f} /* 超级炸药格（格子属性） */
   .dg-cell .gt{font-weight:600;font-size:10.5px;white-space:nowrap;overflow:hidden;
     text-overflow:ellipsis;max-width:100%}
   .dg-cell .tt{font-size:9.5px;color:var(--muted);margin-top:1px}
@@ -1097,6 +1098,7 @@
                 <option value="1">锄头</option>
                 <option value="2">一字型炸药</option>
                 <option value="3">九宫格炸药</option>
+                <option value="4">超级炸药（格子上的）</option>
               </select>
             </label>
             <button id="dig-collect" class="btn sm ok" title="act=18：收走所有已露出的礼物">一键收获</button>
@@ -1168,7 +1170,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260921f"></script>
+<script src="/app.js?v=20260921h"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

@@ -16,13 +16,21 @@
         （石 3→4 属未打开 → 阻断；雾格按其真实 type 结算）。可炸开雾格。**不推进 dig_index**。
         ⚠️ 范围**不是固定 ±2**：实测中心右行连续打平 5 格，直到遇石才停 —— 按「逐格传播直到阻断」建模。
   3 九宫格：落点须**空地**。3×3 每格**一次打平**（土/石/半开石/雾 全变空地）。**会推进 dig_index**。
-  4 超级炸药：落点=**含 gift_type=67 的格子**，就地引爆该格里的炸弹（不扣库存）。**未实证**，
-        按 5×5 全平建模；plan 里作为「优先使用」的第一档，失败由调用方回退。
+  4 超级炸药：**是格子属性，不是可收的道具**（用户 2026-09-21 口述）。挖开后格子里出现，
+        点它就炸开周围，**菱形范围 = 上下左右各 2 格 + 对角线各 1 格**（即 |Δ行|+|Δ列| ≤ 2，共 13 格）。
+        ⚠️ 两种传播规则不同（同一用户口述）：
+          · **横向/纵向**（每向 2 格）：**逐格传播，遇到石头(3)/半开石(4) 就被挡住**
+            （不破坏石头，后面的格子打不到）→ 实际命中数常常 < 13；
+          · **斜向**（±1,±1 四格）：**能直接炸石头** —— 石头/半开石也一次打平。
+        土(2)/雾 会被打平，岩石(5)/特殊(1) 仍是永久墙。**未实证 act 调用**（没有真实炸弹格可试），
+        plan 里作为第一档，失败由调用方回退。**从已探明格就能看出是不是它**。
 
 **永久墙**：type 1 与 5 —— **任何工具都无效**，只能绕行（它们永远变不成空地，也就永远无法被「打开」）。
 
-**地里挖出的工具礼物**（gift_type）：65=锄头 66=一字型炸药 67=超级炸药 68=九宫格炸药。
-  挖平后由 act=18 收进库存（实测：收 65_0_2 → chutou +2）。
+**网格礼物 gift_type**（= 大类，gift_id = 类内编号）：65=锄头 66=一字型炸药 68=九宫格炸药。
+  这三类**可收**（act=18 收进库存，实测 `65_0_2` → chutou +2），也可**就地引爆**。
+  ⚠️ **67=超级炸药不在此列**：它是格子属性，act=18 收不走（act=1 里也没有它的计数器），
+  所以它**不算「待收礼物」**，不会触发「先清账再推进」的硬约束。
 
 **硬约束**：行滚出窗口（dig_index-5 之上）会被服务端压平，其上**没挖平/没收的礼物收不回来**。
   实测踩过：推 dig_index 前没收 金币×150 / 经验×30，滚出后永久丢失。
@@ -41,9 +49,28 @@ CT, LINE, JGG, SUPER = 1, 2, 3, 4
 TOOL_NAME = {CT: "锄头", LINE: "一字型炸药", JGG: "九宫格炸药", SUPER: "超级炸药"}
 TOOL_KEY = {CT: "chutou", LINE: "line_tnt", JGG: "jgg_tnt", SUPER: None}
 
-# 地里挖出的炸药礼物 → 就地引爆用的 dig_type（67 超级 = 4 待实证）
+# 地里挖出的炸药礼物 → 就地引爆用的 dig_type
 BOMB_GIFT_TO_TYPE = {66: LINE, 67: SUPER, 68: JGG}
-TOOL_GIFT = {65: CT, 66: LINE, 67: SUPER, 68: JGG}   # 工具礼物 → 对应工具
+#: 可被 act=18 收进库存的工具礼物（**67 超级炸药不在内** —— 它是格子属性，收不走）
+COLLECTIBLE_TOOL_GIFT = {65: CT, 66: LINE, 68: JGG}
+#: 超级炸药的外形半径（菱形）：|Δ行| + |Δ列| ≤ SUPER_R
+SUPER_R = 2
+#: 超级炸药的**横向/纵向**射线（各 2 格）遇到这些 type 会被「挡住」：
+#: 石头(3)/半开石(4) → **阻断且不破坏**（用户 2026-09-21 口述「横向会被石头挡住」，
+#: 与斜向的「直接炸石头」正好形成对比 —— 所以横向不吃石头、只被它挡）。
+#: 土(2)/雾 会被打平并可继续传播；岩石(5)/特殊(1) 是永久墙，同样阻断。
+SUPER_BLOCK_AXIAL = {ROCK, HALF}
+#: 超级炸药的**斜向**（±1,±1 四格）：能**直接炸石头** → 石头(3)/半开石(4) 也一次打平。
+#: （岩石(5)/特殊(1) 仍是永久墙，任何工具都无效）
+SUPER_DIAG = ((-1, -1), (-1, 1), (1, -1), (1, 1))
+
+#: 单元格上「这是超级炸药格」可能出现的字段名。
+#: ⚠️ 服务端 act=1 的 `dig_info` 实测**只下发** {j,type,gift_type,gift_id,gift_num}，
+#: 没有炸弹标记字段（可能是「没有时才不下发」）。SWF `WaDiGridVO` 的字段名是
+#: `isSuperTnt`；这里做**防御式**探测（含 gift_type=67 这条有实证的路径），
+#: 未命中就是没有 —— 绝不假设一定存在。
+SUPER_KEYS = ("isSuperTnt", "is_super_tnt", "superTnt", "super_tnt", "super")
+SUPER_GIFT_TYPE = 67
 
 WINDOW_UP = 5      # 窗口 = dig_index-5 .. dig_index+2
 WINDOW_DOWN = 2
@@ -61,8 +88,9 @@ def load(rows: list) -> dict:
     """把 dig_auto.parse_grid() 的 rows 转成规划用的扁平结构。
 
     `known`（服务端下发了礼物字段）**只用来判断「有没有礼物」**，不参与「是否已探明」。
+    `supers` = 超级炸药格（格子属性，点了就地炸，菱形半径 2）。
     """
-    types, gifts, lines = {}, {}, []
+    types, gifts, supers, lines = {}, {}, set(), []
     for r in rows or []:
         L = int(r["line"])
         lines.append(L)
@@ -70,12 +98,16 @@ def load(rows: list) -> dict:
             j = int(c.get("j") or 0)
             t = int(c.get("type") or 0)
             types[(L, j)] = t
+            if c.get("super_tnt"):
+                supers.add((L, j))
             if c.get("known"):
                 # 已探明格：礼物字段就是真相（gift_type=0 表示没礼物）
-                gifts[(L, j)] = int(c.get("gift_type") or 0)
+                gt = int(c.get("gift_type") or 0)
+                # 超级炸药不是可收道具 → 不当礼物记账，免得把它算进「先清账再推进」
+                gifts[(L, j)] = 0 if gt == SUPER_GIFT_TYPE else gt
             else:
                 gifts[(L, j)] = None      # 未知
-    return {"types": types, "gifts": gifts, "lines": sorted(lines)}
+    return {"types": types, "gifts": gifts, "supers": supers, "lines": sorted(lines)}
 
 
 def revealed(types: dict) -> set:
@@ -136,15 +168,37 @@ def apply(types: dict, act: dict) -> dict:
                     continue
                 break                  # 岩石(5)/特殊(1) → 墙，阻断
 
-    elif dt in (JGG, SUPER):
-        r = 1 if dt == JGG else 2
-        for dL in range(-r, r + 1):
-            for dj in range(-r, r + 1):
+    elif dt == JGG:
+        for dL in range(-1, 2):
+            for dj in range(-1, 2):
                 p = (L + dL, j + dj)
                 if p in t and t[p] in OPENABLE:
                     t[p] = EMPTY
-        if dt == SUPER:
+
+    elif dt == SUPER:
+        # 菱形：上下左右各 2 格 + 对角线各 1 格。⚠️ 两种传播规则不同（用户 2026-09-21 口述）：
+        #   斜向 (±1,±1)：**能直接炸石头** —— 石头/半开石也一次打平；
+        #   横向/纵向（各 2 格）：**逐格传播，遇到石头即被挡住**（不破坏、后面的打不到）。
+        if t.get((L, j)) in OPENABLE:
             t[(L, j)] = EMPTY          # 被引爆的那格自己也开
+        for dL, dj in SUPER_DIAG:
+            p = (L + dL, j + dj)
+            if p in t and t[p] in OPENABLE:
+                t[p] = EMPTY           # 斜向：石头也照炸
+        for dL, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            for k in range(1, SUPER_R + 1):
+                p = (L + dL * k, j + dj * k)
+                if p not in t:
+                    break
+                cur = t[p]
+                if cur in SUPER_BLOCK_AXIAL or cur in WALL:
+                    break              # 石头挡住 / 永久墙 → 该方向到此为止
+                if cur == EMPTY:
+                    continue
+                if cur in OPENABLE:
+                    t[p] = EMPTY
+                    continue
+                break
     return t
 
 
@@ -175,12 +229,19 @@ def _must_clear(lines: list, types: dict, gifts: dict, rev: set, upto: int) -> l
 
 def candidates(st: dict, tools: dict, use_tnt: bool = True, exclude: set | None = None) -> list:
     """穷举合法动作：每个合法落点 × 每种还有库存的工具。exclude = 不再尝试的落点。"""
-    types, gifts = st["types"], st["gifts"]
+    types, gifts, supers = st["types"], st["gifts"], st.get("supers") or set()
     rev = revealed(types)
     exclude = exclude or set()
     out = []
 
-    # ① 地里挖出的炸弹 → 就地引爆（用户要求「优先使用」）
+    # ① 超级炸药格 → 就地引爆（用户要求「优先使用」；不耗库存）
+    #    条件：该格已探明（用户：从已探明格就能看出是不是它）
+    for p in sorted(supers):
+        if p not in exclude and p in rev:
+            out.append({"dig_type": SUPER, "line": p[0], "col": p[1],
+                        "tier": 0, "why": "引爆已探明的超级炸药格"})
+
+    # ② 地里挖出的炸药礼物（66/68）→ 就地引爆
     for p, g in sorted(gifts.items()):
         if g in BOMB_GIFT_TO_TYPE and types.get(p) != EMPTY and p not in exclude:
             out.append({"dig_type": BOMB_GIFT_TO_TYPE[g], "line": p[0], "col": p[1],
@@ -190,10 +251,10 @@ def candidates(st: dict, tools: dict, use_tnt: bool = True, exclude: set | None 
         L, j = p
         if p in exclude:
             continue
-        # ② 锄头：已探明 且 是土/石/半开石
+        # ③ 锄头：已探明 且 是土/石/半开石
         if t in DIGGABLE and p in rev and int(tools.get("chutou") or 0) > 0:
             out.append({"dig_type": CT, "line": L, "col": j, "tier": 1, "why": "锄头"})
-        # ③ 炸药：落点须空地
+        # ④ 炸药：落点须空地
         if t == EMPTY and use_tnt:
             if int(tools.get("line_tnt") or 0) > 0:
                 out.append({"dig_type": LINE, "line": L, "col": j, "tier": 1, "why": "一字型"})
@@ -223,7 +284,7 @@ def score_action(st: dict, act: dict, clear_margin: int = 1) -> dict:
             g = gifts.get(p)
             if g:
                 new_gift += 1
-                if g in TOOL_GIFT:
+                if g in COLLECTIBLE_TOOL_GIFT:
                     tool_gift += 1
 
     cost = cost_of(types, act)
