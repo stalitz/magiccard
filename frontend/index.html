@@ -326,6 +326,56 @@
   .dg-legend i{display:inline-block;width:11px;height:11px;border-radius:3px;
     border:1px solid var(--line);margin-right:3px;vertical-align:-1px}
   .dg-res{display:flex;flex-wrap:wrap;gap:6px;font-size:12px;color:var(--muted)}
+  .dg-hint{font-size:11.5px;color:var(--muted);padding:0 0 6px}
+  .dg-hint b{color:var(--text)}
+
+  /* 挖地页三栏：地层网格 / 鉴定机+道具箱 / 操作日志 */
+  .lib-body.dg-cols{grid-template-columns:minmax(0,1.2fr) minmax(276px,.95fr) minmax(232px,.8fr);
+    grid-template-areas:"grid side log"}
+  .dg-col{display:flex;flex-direction:column;min-height:0;min-width:0;gap:12px}
+  .dg-col:nth-child(1){grid-area:grid}
+  .dg-col:nth-child(2){grid-area:side}
+  .dg-col:nth-child(3){grid-area:log}
+  .dg-col>.lpanel{flex:1 1 auto;min-height:150px}
+  /* 鉴定机高度随内容，道具箱吃掉这一栏剩下的空间 */
+  .dg-col:nth-child(2)>.lpanel:first-child{flex:0 0 auto}
+  @media (max-width:1240px){
+    .lib-body.dg-cols{grid-template-columns:minmax(0,1fr) minmax(260px,.9fr);
+      grid-template-rows:minmax(0,1.15fr) minmax(0,.85fr);
+      grid-template-areas:"grid side" "log log"}
+  }
+  @media (max-width:1080px){
+    .lib-body.dg-cols{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;
+      grid-template-areas:"grid" "side" "log";overflow-y:auto}
+    .dg-col>.lpanel{min-height:240px}
+  }
+
+  /* 鉴定机（jd_macs） */
+  .jd-m{border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin-bottom:8px}
+  .jd-h{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;
+    flex-wrap:wrap;margin-bottom:6px}
+  .jd-h .tt{font-weight:400;font-size:11px;color:var(--muted)}
+  .jd-slots{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}
+  .jd-s{border:1px solid var(--line);border-radius:7px;padding:5px 2px;text-align:center;
+    display:flex;flex-direction:column;gap:2px;background:#fff}
+  .jd-s.free{opacity:.5;border-style:dashed}
+  .jd-s.ready{box-shadow:inset 0 0 0 2px #f0b429}
+  .jd-s .st{font-size:10.5px;font-weight:600;color:#fff;border-radius:4px;padding:1px 0}
+  .jd-s .sd{font-size:9.5px;color:var(--muted)}
+  .jd-acts{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
+  .btn.xs{padding:2px 7px;font-size:11px;border-radius:6px}
+
+  /* 道具箱 */
+  .bg-line{display:flex;justify-content:space-between;font-size:12px;padding:2px 0 6px}
+  .bg-line .k{color:var(--muted)}
+  .bg-sec{font-size:11.5px;font-weight:600;margin:8px 0 4px;color:var(--text)}
+  .bg-sec.warn{color:#e8890c}
+  .bg-items{display:flex;flex-wrap:wrap;gap:5px}
+  .bg-i{display:inline-flex;align-items:center;gap:4px;font-size:11px;
+    background:#f4f7fa;border:1px solid var(--line);border-radius:6px;padding:2px 6px}
+  .bg-i b{font-weight:600;color:#2f7cf6}
+  .bg-i.unk{cursor:pointer;background:#fff7e6;border-color:#f0b429}
+  .bg-i.unk:hover{background:#ffeccc}
 
   /* 卡箱页 */
   .cb-box{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
@@ -1021,7 +1071,7 @@
         </div>
       </div>
 
-      <!-- 子页：挖地（card_user_dig，独立玩法） -->
+      <!-- 子页：挖地（card_user_dig，独立玩法：网格 / 鉴定机+道具箱 / 日志 三栏） -->
       <div id="pane-dig" class="pane hidden">
         <div class="lib">
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
@@ -1030,26 +1080,28 @@
             <span class="sep"></span>
             <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
               工具
-              <select id="dig-tool" class="num-in" style="width:96px">
+              <select id="dig-tool" class="num-in" style="width:104px">
                 <option value="1">锄头</option>
                 <option value="2">一字型炸药</option>
                 <option value="3">九宫格炸药</option>
               </select>
             </label>
             <button id="dig-collect" class="btn sm ok" title="act=18：收走所有已露出的礼物">一键收获</button>
-            <button id="dig-machines" class="btn sm" title="act=7：只收已到期的矿机槽">收矿机</button>
+            <button id="dig-push" class="btn sm" title="在最深一行的空格扔一字型炸药（横扫5格），把未探索行炸开、地层往下推进">往下推进</button>
+            <button id="dig-daily-tools" class="btn sm" title="act=9：领每日道具（锄头/炸药）">领每日道具</button>
+            <button id="dig-daily-gift" class="btn sm" title="act=15：领每日礼包（可连领）">领每日礼包</button>
             <button id="dig-refresh" class="btn sm primary">刷新</button>
             <span class="sep"></span>
             <button id="dig-auto-start" class="btn sm ok">开始自动</button>
             <button id="dig-auto-stop" class="btn sm danger hidden">停止自动</button>
             <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)">
               上限<input id="dig-max" class="num-in" type="number" value="30" min="1" style="width:60px">次</label>
-            <label class="check" title="没土可挖时用九宫格炸药把地层往下推（会消耗 jgg_tnt）">
+            <label class="check" title="没土可挖时用炸药把未探索行炸开、地层往下推（先一字型，再九宫格）">
               <input type="checkbox" id="dig-tnt"> 允许用炸药</label>
           </div>
 
-          <div class="lib-body au-grid">
-            <div class="au-col">
+          <div class="lib-body dg-cols">
+            <div class="dg-col">
               <div class="lpanel">
                 <div class="lp-head">
                   <span class="t">地层网格</span>
@@ -1058,11 +1110,30 @@
                   <span id="dig-auto-tag" style="font-size:11px;color:var(--muted)"></span>
                 </div>
                 <div class="lst" id="dig-grid" style="padding:12px 14px">
-                  <div class="empty-tip">点「刷新」加载地层。格子可点：锄头挖土/石，炸药只能扔在已挖开的空格上。</div>
+                  <div class="empty-tip">点「刷新」加载地层。锄头点土/石；炸药点<b>已挖开的空格</b>。</div>
                 </div>
               </div>
             </div>
-            <div class="au-col">
+            <div class="dg-col">
+              <div class="lpanel">
+                <div class="lp-head">
+                  <span class="t">鉴定机（炼三色石）</span>
+                  <div class="spacer"></div>
+                  <button id="dig-jd-auto" class="btn sm ghost" title="收到期的产出，并给空槽按 蓝→绿→红 依次投石">自动一轮</button>
+                  <button id="dig-machines" class="btn sm ok" title="act=7：只收到期的槽">收获</button>
+                </div>
+                <div class="lst" id="dig-jd" style="padding:10px 12px">
+                  <div class="empty-tip">点「刷新」加载鉴定机。</div>
+                </div>
+              </div>
+              <div class="lpanel">
+                <div class="lp-head"><span class="t">道具箱</span></div>
+                <div class="lst" id="dig-bag" style="padding:10px 12px">
+                  <div class="empty-tip">点「刷新」加载道具箱。</div>
+                </div>
+              </div>
+            </div>
+            <div class="dg-col">
               <div class="lpanel">
                 <div class="lp-head">
                   <span class="t">操作日志</span>
@@ -1081,7 +1152,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260920h"></script>
+<script src="/app.js?v=20260921a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

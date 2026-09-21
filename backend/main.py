@@ -1830,15 +1830,111 @@ async def dig_collect():
 
 @app.post("/api/dig/machines")
 async def dig_machines():
-    """act=7 收矿机产出（只收到期的槽）。"""
+    """act=7 收鉴定机产出（只收到期的槽）。旧名字保留兼容。"""
     if err := _require_login():
         return err
     try:
-        r = await dg.collect_machines(_session)
+        r = await dg.jd_collect(_session)
         r["state"] = await dg.get_state(_session)
         return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/push")
+async def dig_push(body: dict = None):
+    """往下推进地层：最深行空格扔炸药（一字型优先）。body: {dig_type}（2 一字型 / 3 九宫格）。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        r = await dg.push_down(_session, int(b.get("dig_type") or 2))
+        if "state" not in r:
+            r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/jd/start")
+async def dig_jd_start(body: dict):
+    """act=4 投晶石。body: {machine, stone}（stone 0=蓝 1=绿 2=红）。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        r = await dg.jd_start(_session, int(b.get("machine") or 0), int(b.get("stone") or 0))
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/jd/collect")
+async def dig_jd_collect():
+    """act=7 收鉴定机到期产出。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await dg.jd_collect(_session)
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/jd/auto")
+async def dig_jd_auto(body: dict = None):
+    """鉴定机一轮：收到期的 + 给空槽按顺序投石。body: {stones:[0,1,2]}。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    order = [int(x) for x in (b.get("stones") or [0, 1, 2]) if str(x).strip().lstrip("-").isdigit()]
+    try:
+        r = await dg.jd_auto(_session, tuple(order) or (0, 1, 2))
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/daily/tools")
+async def dig_daily_tools():
+    """act=9 领每日道具（锄头/炸药）。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await dg.daily_tools(_session)
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/dig/daily/gift")
+async def dig_daily_gift():
+    """act=15 领每日礼包（一天可连领多次，领完为止）。"""
+    if err := _require_login():
+        return err
+    try:
+        r = await dg.daily_gift(_session)
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/item/name")
+async def set_item_name(body: dict):
+    """给查不到名字的奖励编号补名字（写进 data/item_names_extra.json，需实证来源）。
+
+    body: {key: "70_5", name: "红晶石"}
+    """
+    b = body or {}
+    try:
+        return {"ok": True, **iid.set_extra(b.get("key", ""), b.get("name", ""))}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": str(e)}
 
 
 @app.post("/api/dig/auto/start")

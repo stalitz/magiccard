@@ -608,6 +608,7 @@ let digBusy = false;
 let digAutoRunning = false;
 
 const DIG_TYPE_LABEL = { 0: "空地", 1: "特殊", 2: "土", 3: "石", 4: "半开", 5: "岩石" };
+const DIG_TOOL_NAME = { 1: "锄头", 2: "一字型炸药", 3: "九宫格炸药" };
 
 const DIG_TYPE_COLOR = { 0: "#f4f7fa", 2: "#e3c08a", 3: "#d3dae2", 4: "#fff3bf", 5: "#6b7480" };
 
@@ -618,27 +619,42 @@ function digLegendHtml() {
     + `<span style="color:#98a4b2">虚线格 = 未探索</span></div>`;
 }
 
+function digTool() { return parseInt(($("dig-tool") || {}).value || "1", 10) || 1; }
+
+// 当前工具下「这一格能不能点」：锄头点土/石，炸药点已挖开的空格
+function digCellActive(c, tool) {
+  if (c.pending) return "pick";                 // 不管什么工具，露出的礼物都能收
+  if (tool === 1) return c.diggable ? "dig" : "";
+  return c.tntable ? "dig" : "";                // 2/3 炸药：落点必须是已挖开的空格
+}
+
 function renderDigGrid(st) {
   const box = $("dig-grid");
   const cnt = $("dig-cnt");
   if (!box || !st) return;
-  if (cnt) cnt.textContent = `可挖 ${st.diggable_cnt ?? 0} · 待收 ${st.pending_cnt ?? 0} · 第 ${st.dig_index ?? "?"} 层`;
+  const tool = digTool();
+  const toolName = DIG_TOOL_NAME[tool] || "锄头";
+  if (cnt) cnt.textContent = `第 ${st.dig_index ?? "?"} 层 · 可挖 ${st.diggable_cnt ?? 0} · 待收 ${st.pending_cnt ?? 0}`;
   const rows = st.rows || [];
   if (!rows.length) {
     box.innerHTML = `<div class="empty-tip">没有地层数据。</div>`;
     return;
   }
-  let html = digLegendHtml() + `<div class="dg-wrap">`;
+  let html = digLegendHtml()
+    + `<div class="dg-hint">当前工具：<b>${toolName}</b> —— `
+    + (tool === 1 ? "点<b>土/石</b>格子开挖" : "点<b>已挖开的空格</b>落炸药（范围内要有土/石，否则服务端拒）")
+    + `</div><div class="dg-wrap">`;
   for (const r of rows) {
     html += `<div class="dg-row"><div class="dg-ln">${r.line}</div><div class="dg-cells">`;
     for (const c of r.cells) {
+      const act = digCellActive(c, tool);
       const cls = ["dg-cell", `t${c.type}`];
-      if (c.diggable) cls.push("dig");
-      if (c.pending) cls.push("pick");   // 已挖平 + 有礼物 → 点它一键收获
+      if (act === "dig") cls.push("dig");
+      if (act === "pick") cls.push("pick");
       if (!c.known) cls.push("fog");
       const tip = `${r.line} 行 ${c.j} 列 · ${DIG_TYPE_LABEL[c.type] || ("type" + c.type)}`
         + (c.gift_name ? ` · ${c.gift_name}${c.gift_num ? "×" + c.gift_num : ""}` : "")
-        + (c.diggable ? "（点击挖）" : (c.pending ? "（点击收获）" : ""));
+        + (act === "dig" ? `（点击用${toolName}）` : (act === "pick" ? "（点击收获）" : ""));
       const main = c.gift_name || (DIG_TYPE_LABEL[c.type] || ("#" + c.type));
       const sub = c.gift_name
         ? (c.pending ? "待收" : (c.gift_num ? "×" + c.gift_num : DIG_TYPE_LABEL[c.type] || ""))
@@ -658,6 +674,78 @@ function renderDigGrid(st) {
   box.querySelectorAll(".dg-cell.pick").forEach((el) => {
     el.onclick = () => digCollect();
   });
+  // 地图跟着最深一行走：渲染完滚到底部（放进下一帧，等布局算完）
+  requestAnimationFrame(() => { box.scrollTop = box.scrollHeight; });
+}
+
+// ---------- 鉴定机（jd_macs，act=4 投石 / act=7 收获） ----------
+const DIG_STONE_COLOR = ["#2f7cf6", "#2fa84f", "#e03131"];
+
+function renderDigJd(st) {
+  const box = $("dig-jd");
+  if (!box || !st) return;
+  const jd = st.jd || [];
+  if (!jd.length) { box.innerHTML = `<div class="empty-tip">没有鉴定机数据。</div>`; return; }
+  let html = "";
+  for (const m of jd) {
+    if ((m.lv || 0) <= 0) continue;
+    html += `<div class="jd-m"><div class="jd-h">${m.machine} 号鉴定机 <span class="tt">Lv${m.lv}</span>`
+      + `<span class="tt">空槽 ${m.free}</span><span class="tt">待收 ${m.ready}</span></div><div class="jd-slots">`;
+    for (const s of m.slots) {
+      const col = DIG_STONE_COLOR[s.jd_type] || "#98a4b2";
+      const cls = s.state === "待收" ? "ready" : (s.state === "空" ? "free" : "run");
+      html += `<div class="jd-s ${cls}" title="${esc(s.stone + " · " + s.state)}">`
+        + `<span class="st" style="background:${col}">${esc(s.stone)}</span>`
+        + `<span class="sd">${s.state === "鉴定中" ? fmtDur(s.left) : s.state}</span></div>`;
+    }
+    html += `</div><div class="jd-acts">`;
+    for (let i = 0; i < 3; i++) {
+      html += `<button class="btn xs" style="border-color:${DIG_STONE_COLOR[i]};color:${DIG_STONE_COLOR[i]}" `
+        + `data-jd-machine="${m.machine}" data-jd-stone="${i}">投${["蓝", "绿", "红"][i]}</button>`;
+    }
+    html += `<button class="btn xs ok" data-jd-collect="${m.machine}">收获</button></div></div>`;
+  }
+  box.innerHTML = html || `<div class="empty-tip">还没有可用的鉴定机（需要先升级/租用）。</div>`;
+  box.querySelectorAll("[data-jd-stone]").forEach((el) => {
+    el.onclick = () => digJdStart(parseInt(el.dataset.jdMachine, 10), parseInt(el.dataset.jdStone, 10));
+  });
+  box.querySelectorAll("[data-jd-collect]").forEach((el) => {
+    el.onclick = () => digJdCollect(parseInt(el.dataset.jdCollect, 10));
+  });
+}
+
+// ---------- 道具箱（act=1 的 new_prop / new_card） ----------
+function renderDigBag(st) {
+  const box = $("dig-bag");
+  if (!box || !st) return;
+  const b = st.bag || {};
+  const props = (b.props || []).filter((x) => x.num > 0);
+  const cards = b.cards || [];
+  const vt = b.vt || {};
+  let html = `<div class="bg-line"><span class="k">背包</span><span class="v">${b.size ?? "?"} 格</span></div>`;
+  html += `<div class="bg-sec">道具卡</div><div class="bg-items">`;
+  html += props.length
+    ? props.map((p) => `<span class="bg-i">${esc(p.name)}<b>${p.num}</b></span>`).join("")
+    : `<span class="tt">无</span>`;
+  html += `</div><div class="bg-sec">材料包</div><div class="bg-items">`
+    + `<span class="bg-i">仓库小/中/大<b>${vt.cang?.small ?? "?"}/${vt.cang?.mid ?? "?"}/${vt.cang?.big ?? "?"}</b></span>`
+    + `<span class="bg-i">升级小/中/大<b>${vt.up?.small ?? "?"}/${vt.up?.mid ?? "?"}/${vt.up?.big ?? "?"}</b></span>`
+    + `</div>`;
+  html += `<div class="bg-sec">挖地获得的卡 <span class="tt">${cards.length} 种</span></div><div class="bg-items">`;
+  html += cards.length
+    ? cards.slice(0, 60).map((c) => `<span class="bg-i" title="卡 ${c.id}">${esc(c.name)}<b>${c.num}</b></span>`).join("")
+    : `<span class="tt">无</span>`;
+  html += `</div>`;
+  const un = st.unknown || [];
+  if (un.length) {
+    html += `<div class="bg-sec warn">未知道具（官方配置查不到，点它可以补名字）</div><div class="bg-items">`;
+    html += un.map((k) => `<span class="bg-i unk" data-unk="${esc(k)}" title="点击补名字">${esc("#" + k)}</span>`).join("");
+    html += `</div>`;
+  }
+  box.innerHTML = html;
+  box.querySelectorAll("[data-unk]").forEach((el) => {
+    el.onclick = () => digNameItem(el.dataset.unk);
+  });
 }
 
 async function loadDigState(silent) {
@@ -668,6 +756,8 @@ async function loadDigState(silent) {
       return null;
     }
     renderDigGrid(r);
+    renderDigJd(r);
+    renderDigBag(r);
     if ($("dig-res")) {
       $("dig-res").innerHTML = [
         `锄头 <b>${r.chutou ?? "?"}</b>`,
@@ -746,14 +836,75 @@ async function digMachines() {
   const btn = $("dig-machines");
   if (btn) btn.disabled = true;
   try {
-    const r = await fetch("/api/dig/machines", { method: "POST" })
+    const r = await fetch("/api/dig/jd/collect", { method: "POST" })
       .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-    if (r.count === 0) log(`[挖地] ${r.text || "矿机暂无到期产出"}`, "info");
-    else log(`[挖地] ${r.text || "收矿机完成"}`, r.ok ? "ok" : "err");
-    if (r.state) renderDigGrid(r.state);
+    if (r.count === 0) log(`[挖地] ${r.text || "鉴定机暂无到期产出"}`, "info");
+    else log(`[挖地] ${r.text || "收鉴定完成"}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+async function digJdStart(machine, stone) {
+  const r = await fetch("/api/dig/jd/start", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ machine, stone }),
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  log(`[挖地] ${r.text || r.message || "投石失败"}`, r.ok ? "ok" : "err");
+  await loadDigState(true);
+}
+
+async function digJdCollect(machine) {
+  const r = await fetch("/api/dig/jd/collect", { method: "POST" })
+    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  const items = (r.items || []).filter((x) => x.machine === machine);
+  if (!items.length) log(`[挖地] ${r.text || "该机暂无到期产出"}`, "info");
+  else log(`[挖地] ${machine} 号机收获：` + items.map((x) => x.text).join("、"), r.ok ? "ok" : "err");
+  await loadDigState(true);
+}
+
+async function digJdAuto() {
+  const r = await fetch("/api/dig/jd/auto", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  log(`[挖地] 鉴定机一轮：${r.text || r.message || ""}`, r.ok ? "ok" : "err");
+  await loadDigState(true);
+}
+
+async function digPush() {
+  const btn = $("dig-push");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/dig/push", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dig_type: 2 }),
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    log(`[挖地] ${r.text || r.message || "推进失败"}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function digDaily(kind) {
+  const url = kind === "tools" ? "/api/dig/daily/tools" : "/api/dig/daily/gift";
+  const nm = kind === "tools" ? "每日道具" : "每日礼包";
+  const r = await fetch(url, { method: "POST" })
+    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  log(`[挖地] 领${nm}：${r.text || r.message || "无"}`, r.ok ? "ok" : "err");
+  await loadDigState(true);
+}
+
+async function digNameItem(key) {
+  const nm = prompt(`给 #${key} 补一个名字（必须是你在游戏里亲眼看到的名字，别猜）：`);
+  if (!nm) return;
+  const r = await fetch("/api/item/name", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, name: nm }),
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  if (r.ok) { log(`[挖地] 已记住 #${key} = ${nm}`, "ok"); await loadDigState(true); }
+  else log(`[挖地] 补名字失败：${r.message}`, "err");
 }
 
 async function digStartAuto() {
@@ -794,6 +945,14 @@ function initDigOnce() {
     $("dig-machines").onclick = digMachines;
     $("dig-auto-start").onclick = digStartAuto;
     $("dig-auto-stop").onclick = digStopAuto;
+    if ($("dig-push")) $("dig-push").onclick = digPush;
+    if ($("dig-jd-auto")) $("dig-jd-auto").onclick = digJdAuto;
+    if ($("dig-daily-tools")) $("dig-daily-tools").onclick = () => digDaily("tools");
+    if ($("dig-daily-gift")) $("dig-daily-gift").onclick = () => digDaily("gift");
+    // 换工具要**立刻重画**网格：可点的格子集合随工具变（锄头点土/石，炸药点空格）
+    if ($("dig-tool")) $("dig-tool").onchange = () => {
+      fetch("/api/dig/state").then((x) => x.json()).then((r) => { if (r.ok) renderDigGrid(r); });
+    };
     if ($("dig-clearlog")) $("dig-clearlog").onclick = () => logClear();
   }
   loadDigState(false);
