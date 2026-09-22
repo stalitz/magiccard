@@ -641,14 +641,18 @@ async def _owned_snapshot() -> dict | None:
 
 @app.get("/api/cards/q")
 async def cards_q(price: int = 0, kw: str = "", star: int = 0,
-                  flash: int = -1, offline: int = -1,
+                  flash: int = -1, offline: int = -1, transferable: int = -1,
                   owned_only: int = 0, limit: int = 300):
-    """按面值/关键词全库查卡（含持有数、可炼、素材）。只读。"""
+    """按面值/关键词全库查卡（含持有数、可炼、素材）。只读。
+
+    transferable=1 → 只返回「能变卡得到」的卡（手动变卡的目标卡候选）。
+    """
     if err := _require_login():
         return err
     inv = await _owned_snapshot() or {"avail": {}}
     out = cq.query_cards(
         price=price, q=kw, star=star, flash=flash, offline=offline,
+        transferable=transferable,
         owned_only=owned_only, owned=inv["avail"], limit=min(limit, 500))
     out["ok"] = True
     out["furnace"] = inv.get("furnace", [])

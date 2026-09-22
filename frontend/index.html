@@ -379,6 +379,13 @@
   .bg-i.unk:hover{background:#ffeccc}
 
   /* 卡箱页 */
+  .cb-change-form{margin-top:10px;border:1px solid var(--line);border-radius:10px;
+    background:#fafcff;padding:10px 12px;display:flex;flex-direction:column;gap:9px}
+  .cb-change-form .cbcf-title{font-size:13px;font-weight:600;color:var(--text)}
+  .cb-change-form .cbcf-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .cb-change-form .cbcf-k{font-size:12.5px;font-weight:600;color:var(--text);min-width:48px}
+  .cb-change-form .cbcf-note{font-size:11.5px;color:var(--muted)}
+  .cb-change-form .cbcf-radio{font-size:12.5px;color:var(--text);display:flex;align-items:center;gap:4px}
   .cb-box{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .cb-head{padding:9px 14px;background:#f4f8fc;font-weight:600;font-size:13.5px;color:var(--text);
     border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
@@ -918,14 +925,30 @@
         <div class="lib">
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
             <button id="cb-refresh" class="btn sm">刷新卡箱</button>
-            <span class="sep"></span>
-            <span style="font-size:12px;color:var(--muted)">变卡目标</span>
-            <input id="cb-dst" class="num-in" type="number" value="26117" style="width:86px"
-                   title="变卡的产出卡 id（默认 26117 = 40 面卡）。目标只要是**面额比被变的卡小**的卡即可，不必和自动炼卡同一套；某些套卡本身不支持变 → 服务端会直接拒（看日志里的返回码）。">
-            <button id="cb-change-by-prop" class="btn sm ghost"
-                    title="用 100/200/600 面值道具卡当材料变卡（道具卡在道具箱里，不是卡箱的卡）">用道具卡变</button>
-            <span id="cb-change-hint" class="muted" style="font-size:12px"></span>
             <span id="cb-hint" class="muted" style="font-size:12px"></span>
+          </div>
+          <!-- 手动变卡（魔变）：① 目标卡 = 卡库能变的卡；② 材料卡 = 卡箱里面额≥目标的卡，或 100/200/600 道具卡 -->
+          <div class="cb-change-form">
+            <div class="cbcf-title">手动变卡（魔变）</div>
+            <div class="cbcf-row">
+              <span class="cbcf-k">目标卡</span>
+              <span class="cbcf-note">卡库里「能变得到」的卡</span>
+              <select id="cb-target" class="num-in" style="min-width:200px"></select>
+              <span id="cb-target-price" class="muted"></span>
+            </div>
+            <div class="cbcf-row">
+              <span class="cbcf-k">材料卡</span>
+              <label class="cbcf-radio"><input type="radio" name="cbm" value="box" checked> 卡箱卡（面额 ≥ 目标）</label>
+              <label class="cbcf-radio"><input type="radio" name="cbm" value="prop"> 道具卡（仅 100/200/600 面值卡）</label>
+            </div>
+            <div class="cbcf-row">
+              <select id="cb-mat-box" class="num-in" style="min-width:200px"></select>
+              <select id="cb-mat-prop" class="num-in hidden" style="min-width:200px"></select>
+            </div>
+            <div class="cbcf-row">
+              <button id="cb-change-go" class="btn sm primary">变卡</button>
+              <span id="cb-change-hint" class="muted" style="font-size:12px"></span>
+            </div>
           </div>
           <div class="cb-box">
             <div class="cb-head">换卡箱 <span id="cb-change-cap" class="cb-cap"></span></div>

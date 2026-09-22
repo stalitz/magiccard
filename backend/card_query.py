@@ -274,9 +274,12 @@ def card_chain(cid: int, depth: int = 6):
 
 
 def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
-                offline: int = -1, owned_only: int = 0,
+                offline: int = -1, owned_only: int = 0, transferable: int = -1,
                 owned: dict | None = None, limit: int = 300):
-    """按面值（或关键词）全库查卡，附套卡信息与持有/可炼状态。"""
+    """按面值（或关键词）全库查卡，附套卡信息与持有/可炼状态。
+
+    transferable=1 → 只返回「能变卡得到」的卡（变卡目标候选）；=0 → 只返回不能变的。
+    """
     idx = indexes()
     q = (q or "").strip().lower()
     themes_by_id = {t["tid"]: t for t in idx["themes"]}
@@ -296,6 +299,8 @@ def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
         if flash in (0, 1) and th["flash"] != bool(flash):
             continue
         if offline in (0, 1) and th["offline"] != bool(offline):
+            continue
+        if transferable in (0, 1) and (not th["transferable"]) == (transferable == 1):
             continue
         if owned_only and not (owned and owned.get(cid)):
             continue

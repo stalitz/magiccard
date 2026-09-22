@@ -2699,7 +2699,6 @@ function initCardBoxOnce() {
   if (cardboxInitDone) return;
   cardboxInitDone = true;
   $("cb-refresh").onclick = () => loadCardBox(true);
-  if ($("cb-change-by-prop")) $("cb-change-by-prop").onclick = cbChangeByProp;
   // 点卡箱里任意一张卡 -> 弹窗显示所属套卡的合成路径；卖/移按钮区域不触发
   document.getElementById("pane-cardbox").addEventListener("click", (e) => {
     if (e.target.closest(".cbacts")) return;
@@ -2708,7 +2707,11 @@ function initCardBoxOnce() {
     const cid = Number(card.dataset.cid);
     if (cid) openSynth(cid);
   });
-  loadCardBox();
+  // 先填充 cbState（卡箱两栏），再初始化变卡表单（表单依赖 cbState 的箱卡数据）
+  (async () => {
+    await loadCardBox();
+    await initChangeForm();
+  })();
 }
 
 async function loadCardBox(withLog = false) {
@@ -2754,8 +2757,6 @@ function cbCardHtml(c, boxType) {
     <div class="cb-route">点击查看合成路径 ▸</div>
     <div class="cbacts">
       ${sellBtn}
-      <button class="btn sm ghost" data-act="change" data-box="${boxType}" data-id="${c.id}" data-name="${esc(c.name || "")}"
-              title="把这**箱里的这张卡**变卡（card_user_transfer_card）。成功率约 50%，失败不消耗；源卡槽位自动定位">变卡</button>
       <button class="btn sm ghost" data-act="move" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}">${toName}</button>
     </div>
   </div>`;
@@ -2794,22 +2795,7 @@ async function onCbAction(e) {
   const id = Number(b.dataset.id);
   b.disabled = true;
   try {
-    if (act === "change") {
-      // 变卡：源 = 箱里这张卡（服务端要真实槽位 → 后端 change_any 自己读 mainpage 定位）
-      const dst = Number($("cb-dst").value) || 26117;
-      const nm = b.dataset.name || ("卡#" + id);
-      if (!confirm(`确定把「${nm}」变卡成 id=${dst}？\n\n成功率约 50%，失败不消耗任何东西。`)) {
-        b.disabled = false; return;
-      }
-      log(`变卡：${nm}(id=${id}) → dst=${dst} …`, "info");
-      const d = await (await fetch("/api/gift/change", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ srcid: id, dstid: dst }),
-      })).json();
-      if (d.ok) log(`变卡成功：${nm} → ${dst}`, "ok");
-      else log(`变卡失败（约 50% 概率，可重试；若报 -32002 说明这张卡不在箱里或该目标不支持）：`
-        + `${d.message || d.code}`, "warn");
-    } else if (act === "sell") {
+    if (act === "sell") {
       const price = Number(b.dataset.price || 0);
       if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {
         b.disabled = false; return;
@@ -2831,39 +2817,109 @@ async function onCbAction(e) {
   }
 }
 
-// ---------- 用「道具卡」变卡（100 / 200 / 600 面值卡，在道具箱里、不在卡箱）----------
-// HAR 实证：这类调用 prop 与 srcid 都填道具 subtype（如 prop=7&srcid=7），且不占卡箱槽位。
-async function cbChangeByProp() {
-  const hint = $("cb-change-hint");
-  const dst = Number($("cb-dst").value) || 26117;
-  hint.textContent = "读道具箱…";
-  try {
-    const d = await (await fetch("/api/props")).json();
-    const props = (d.props || []).filter((p) => (p.count || 0) > 0);
-    if (!props.length) { hint.textContent = "道具箱里没有可用的道具卡"; return; }
-    const list = props.map((p) => `  ${p.id} = ${p.name} ×${p.count}`).join("\n");
-    const ans = prompt(`用哪张道具卡变卡？（目标卡 id=${dst}）\n\n道具箱可用：\n${list}\n\n`
-      + `输入道具卡 id：`, String(props[0].id));
-    if (ans === null) { hint.textContent = ""; return; }
-    const pid = Number(ans) || props[0].id;
-    const nm = (props.find((p) => Number(p.id) === pid) || {}).name || ("道具#" + pid);
-    hint.textContent = `变卡中（${nm}）…`;
-    log(`变卡（道具卡）：${nm}(id=${pid}) → dst=${dst} …`, "info");
-    const r = await (await fetch("/api/gift/change", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ srcid: pid, dstid: dst, prop: pid }),
-    })).json();
-    if (r.ok) { log(`变卡成功：${nm} → ${dst}`, "ok"); hint.textContent = `成功：${nm} → ${dst}`; }
-    else {
-      log(`变卡失败（约 50% 概率）：${r.message || r.code}`, "warn");
-      hint.textContent = `失败：${r.message || r.code}`;
-    }
-    await loadCardBox();
-  } catch (e) {
-    hint.textContent = "异常：" + e;
-    log("道具卡变卡异常：" + e, "err");
-  }
+// ---------- 手动变卡（魔变）----------
+// 规则（用户 2026-09-22 口述，对照游戏机制与 HAR）：
+//   ① 目标卡 = 卡库里「能变得到」的卡（transferable=true）；
+//   ② 材料卡 = 卡箱里**面额 ≥ 目标卡**的卡，或 100/200/600 面值道具卡（其余道具不能变卡）。
+//   API：change_card(srcid=材料, dstid=目标)；材料是道具卡时 prop=材料id，否则 prop=0。
+const VALID_PROP_FACES = new Set([100, 200, 600]);   // 只有这三类面值卡可作变卡材料
+let cbChangeReady = false;
+
+function cbPropFace(p) {
+  // 道具名形如「100面值卡」→ 提取面值数字；非这三类直接排除
+  const m = /(\d+)\s*面值卡/.exec(p.name || "");
+  return m ? Number(m[1]) : null;
 }
+
+async function initChangeForm() {
+  if (cbChangeReady) return;
+  cbChangeReady = true;
+  const hint = $("cb-change-hint");
+  const tSel = $("cb-target"), mBox = $("cb-mat-box"), mProp = $("cb-mat-prop");
+
+  // ① 目标卡下拉：卡库能变得到的卡
+  try {
+    const d = await (await fetch("/api/cards/q?transferable=1&limit=500")).json();
+    const cards = (d.cards || []).filter((c) => c.transferable);
+    cards.sort((a, b) => (b.price || 0) - (a.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
+    tSel.innerHTML = cards.map((c) =>
+      `<option value="${c.id}" data-price="${c.price ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("")
+      || `<option value="">（无可用目标卡）</option>`;
+  } catch (e) {
+    tSel.innerHTML = `<option value="">读取失败</option>`;
+  }
+
+  function syncTarget() {
+    const opt = tSel.selectedOptions[0];
+    const tp = opt ? Number(opt.dataset.price || 0) : 0;
+    $("cb-target-price").textContent = tp ? `目标面值 ${tp}` : "";
+    fillBoxMaterials(tp);
+  }
+  function fillBoxMaterials(targetPrice) {
+    // ② 材料卡（卡箱）：换卡箱 + 保险箱里 面额 ≥ 目标 的卡
+    const all = [...(cbState.change?.cards || []), ...(cbState.store?.cards || [])];
+    const ok = all.filter((c) => (c.price || 0) >= targetPrice);
+    if (ok.length) {
+      mBox.innerHTML = ok.map((c) =>
+        `<option value="${c.id}" data-box="${c.box ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("");
+    } else {
+      mBox.innerHTML = `<option value="">卡箱里没有 ≥${targetPrice} 面的卡</option>`;
+    }
+  }
+  async function fillPropMaterials() {
+    try {
+      const d = await (await fetch("/api/props")).json();
+      const props = (d.props || []).filter((p) => (p.count || 0) > 0 && VALID_PROP_FACES.has(cbPropFace(p)));
+      if (props.length) {
+        mProp.innerHTML = props.map((p) =>
+          `<option value="${p.id}">${esc(p.name)} ×${p.count}</option>`).join("");
+      } else {
+        mProp.innerHTML = `<option value="">道具箱里没有 100/200/600 面值卡</option>`;
+      }
+    } catch (e) {
+      mProp.innerHTML = `<option value="">读取失败</option>`;
+    }
+  }
+
+  tSel.onchange = syncTarget;
+  document.querySelectorAll('input[name="cbm"]').forEach((r) => r.onchange = () => {
+    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
+    mBox.classList.toggle("hidden", useProp);
+    mProp.classList.toggle("hidden", !useProp);
+    if (useProp) fillPropMaterials();
+  });
+  syncTarget();   // 初始填一次箱材料
+  // 变卡按钮
+  $("cb-change-go").onclick = async () => {
+    const dst = Number(tSel.value);
+    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
+    let srcid, prop = 0, matNm;
+    if (useProp) {
+      const o = mProp.selectedOptions[0];
+      if (!o || !o.value) { hint.textContent = "请先选一张 100/200/600 道具卡"; return; }
+      srcid = Number(o.value); prop = srcid; matNm = o.textContent;
+    } else {
+      const o = mBox.selectedOptions[0];
+      if (!o || !o.value) { hint.textContent = "卡箱里没有 ≥ 目标面值的卡，可改选道具卡"; return; }
+      srcid = Number(o.value); matNm = o.textContent;
+    }
+    if (!dst) { hint.textContent = "请先选目标卡"; return; }
+    hint.textContent = `变卡中（${matNm} → ${dst}）…`;
+    log(`变卡（魔变）：${matNm} → 目标#${dst} …`, "info");
+    try {
+      const r = await (await fetch("/api/gift/change", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ srcid, dstid: dst, prop }),
+      })).json();
+      if (r.ok) { log(`变卡成功：${matNm} → #${dst}`, "ok"); hint.textContent = `成功：${matNm} → #${dst}`; }
+      else { log(`变卡失败（约 50% 概率；-32002=该目标不支持或卡不在箱）：${r.message || r.code}`, "warn"); hint.textContent = `失败：${r.message || r.code}`; }
+    } catch (e) {
+      hint.textContent = "异常：" + e; log("变卡异常：" + e, "err");
+    }
+  };
+}
+
+
 
 // ---------- 合成路径弹窗（点卡箱任意卡 -> 显示所属套卡的合成路径 + 一键炼卡）----------
 function closeSynth() {
