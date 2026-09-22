@@ -386,6 +386,12 @@
   .cb-change-form .cbcf-k{font-size:12.5px;font-weight:600;color:var(--text);min-width:48px}
   .cb-change-form .cbcf-note{font-size:11.5px;color:var(--muted)}
   .cb-change-form .cbcf-radio{font-size:12.5px;color:var(--text);display:flex;align-items:center;gap:4px}
+  .relic-box{margin-top:10px;border:1px dashed var(--line);border-radius:10px;background:#fffdf6;
+    padding:10px 12px;display:flex;flex-direction:column;gap:9px}
+  .relic-box .rb-head{font-size:13px;font-weight:600;color:var(--text)}
+  .relic-box .rel{display:flex;flex-direction:column;gap:6px}
+  .relic-box .rel .rel-item{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text)}
+  .relic-box .rel .rel-empty{font-size:12px;color:var(--muted)}
   .cb-box{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .cb-head{padding:9px 14px;background:#f4f8fc;font-weight:600;font-size:13.5px;color:var(--text);
     border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
@@ -931,6 +937,8 @@
           <div class="cb-change-form">
             <div class="cbcf-title">手动变卡（魔变）</div>
             <div class="cbcf-row">
+              <span class="cbcf-k">套卡</span>
+              <select id="cb-theme" class="num-in" style="min-width:150px"></select>
               <span class="cbcf-k">目标卡</span>
               <span class="cbcf-note">卡库里「能变得到」的卡</span>
               <select id="cb-target" class="num-in" style="min-width:200px"></select>
@@ -1166,6 +1174,18 @@
                 <div class="lst" id="dig-jd" style="padding:10px 12px">
                   <div class="empty-tip">点「刷新」加载鉴定机。</div>
                 </div>
+                <div class="relic-box" id="dig-relic">
+                  <div class="rb-head">文物上交（act=10：换挖地套卡）</div>
+                  <div id="dig-relic-list" class="rel"></div>
+                  <div class="cbcf-row">
+                    <span class="cbcf-k">文物编号</span>
+                    <input id="relic-id" class="num-in" type="number" min="0" value="0" style="width:78px">
+                    <span class="cbcf-k">数量</span>
+                    <input id="relic-num" class="num-in" type="number" min="1" value="1" style="width:64px">
+                    <button id="relic-go" class="btn sm primary">上交得道具</button>
+                    <span id="relic-hint" class="muted" style="font-size:12px"></span>
+                  </div>
+                </div>
               </div>
               <div class="lpanel">
                 <div class="lp-head"><span class="t">道具箱</span></div>
@@ -1193,7 +1213,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260921h"></script>
+<script src="/app.js?v=20260922a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

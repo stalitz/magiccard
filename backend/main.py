@@ -2023,6 +2023,20 @@ async def dig_jd_auto(body: dict = None):
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.post("/api/dig/relic/submit")
+async def dig_relic_submit(body: dict = None):
+    """act=10 上交鉴定出的文物换挖地套卡。body: {id(文物编号/76 sub-id), num}。"""
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        r = await dg.relic_submit(_session, int(b.get("id", 0)), int(b.get("num", 1)))
+        r["state"] = await dg.get_state(_session)
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 @app.post("/api/dig/daily/tools")
 async def dig_daily_tools():
     """act=9 领每日道具（锄头/炸药）。"""

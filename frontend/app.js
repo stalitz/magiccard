@@ -847,6 +847,7 @@ async function digMachines() {
       .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
     if (r.count === 0) log(`[挖地] ${r.text || "鉴定机暂无到期产出"}`, "info");
     else log(`[挖地] ${r.text || "收鉴定完成"}`, r.ok ? "ok" : "err");
+    renderDigRelics(r.relics || []);
     await loadDigState(true);
   } finally {
     if (btn) btn.disabled = false;
@@ -868,7 +869,39 @@ async function digJdCollect(machine) {
   const items = (r.items || []).filter((x) => x.machine === machine);
   if (!items.length) log(`[挖地] ${r.text || "该机暂无到期产出"}`, "info");
   else log(`[挖地] ${machine} 号机收获：` + items.map((x) => x.text).join("、"), r.ok ? "ok" : "err");
+  renderDigRelics(r.relics || []);
   await loadDigState(true);
+}
+
+async function digRelicSubmit(id, num) {
+  const r = await fetch("/api/dig/relic/submit", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id: Number(id), num: Number(num) }),
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  const got = r.text || r.message || "无产出";
+  log(`[挖地] 上交文物#${id}×${num} → ${got}`, r.ok ? "ok" : "err");
+  await loadDigState(true);
+  return r;
+}
+
+function renderDigRelics(relics) {
+  const box = $("dig-relic-list");
+  if (!box) return;
+  relics = relics || [];
+  if (!relics.length) {
+    box.innerHTML = `<div class="rel-empty">本次收获里没有文物（76 类）。已鉴定的文物可在下方手动填编号上交。</div>`;
+    return;
+  }
+  box.innerHTML = relics.map((rl) =>
+    `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
+    `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交得道具</button></div>`).join("");
+  box.querySelectorAll("[data-relic]").forEach((el) => {
+    el.onclick = () => digRelicSubmit(el.dataset.relic, el.dataset.rnum);
+  });
+}
+
+async function digRelicSubmitFromForm() {
+  await digRelicSubmit($("relic-id").value, $("relic-num").value);
 }
 
 async function digJdAuto() {
@@ -964,6 +997,7 @@ function initDigOnce() {
       fetch("/api/dig/state").then((x) => x.json()).then((r) => { if (r.ok) renderDigGrid(r); });
     };
     if ($("dig-clearlog")) $("dig-clearlog").onclick = () => logClear();
+    if ($("relic-go")) $("relic-go").onclick = digRelicSubmitFromForm;
   }
   loadDigState(false);
   digStartPoll();
@@ -2835,19 +2869,35 @@ async function initChangeForm() {
   if (cbChangeReady) return;
   cbChangeReady = true;
   const hint = $("cb-change-hint");
-  const tSel = $("cb-target"), mBox = $("cb-mat-box"), mProp = $("cb-mat-prop");
+  const thSel = $("cb-theme"), tSel = $("cb-target"), mBox = $("cb-mat-box"), mProp = $("cb-mat-prop");
 
-  // ① 目标卡下拉：卡库能变得到的卡
+  // ① 目标卡池：卡库能变得到的卡（两级：先选套卡 → 再选该套卡的目标卡）
+  let allTargets = [];
   try {
     const d = await (await fetch("/api/cards/q?transferable=1&limit=500")).json();
-    const cards = (d.cards || []).filter((c) => c.transferable);
-    cards.sort((a, b) => (b.price || 0) - (a.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
-    tSel.innerHTML = cards.map((c) =>
-      `<option value="${c.id}" data-price="${c.price ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("")
-      || `<option value="">（无可用目标卡）</option>`;
-  } catch (e) {
-    tSel.innerHTML = `<option value="">读取失败</option>`;
+    allTargets = (d.cards || []).filter((c) => c.transferable);
+  } catch (e) { allTargets = []; }
+
+  // 按套卡分组
+  const byTheme = new Map();
+  const themes = [];
+  for (const c of allTargets) {
+    const tid = c.theme_id, tn = c.theme_name || "未知套卡";
+    if (!byTheme.has(tid)) { byTheme.set(tid, []); themes.push({ tid, tn }); }
+    byTheme.get(tid).push(c);
   }
+  themes.sort((a, b) => a.tn.localeCompare(b.tn, "zh"));
+  thSel.innerHTML = `<option value="">全部套卡（${allTargets.length}）</option>`
+    + themes.map((t) => `<option value="${t.tid}">${esc(t.tn)}（${byTheme.get(t.tid).length}）</option>`).join("");
+
+  function fillTargets(tid) {
+    const cards = tid ? (byTheme.get(Number(tid)) || []) : allTargets;
+    cards.sort((a, b) => (b.price || 0) - (a.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
+    tSel.innerHTML = cards.length
+      ? cards.map((c) => `<option value="${c.id}" data-price="${c.price ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("")
+      : `<option value="">（该套卡无可用目标卡）</option>`;
+  }
+  fillTargets("");
 
   function syncTarget() {
     const opt = tSel.selectedOptions[0];
@@ -2881,6 +2931,7 @@ async function initChangeForm() {
     }
   }
 
+  thSel.onchange = () => { fillTargets(thSel.value); syncTarget(); };
   tSel.onchange = syncTarget;
   document.querySelectorAll('input[name="cbm"]').forEach((r) => r.onchange = () => {
     const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";

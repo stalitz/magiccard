@@ -428,6 +428,42 @@ def reward_text(content: str) -> str:
     return "、".join(out)
 
 
+def _parse_relics(content: str) -> list:
+    """奖励串里 type==76 的文物 → [{id, num}]（76 的 sub-id 即 act=10 的「文物编号」）。
+
+    实证（Downloads/wadi.har）：act=7 收鉴定产出 → content 形如 `76_0_1`；
+    act=10 上交 `num=1&act=10&id=0` → content `69_8396_1`（挖地套卡）。
+    """
+    out = {}
+    for part in str(content or "").split(","):
+        f = part.strip().split("_")
+        if len(f) < 3:
+            continue
+        try:
+            t, i, n = int(f[0]), int(f[1]), int(f[2])
+        except ValueError:
+            continue
+        if t == 76:
+            out[i] = out.get(i, 0) + n
+    return [{"id": k, "num": v} for k, v in out.items()]
+
+
+async def relic_submit(session, relic_id: int, num: int = 1) -> dict:
+    """act=10 上交鉴定出的文物：id=文物编号(76 sub-id)，num=数量 → 得挖地套卡 69_<卡id>_<num>。
+
+    实证（Downloads/wadi.har）：请求 `num=1&act=10&id=3` → `{"code":0,"content":"69_9757_1"}`。
+    """
+    r = await _act(session, act=10, id=int(relic_id), num=int(num))
+    data = r.get("data") or {}
+    code = _code(r)
+    content = data.get("content") or ""
+    return {
+        "ok": code == 0, "code": code, "content": content,
+        "text": reward_text(content) if content else (data.get("desc") or "无产出"),
+        "message": data.get("desc") or "",
+    }
+
+
 async def collect(session) -> dict:
     """act=18 一键收获：收走所有已露出的礼物。"""
     r = await _act(session, act=18)
@@ -479,11 +515,11 @@ async def jd_start(session, machine: int = 0, stone: int = 0) -> dict:
 
 
 async def jd_collect(session) -> dict:
-    """act=7 收鉴定机产出：只收到期的槽。"""
+    """act=7 收鉴定机产出：只收到期的槽。附带 relics（识别出的 76 类文物，可 act=10 上交）。"""
     st = await get_state(session)
     if st is None:
         return {"ok": False, "text": "读状态失败"}
-    items, ok_cnt = [], 0
+    items, ok_cnt, relics = [], 0, {}
     for m in st.get("jd") or []:
         if int(m.get("lv") or 0) <= 0:
             continue
@@ -496,13 +532,16 @@ async def jd_collect(session) -> dict:
             content = data.get("content") or ""
             txt = reward_text(content) if code == 0 else (data.get("desc") or f"code={code}")
             items.append({"machine": m["machine"], "slot": s["id"], "stone": s["stone"],
-                          "ok": code == 0, "text": txt})
+                          "ok": code == 0, "text": txt, "content": content})
             if code == 0:
                 ok_cnt += 1
+                for rl in _parse_relics(content):
+                    relics[rl["id"]] = relics.get(rl["id"], 0) + rl["num"]
+    rel_list = [{"id": k, "num": v} for k, v in relics.items()]
     if not items:
-        return {"ok": True, "count": 0, "items": [], "text": "鉴定机暂无到期产出"}
+        return {"ok": True, "count": 0, "items": [], "relics": [], "text": "鉴定机暂无到期产出"}
     return {
-        "ok": ok_cnt > 0, "count": ok_cnt, "items": items,
+        "ok": ok_cnt > 0, "count": ok_cnt, "items": items, "relics": rel_list,
         "text": f"收获鉴定 {ok_cnt}/{len(items)} 槽：" + "、".join(x["text"] for x in items if x["ok"]),
     }
 
