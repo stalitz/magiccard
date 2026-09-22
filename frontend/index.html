@@ -946,8 +946,8 @@
             </div>
             <div class="cbcf-row">
               <span class="cbcf-k">材料卡</span>
-              <label class="cbcf-radio"><input type="radio" name="cbm" value="box" checked> 卡箱卡（面额 ≥ 目标）</label>
-              <label class="cbcf-radio"><input type="radio" name="cbm" value="prop"> 道具卡（仅 100/200/600 面值卡）</label>
+              <label class="cbcf-radio"><input type="radio" name="cbm" value="box" checked> 卡箱卡 <span id="cbm-box-cnt" class="muted"></span></label>
+              <label class="cbcf-radio"><input type="radio" name="cbm" value="prop"> 道具卡 <span id="cbm-prop-cnt" class="muted"></span></label>
             </div>
             <div class="cbcf-row">
               <select id="cb-mat-box" class="num-in" style="min-width:200px"></select>
@@ -955,6 +955,7 @@
             </div>
             <div class="cbcf-row">
               <button id="cb-change-go" class="btn sm primary">变卡</button>
+              <span id="cb-change-preview" class="muted" style="font-size:12.5px"></span>
               <span id="cb-change-hint" class="muted" style="font-size:12px"></span>
             </div>
           </div>
@@ -1178,12 +1179,7 @@
                   <div class="rb-head">文物上交（act=10：换挖地套卡）</div>
                   <div id="dig-relic-list" class="rel"></div>
                   <div class="cbcf-row">
-                    <span class="cbcf-k">文物编号</span>
-                    <input id="relic-id" class="num-in" type="number" min="0" value="0" style="width:78px">
-                    <span class="cbcf-k">数量</span>
-                    <input id="relic-num" class="num-in" type="number" min="1" value="1" style="width:64px">
-                    <button id="relic-go" class="btn sm primary">上交得道具</button>
-                    <span id="relic-hint" class="muted" style="font-size:12px"></span>
+                    <span id="relic-hint" class="muted" style="font-size:12px">收鉴定产出后自动列出文物，点「一键上交全部」即可，无需填编号。</span>
                   </div>
                 </div>
               </div>
@@ -1213,7 +1209,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260922a"></script>
+<script src="/app.js?v=20260922b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

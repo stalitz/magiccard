@@ -884,24 +884,47 @@ async function digRelicSubmit(id, num) {
   return r;
 }
 
+let digRelics = [];   // 本次页面会话内累计的文物（{id,num}），来自收鉴定产出；一键全部上交后清空
+
 function renderDigRelics(relics) {
   const box = $("dig-relic-list");
   if (!box) return;
-  relics = relics || [];
-  if (!relics.length) {
-    box.innerHTML = `<div class="rel-empty">本次收获里没有文物（76 类）。已鉴定的文物可在下方手动填编号上交。</div>`;
+  // 合并新收获的文物（同 id 累加数量）
+  for (const rl of (relics || [])) {
+    const hit = digRelics.find((x) => x.id === rl.id);
+    if (hit) hit.num += rl.num; else digRelics.push({ id: rl.id, num: rl.num });
+  }
+  digRelics = digRelics.filter((x) => x.num > 0);
+  if (!digRelics.length) {
+    box.innerHTML = `<div class="rel-empty">收鉴定产出后自动列出文物（76 类）；可一键全部上交，无需填编号。</div>`;
     return;
   }
-  box.innerHTML = relics.map((rl) =>
-    `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
-    `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交得道具</button></div>`).join("");
+  const total = digRelics.reduce((s, x) => s + x.num, 0);
+  box.innerHTML =
+    `<div class="rel-all"><button class="btn sm primary" id="relic-all">一键上交全部（${total} 件）</button></div>` +
+    digRelics.map((rl) =>
+      `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
+      `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交</button></div>`).join("");
+  const allBtn = $("relic-all");
+  if (allBtn) allBtn.onclick = digRelicSubmitAll;
   box.querySelectorAll("[data-relic]").forEach((el) => {
     el.onclick = () => digRelicSubmit(el.dataset.relic, el.dataset.rnum);
   });
 }
 
-async function digRelicSubmitFromForm() {
-  await digRelicSubmit($("relic-id").value, $("relic-num").value);
+async function digRelicSubmitAll() {
+  if (!digRelics.length) return;
+  const list = digRelics.slice();
+  const allBtn = $("relic-all");
+  if (allBtn) allBtn.disabled = true;
+  let ok = 0, fail = 0;
+  for (const rl of list) {
+    const r = await digRelicSubmit(rl.id, rl.num);
+    if (r && r.ok) ok++; else fail++;
+  }
+  log(`[挖地] 一键上交全部完成：成功 ${ok} / 失败 ${fail}`, fail ? "warn" : "ok");
+  digRelics = [];
+  renderDigRelics([]);
 }
 
 async function digJdAuto() {
@@ -997,7 +1020,6 @@ function initDigOnce() {
       fetch("/api/dig/state").then((x) => x.json()).then((r) => { if (r.ok) renderDigGrid(r); });
     };
     if ($("dig-clearlog")) $("dig-clearlog").onclick = () => logClear();
-    if ($("relic-go")) $("relic-go").onclick = digRelicSubmitFromForm;
   }
   loadDigState(false);
   digStartPoll();
@@ -2858,6 +2880,7 @@ async function onCbAction(e) {
 //   API：change_card(srcid=材料, dstid=目标)；材料是道具卡时 prop=材料id，否则 prop=0。
 const VALID_PROP_FACES = new Set([100, 200, 600]);   // 只有这三类面值卡可作变卡材料
 let cbChangeReady = false;
+let _propsCache = null;   // 道具卡材料缓存（100/200/600 面值卡），避免每次选目标都重拉
 
 function cbPropFace(p) {
   // 道具名形如「100面值卡」→ 提取面值数字；非这三类直接排除
@@ -2902,44 +2925,75 @@ async function initChangeForm() {
   function syncTarget() {
     const opt = tSel.selectedOptions[0];
     const tp = opt ? Number(opt.dataset.price || 0) : 0;
+    const tName = opt ? opt.textContent : "";
     $("cb-target-price").textContent = tp ? `目标面值 ${tp}` : "";
-    fillBoxMaterials(tp);
+    refreshMaterials(tp, tName);
   }
-  function fillBoxMaterials(targetPrice) {
-    // ② 材料卡（卡箱）：换卡箱 + 保险箱里 面额 ≥ 目标 的卡
+  // ② 材料卡：箱卡（面额≥目标）与 道具卡（100/200/600 面值）分别算数量，自动选有货的模式
+  function boxMaterials(targetPrice) {
     const all = [...(cbState.change?.cards || []), ...(cbState.store?.cards || [])];
-    const ok = all.filter((c) => (c.price || 0) >= targetPrice);
+    return all.filter((c) => (c.price || 0) >= targetPrice);
+  }
+  async function propMaterials() {
+    if (_propsCache) return _propsCache;
+    try {
+      const d = await (await fetch("/api/props")).json();
+      _propsCache = (d.props || []).filter((p) => (p.count || 0) > 0 && VALID_PROP_FACES.has(cbPropFace(p)));
+    } catch (e) { _propsCache = []; }
+    return _propsCache;
+  }
+  function renderBox(ok) {
     if (ok.length) {
       mBox.innerHTML = ok.map((c) =>
         `<option value="${c.id}" data-box="${c.box ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("");
     } else {
-      mBox.innerHTML = `<option value="">卡箱里没有 ≥${targetPrice} 面的卡</option>`;
+      mBox.innerHTML = `<option value="">卡箱里没有 ≥目标的卡</option>`;
     }
   }
-  async function fillPropMaterials() {
-    try {
-      const d = await (await fetch("/api/props")).json();
-      const props = (d.props || []).filter((p) => (p.count || 0) > 0 && VALID_PROP_FACES.has(cbPropFace(p)));
-      if (props.length) {
-        mProp.innerHTML = props.map((p) =>
-          `<option value="${p.id}">${esc(p.name)} ×${p.count}</option>`).join("");
-      } else {
-        mProp.innerHTML = `<option value="">道具箱里没有 100/200/600 面值卡</option>`;
-      }
-    } catch (e) {
-      mProp.innerHTML = `<option value="">读取失败</option>`;
+  function renderProp(props) {
+    if (props.length) {
+      mProp.innerHTML = props.map((p) =>
+        `<option value="${p.id}">${esc(p.name)} ×${p.count}</option>`).join("");
+    } else {
+      mProp.innerHTML = `<option value="">道具箱里没有 100/200/600 面值卡</option>`;
     }
+  }
+  async function refreshMaterials(targetPrice, targetName) {
+    const box = boxMaterials(targetPrice);
+    const props = await propMaterials();
+    renderBox(box);
+    renderProp(props);
+    // radio 数量提示
+    $("cbm-box-cnt").textContent = `（${box.length} 张 ≥${targetPrice}面）`;
+    $("cbm-prop-cnt").textContent = `（${props.length} 张）`;
+    // 自动选有货的模式：优先卡箱（免费），否则道具卡
+    const useProp = box.length === 0 && props.length > 0;
+    const rb = document.querySelector(`input[name="cbm"][value="${useProp ? "prop" : "box"}"]`);
+    if (rb) rb.checked = true;
+    mBox.classList.toggle("hidden", useProp);
+    mProp.classList.toggle("hidden", !useProp);
+    updatePreview(targetName);
+  }
+  function updatePreview(targetName) {
+    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
+    const o = (useProp ? mProp : mBox).selectedOptions[0];
+    const mat = o && o.value ? o.textContent : "（无可用材料）";
+    const tOpt = tSel.selectedOptions[0];
+    const t = targetName || (tOpt ? tOpt.textContent : "");
+    $("cb-change-preview").textContent = (mat && t) ? `将用「${mat}」→ 变为「${t}」` : "";
   }
 
   thSel.onchange = () => { fillTargets(thSel.value); syncTarget(); };
   tSel.onchange = syncTarget;
+  mBox.onchange = updatePreview;
+  mProp.onchange = updatePreview;
   document.querySelectorAll('input[name="cbm"]').forEach((r) => r.onchange = () => {
-    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
+    const useProp = r.value === "prop";
     mBox.classList.toggle("hidden", useProp);
     mProp.classList.toggle("hidden", !useProp);
-    if (useProp) fillPropMaterials();
+    updatePreview();
   });
-  syncTarget();   // 初始填一次箱材料
+  syncTarget();   // 初始填一次材料 + 预览
   // 变卡按钮
   $("cb-change-go").onclick = async () => {
     const dst = Number(tSel.value);
