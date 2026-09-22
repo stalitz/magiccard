@@ -2892,7 +2892,9 @@ async function initChangeForm() {
   if (cbChangeReady) return;
   cbChangeReady = true;
   const hint = $("cb-change-hint");
-  const thSel = $("cb-theme"), tSel = $("cb-target"), mBox = $("cb-mat-box"), mProp = $("cb-mat-prop");
+  const thSel = $("cb-theme"), tSearch = $("cb-target-search"), mSearch = $("cb-mat-search");
+  const tList = $("cb-target-list"), mList = $("cb-mat-list"), tSelLbl = $("cb-target-sel");
+  let selTarget = null, selMat = null;   // 当前选中的目标卡 / 材料卡
 
   // ① 目标卡池：卡库能变得到的卡（两级：先选套卡 → 再选该套卡的目标卡）
   let allTargets = [];
@@ -2913,26 +2915,44 @@ async function initChangeForm() {
   thSel.innerHTML = `<option value="">全部套卡（${allTargets.length}）</option>`
     + themes.map((t) => `<option value="${t.tid}">${esc(t.tn)}（${byTheme.get(t.tid).length}）</option>`).join("");
 
-  function fillTargets(tid) {
-    const cards = tid ? (byTheme.get(Number(tid)) || []) : allTargets;
-    cards.sort((a, b) => (b.price || 0) - (a.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
-    tSel.innerHTML = cards.length
-      ? cards.map((c) => `<option value="${c.id}" data-price="${c.price ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("")
-      : `<option value="">（该套卡无可用目标卡）</option>`;
+  // ① 目标卡列表：按面值分组（升序，好凑的先出现）+ 名称搜索
+  function targetPool() {
+    const tid = thSel.value;
+    const kw = (tSearch.value || "").trim().toLowerCase();
+    let list = tid ? (byTheme.get(Number(tid)) || []).slice() : allTargets.slice();
+    if (kw) list = list.filter((c) => (c.name || "").toLowerCase().includes(kw));
+    list.sort((a, b) => (a.price || 0) - (b.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
+    return list;
   }
-  fillTargets("");
+  function renderTargets() {
+    const list = targetPool();
+    if (!list.length) { tList.innerHTML = `<div class="pk-empty">没有匹配的目标卡</div>`; return; }
+    let html = "", cur = null;
+    for (const c of list) {
+      if (c.price !== cur) { cur = c.price; html += `<div class="pk-sec">面值 ${cur ?? 0}</div>`; }
+      html += `<div class="pk${selTarget && selTarget.id === c.id ? " sel" : ""}" data-tid="${c.id}">` +
+        `<span class="pk-n">${esc(c.name)}</span>` +
+        `<span class="pk-t">${esc(c.theme_name || "")}</span>` +
+        `<span class="pk-f">${c.price ?? 0}面</span></div>`;
+    }
+    tList.innerHTML = html;
+    tList.querySelectorAll("[data-tid]").forEach((el) => {
+      el.onclick = () => {
+        const c = list.find((x) => x.id === Number(el.dataset.tid));
+        if (!c) return;
+        selTarget = c; selMat = null;
+        tSelLbl.textContent = `${c.name}（${c.price}面）`;
+        renderTargets(); renderMaterials();
+      };
+    });
+  }
 
-  function syncTarget() {
-    const opt = tSel.selectedOptions[0];
-    const tp = opt ? Number(opt.dataset.price || 0) : 0;
-    const tName = opt ? opt.textContent : "";
-    $("cb-target-price").textContent = tp ? `目标面值 ${tp}` : "";
-    refreshMaterials(tp, tName);
-  }
-  // ② 材料卡：箱卡（面额≥目标）与 道具卡（100/200/600 面值）分别算数量，自动选有货的模式
-  function boxMaterials(targetPrice) {
+  // ② 材料卡列表：道具卡（100/200/600，且面值 ≥ 目标）+ 卡箱卡（面额 ≥ 目标），按面值升序（最省优先）
+  function boxMaterials() {
+    if (!selTarget) return [];
     const all = [...(cbState.change?.cards || []), ...(cbState.store?.cards || [])];
-    return all.filter((c) => (c.price || 0) >= targetPrice);
+    return all.filter((c) => (c.price || 0) >= (selTarget.price || 0))
+              .sort((a, b) => (a.price || 0) - (b.price || 0));
   }
   async function propMaterials() {
     if (_propsCache) return _propsCache;
@@ -2942,81 +2962,73 @@ async function initChangeForm() {
     } catch (e) { _propsCache = []; }
     return _propsCache;
   }
-  function renderBox(ok) {
-    if (ok.length) {
-      mBox.innerHTML = ok.map((c) =>
-        `<option value="${c.id}" data-box="${c.box ?? 0}">${esc(c.name)}（${c.price}面）</option>`).join("");
-    } else {
-      mBox.innerHTML = `<option value="">卡箱里没有 ≥目标的卡</option>`;
+  async function renderMaterials() {
+    if (!selTarget) { mList.innerHTML = `<div class="pk-empty">先选目标卡…</div>`; return; }
+    const props = (await propMaterials()).filter((p) => cbPropFace(p) >= (selTarget.price || 0));
+    const box = boxMaterials();
+    const kw = (mSearch.value || "").trim().toLowerCase();
+    const fProps = kw ? props.filter((p) => (p.name || "").toLowerCase().includes(kw)) : props;
+    const fBox = kw ? box.filter((c) => (c.name || "").toLowerCase().includes(kw)) : box;
+    let html = "";
+    if (fProps.length) {
+      html += `<div class="pk-sec">道具卡（面值 ≥ ${selTarget.price}）</div>`;
+      html += fProps.map((p) =>
+        `<div class="pk${selMat && selMat.kind === "prop" && selMat.id === p.id ? " sel" : ""}" data-mk="prop" data-mid="${p.id}">` +
+        `<span class="pk-n">${esc(p.name)}</span><span class="pk-f">×${p.count}</span></div>`).join("");
     }
-  }
-  function renderProp(props) {
-    if (props.length) {
-      mProp.innerHTML = props.map((p) =>
-        `<option value="${p.id}">${esc(p.name)} ×${p.count}</option>`).join("");
-    } else {
-      mProp.innerHTML = `<option value="">道具箱里没有 100/200/600 面值卡</option>`;
+    if (fBox.length) {
+      html += `<div class="pk-sec">卡箱卡（面额 ≥ ${selTarget.price}）</div>`;
+      html += fBox.map((c) =>
+        `<div class="pk${selMat && selMat.kind === "box" && selMat.id === c.id ? " sel" : ""}" data-mk="box" data-mid="${c.id}">` +
+        `<span class="pk-n">${esc(c.name)}</span>` +
+        `<span class="pk-t">${(c.box ?? 0) === 0 ? "换卡箱" : "保险箱"}</span>` +
+        `<span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
     }
+    if (!fProps.length && !fBox.length) {
+      html = `<div class="pk-empty">${kw ? "没有匹配的材料" : `没有 ≥${selTarget.price} 面的材料（道具/卡箱都不够）`}</div>`;
+    }
+    mList.innerHTML = html;
+    mList.querySelectorAll("[data-mk]").forEach((el) => {
+      el.onclick = () => {
+        const kind = el.dataset.mk, id = Number(el.dataset.mid);
+        if (kind === "prop") {
+          const p = props.find((x) => x.id === id);
+          selMat = { kind, id, name: p ? p.name : "", price: p ? cbPropFace(p) : 0 };
+        } else {
+          const c = box.find((x) => x.id === id);
+          selMat = { kind, id, name: c ? c.name : "", price: c ? c.price : 0 };
+        }
+        renderMaterials(); updatePreview();
+      };
+    });
+    updatePreview();
   }
-  async function refreshMaterials(targetPrice, targetName) {
-    const box = boxMaterials(targetPrice);
-    const props = await propMaterials();
-    renderBox(box);
-    renderProp(props);
-    // radio 数量提示
-    $("cbm-box-cnt").textContent = `（${box.length} 张 ≥${targetPrice}面）`;
-    $("cbm-prop-cnt").textContent = `（${props.length} 张）`;
-    // 自动选有货的模式：优先卡箱（免费），否则道具卡
-    const useProp = box.length === 0 && props.length > 0;
-    const rb = document.querySelector(`input[name="cbm"][value="${useProp ? "prop" : "box"}"]`);
-    if (rb) rb.checked = true;
-    mBox.classList.toggle("hidden", useProp);
-    mProp.classList.toggle("hidden", !useProp);
-    updatePreview(targetName);
-  }
-  function updatePreview(targetName) {
-    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
-    const o = (useProp ? mProp : mBox).selectedOptions[0];
-    const mat = o && o.value ? o.textContent : "（无可用材料）";
-    const tOpt = tSel.selectedOptions[0];
-    const t = targetName || (tOpt ? tOpt.textContent : "");
-    $("cb-change-preview").textContent = (mat && t) ? `将用「${mat}」→ 变为「${t}」` : "";
+  function updatePreview() {
+    const t = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
+    const m = selMat ? `${selMat.name}${selMat.price ? "（" + selMat.price + "面）" : ""}` : "";
+    $("cb-change-preview").textContent = (t && m) ? `将用「${m}」→ 变为「${t}」` : (t ? "请点选一张材料卡" : "");
   }
 
-  thSel.onchange = () => { fillTargets(thSel.value); syncTarget(); };
-  tSel.onchange = syncTarget;
-  mBox.onchange = updatePreview;
-  mProp.onchange = updatePreview;
-  document.querySelectorAll('input[name="cbm"]').forEach((r) => r.onchange = () => {
-    const useProp = r.value === "prop";
-    mBox.classList.toggle("hidden", useProp);
-    mProp.classList.toggle("hidden", !useProp);
-    updatePreview();
-  });
-  syncTarget();   // 初始填一次材料 + 预览
+  thSel.onchange = () => { selTarget = null; selMat = null; tSelLbl.textContent = "未选目标卡"; renderTargets(); renderMaterials(); };
+  tSearch.oninput = renderTargets;
+  mSearch.oninput = renderMaterials;
+  renderTargets();
   // 变卡按钮
   $("cb-change-go").onclick = async () => {
-    const dst = Number(tSel.value);
-    const useProp = document.querySelector('input[name="cbm"]:checked').value === "prop";
-    let srcid, prop = 0, matNm;
-    if (useProp) {
-      const o = mProp.selectedOptions[0];
-      if (!o || !o.value) { hint.textContent = "请先选一张 100/200/600 道具卡"; return; }
-      srcid = Number(o.value); prop = srcid; matNm = o.textContent;
-    } else {
-      const o = mBox.selectedOptions[0];
-      if (!o || !o.value) { hint.textContent = "卡箱里没有 ≥ 目标面值的卡，可改选道具卡"; return; }
-      srcid = Number(o.value); matNm = o.textContent;
-    }
-    if (!dst) { hint.textContent = "请先选目标卡"; return; }
-    hint.textContent = `变卡中（${matNm} → ${dst}）…`;
-    log(`变卡（魔变）：${matNm} → 目标#${dst} …`, "info");
+    if (!selTarget) { hint.textContent = "请先点选目标卡"; return; }
+    if (!selMat) { hint.textContent = "请先点选一张材料卡"; return; }
+    const dst = selTarget.id;
+    const srcid = selMat.id;
+    const prop = selMat.kind === "prop" ? selMat.id : 0;
+    const matNm = selMat.name + (selMat.price ? `（${selMat.price}面）` : "");
+    hint.textContent = `变卡中（${matNm} → ${selTarget.name}）…`;
+    log(`变卡（魔变）：${matNm} → ${selTarget.name}(#${dst}) …`, "info");
     try {
       const r = await (await fetch("/api/gift/change", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ srcid, dstid: dst, prop }),
       })).json();
-      if (r.ok) { log(`变卡成功：${matNm} → #${dst}`, "ok"); hint.textContent = `成功：${matNm} → #${dst}`; }
+      if (r.ok) { log(`变卡成功：${matNm} → ${selTarget.name}`, "ok"); hint.textContent = `成功：${matNm} → ${selTarget.name}`; }
       else { log(`变卡失败（约 50% 概率；-32002=该目标不支持或卡不在箱）：${r.message || r.code}`, "warn"); hint.textContent = `失败：${r.message || r.code}`; }
     } catch (e) {
       hint.textContent = "异常：" + e; log("变卡异常：" + e, "err");
