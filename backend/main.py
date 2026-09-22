@@ -2043,6 +2043,36 @@ async def dig_relic_submit(body: dict = None):
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.get("/api/dig/relic/kinds")
+async def dig_relic_kinds():
+    """文物种类全集（id ↔ 对应挖地套卡名）。只读，不碰服务端。"""
+    return {"ok": True, "kinds": [{"id": i, "theme": n} for i, n in dg.relic_kinds()]}
+
+
+@app.post("/api/dig/relic/submit_all")
+async def dig_relic_submit_all(body: dict = None):
+    """一键上交全部文物：遍历文物种类（= 挖地套卡数，id 0..33）逐个 act=10。
+
+    body: {ids?: [int]（分批用，缺省=全部）, per_id_cap?: int}。
+    ⚠️ act=1 不下发文物库存，只能遍历探测；每个 id 有 2.4s 节流，故前端**分批**调用。
+    """
+    if err := _require_login():
+        return err
+    b = body or {}
+    ids = b.get("ids")
+    try:
+        cap = int(b.get("per_id_cap") or 8)
+    except (TypeError, ValueError):
+        cap = 8
+    try:
+        r = await dg.relic_submit_all(_session, ids=ids, per_id_cap=min(max(cap, 1), 20))
+        # ⚠️ 不带 state：该接口按批调用（每 id 2.4s 节流），再附一次 state 会多一轮节流；
+        # 前端在整批跑完后自己 loadDigState()。
+        return r
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 @app.post("/api/dig/daily/tools")
 async def dig_daily_tools():
     """act=9 领每日道具（锄头/炸药）。"""

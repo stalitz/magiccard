@@ -886,7 +886,7 @@ async function digRelicSubmit(id, num) {
   return r;
 }
 
-let digRelics = [];   // 本次页面会话内累计的文物（{id,num}），来自收鉴定产出；一键全部上交后清空
+let digRelics = [];     // 本次页面会话内累计的文物（{id,num}），来自收鉴定产出
 
 function renderDigRelics(relics) {
   const box = $("dig-relic-list");
@@ -897,36 +897,47 @@ function renderDigRelics(relics) {
     if (hit) hit.num += rl.num; else digRelics.push({ id: rl.id, num: rl.num });
   }
   digRelics = digRelics.filter((x) => x.num > 0);
-  if (!digRelics.length) {
-    box.innerHTML = `<div class="rel-empty">收鉴定产出后自动列出文物（76 类）；可一键全部上交，无需填编号。</div>`;
-    return;
-  }
-  const total = digRelics.reduce((s, x) => s + x.num, 0);
+  // 「一键上交」常驻 —— 它**自动探测服务端全部文物 id**，不依赖本次收获列表。
+  // ⚠️ act=1 不下发文物库存，仓库里以往剩的文物只能靠遍历探测（见后端 relic_submit_all 注释）。
+  const gotHtml = digRelics.length
+    ? digRelics.map((rl) =>
+        `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
+        `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交</button></div>`).join("")
+    : `<div class="rel-empty">本次收获没有文物。仓库里以往剩下的文物，点上面「一键上交全部」即可（不用记编号）。</div>`;
   box.innerHTML =
-    `<div class="rel-all"><button class="btn sm primary" id="relic-all">一键上交全部（${total} 件）</button></div>` +
-    digRelics.map((rl) =>
-      `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
-      `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交</button></div>`).join("");
+    `<div class="rel-all"><button class="btn sm primary" id="relic-all">一键上交全部</button>` +
+    `<span class="muted" id="relic-all-note" style="font-size:12px;margin-left:8px">自动探测并上交仓库里所有文物</span></div>` +
+    gotHtml;
   const allBtn = $("relic-all");
   if (allBtn) allBtn.onclick = digRelicSubmitAll;
   box.querySelectorAll("[data-relic]").forEach((el) => {
-    el.onclick = () => digRelicSubmit(el.dataset.relic, el.dataset.rnum);
+    el.onclick = () => digRelicSubmit(el.dataset.relic, el.dataset.rnum).then(() => loadDigState(true));
   });
 }
 
 async function digRelicSubmitAll() {
-  if (!digRelics.length) return;
-  const list = digRelics.slice();
-  const allBtn = $("relic-all");
-  if (allBtn) allBtn.disabled = true;
-  let ok = 0, fail = 0;
-  for (const rl of list) {
-    const r = await digRelicSubmit(rl.id, rl.num);
-    if (r && r.ok) ok++; else fail++;
+  const btn = $("relic-all");
+  if (btn) { btn.disabled = true; btn.textContent = "上交中…"; }
+  log("[挖地] 一键上交：自动探测仓库里所有文物并逐个上交（约 15-20s）…", "info");
+  // 后端自适应探测（id 0,1,2,3 存在 → 连续 3 个不存在即停），不再盲目跑 34 套卡
+  const r = await fetch("/api/dig/relic/submit_all", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ per_id_cap: 8 }),
+  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+  if (!r || !r.ok) {
+    log(`[挖地] 一键上交失败：${(r && r.message) || "未知"}`, "err");
+    if (btn) { btn.disabled = false; btn.textContent = "一键上交全部"; }
+    return;
   }
-  log(`[挖地] 一键上交全部完成：成功 ${ok} / 失败 ${fail}`, fail ? "warn" : "ok");
-  digRelics = [];
+  for (const it of (r.items || [])) {
+    log(`[挖地] 上交文物#${it.id}×${it.num}（对应套卡：${it.theme}）→ ${it.text}`, "ok");
+    const hit = digRelics.find((x) => x.id === it.id);
+    if (hit) hit.num = Math.max(0, hit.num - it.num);
+  }
+  digRelics = digRelics.filter((x) => x.num > 0);
   renderDigRelics([]);
+  log(`[挖地] 一键上交完成：共上交 ${r.total || 0} 件（探测 ${r.tried || 0} 个 id）`, r.total ? "ok" : "warn");
+  await loadDigState(true);
 }
 
 async function digJdAuto() {
