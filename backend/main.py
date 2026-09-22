@@ -661,12 +661,18 @@ async def cards_q(price: int = 0, kw: str = "", star: int = 0,
 
 @app.get("/api/cards/themes")
 async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
-                       offline: int = -1, module: str = "", limit: int = 500):
-    """套卡目录（卡册 module / 星级 / 闪卡 / 关键词过滤），按上架时间倒序。只读。"""
+                       offline: int = -1, module: str = "", transferable: int = -1,
+                       limit: int = 500):
+    """套卡目录（卡册 module / 星级 / 闪卡 / 关键词过滤），按上架时间倒序。只读。
+
+    transferable=1 → 只返回「能变卡得到」的套卡（变卡目标套卡候选）。
+    每套附 have（已持有卡种数）/ n（总卡数），供前端标记「已有套卡」。
+    """
     if err := _require_login():
         return err
-    return cq.list_themes(q=q, star=star, flash=flash, offline=offline,
-                          module=module, limit=min(limit, 2000))
+    inv = await _owned_snapshot() or {"avail": {}}
+    return cq.list_themes(q=q, star=star, flash=flash, offline=offline, module=module,
+                          transferable=transferable, owned=inv["avail"], limit=min(limit, 2000))
 
 
 @app.get("/api/cards/theme/{tid}")

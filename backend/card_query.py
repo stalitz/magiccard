@@ -178,13 +178,17 @@ def cprice(idx, cid):
 
 
 def list_themes(q: str = "", star: int = 0, flash: int = -1,
-                offline: int = -1, module: str = "", limit: int = 400):
+                offline: int = -1, module: str = "", transferable: int = -1,
+                owned: dict | None = None, limit: int = 400):
     """套卡目录。
 
     module: "" = 全部；"main" = 仅主卡箱(module=="")；其他 = 具体独立模块名
             （挖地 / 猫咪旅行 / 猫咪探险·西游记 / 猫咪探险·三国战役 / 特殊）。
+    transferable=1 → 只返回「能变卡得到」的套卡（变卡目标套卡候选，套卡级属性）。
+    owned: 持有快照 {card_id: 数量} → 每套附 have（已持有的卡种数，用于标记「已有套卡」）。
     """
     idx = indexes()
+    bt = buyable_themes()
     q = (q or "").strip().lower()
     matches = []
     for th in idx["themes"]:
@@ -200,14 +204,26 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
             continue
         if offline in (0, 1) and th["offline"] != bool(offline):
             continue
+        if transferable in (0, 1) and th["transferable"] != bool(transferable):
+            continue
         matches.append(th)
     out = matches[:limit]
+
+    def have_of(th):
+        n = 0
+        for cid in th["cards"]:
+            if owned and owned.get(int(cid)):
+                n += 1
+        return n
+
     return {
         "total": len(matches),
         "shown": len(out),
-        "themes": [{k: th[k] for k in
+        "themes": [{**{k: th[k] for k in
                     ("tid", "name", "star", "flash", "offline", "kind", "module",
-                     "composable", "transferable", "n", "pmin", "pmax", "publish")} for th in out],
+                     "composable", "transferable", "n", "pmin", "pmax", "publish")},
+                    "have": have_of(th),
+                    "theme_buyable": th["tid"] in bt} for th in out],
     }
 
 

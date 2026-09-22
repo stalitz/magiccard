@@ -638,7 +638,9 @@ function renderDigGrid(st) {
   const tool = digTool();
   const toolName = DIG_TOOL_NAME[tool] || "锄头";
   if (cnt) cnt.textContent = `第 ${st.dig_index ?? "?"} 层 · 可挖 ${st.diggable_cnt ?? 0} · 待收 ${st.pending_cnt ?? 0}`;
-  const rows = st.rows || [];
+  // 游戏里只显示 7×7：服务端窗口是 8 行，最顶那行是已挖穿的空行（游戏不显示）→ 取最后 7 行
+  let rows = st.rows || [];
+  if (rows.length > 7) rows = rows.slice(rows.length - 7);
   if (!rows.length) {
     box.innerHTML = `<div class="empty-tip">没有地层数据。</div>`;
     return;
@@ -2892,68 +2894,87 @@ async function initChangeForm() {
   if (cbChangeReady) return;
   cbChangeReady = true;
   const hint = $("cb-change-hint");
-  const thSel = $("cb-theme"), tSearch = $("cb-target-search"), mSearch = $("cb-mat-search");
-  const tList = $("cb-target-list"), mList = $("cb-mat-list"), tSelLbl = $("cb-target-sel");
-  let selTarget = null, selMat = null;   // 当前选中的目标卡 / 材料卡
+  const starBox = $("cb-star"), thBox = $("cb-theme-list"), tList = $("cb-target-list");
+  const mList = $("cb-mat-list"), tSelLbl = $("cb-target-sel");
+  let selStar = 0, selTheme = null, selTarget = null, selMat = null;   // 三级选中态 + 材料
+  await propMaterials();   // 预热道具卡缓存：否则首次选目标卡时材料列表要等请求、短暂空白
 
-  // ① 目标卡池：卡库能变得到的卡（两级：先选套卡 → 再选该套卡的目标卡）
-  let allTargets = [];
+  // ① 星：可变套卡（transferable=1，套卡级属性）按星级分布
+  let themes = [];
   try {
-    const d = await (await fetch("/api/cards/q?transferable=1&limit=500")).json();
-    allTargets = (d.cards || []).filter((c) => c.transferable);
-  } catch (e) { allTargets = []; }
+    const d = await (await fetch("/api/cards/themes?transferable=1&limit=2000")).json();
+    themes = d.themes || [];
+  } catch (e) { themes = []; }
+  const starSet = [...new Set(themes.map((t) => t.star))].filter((s) => s > 0).sort((a, b) => a - b);
+  if (!starSet.length) { starBox.innerHTML = `<div class="pk-empty">没有可变套卡</div>`; return; }
 
-  // 按套卡分组
-  const byTheme = new Map();
-  const themes = [];
-  for (const c of allTargets) {
-    const tid = c.theme_id, tn = c.theme_name || "未知套卡";
-    if (!byTheme.has(tid)) { byTheme.set(tid, []); themes.push({ tid, tn }); }
-    byTheme.get(tid).push(c);
-  }
-  themes.sort((a, b) => a.tn.localeCompare(b.tn, "zh"));
-  thSel.innerHTML = `<option value="">全部套卡（${allTargets.length}）</option>`
-    + themes.map((t) => `<option value="${t.tid}">${esc(t.tn)}（${byTheme.get(t.tid).length}）</option>`).join("");
-
-  // ① 目标卡列表：按面值分组（升序，好凑的先出现）+ 名称搜索
-  function targetPool() {
-    const tid = thSel.value;
-    const kw = (tSearch.value || "").trim().toLowerCase();
-    let list = tid ? (byTheme.get(Number(tid)) || []).slice() : allTargets.slice();
-    if (kw) list = list.filter((c) => (c.name || "").toLowerCase().includes(kw));
-    list.sort((a, b) => (a.price || 0) - (b.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
-    return list;
-  }
-  function renderTargets() {
-    const list = targetPool();
-    if (!list.length) { tList.innerHTML = `<div class="pk-empty">没有匹配的目标卡</div>`; return; }
-    let html = "", cur = null;
-    for (const c of list) {
-      if (c.price !== cur) { cur = c.price; html += `<div class="pk-sec">面值 ${cur ?? 0}</div>`; }
-      html += `<div class="pk${selTarget && selTarget.id === c.id ? " sel" : ""}" data-tid="${c.id}">` +
-        `<span class="pk-n">${esc(c.name)}</span>` +
-        `<span class="pk-t">${esc(c.theme_name || "")}</span>` +
-        `<span class="pk-f">${c.price ?? 0}面</span></div>`;
-    }
-    tList.innerHTML = html;
-    tList.querySelectorAll("[data-tid]").forEach((el) => {
+  function renderStars() {
+    starBox.innerHTML = starSet.map((s) =>
+      `<div class="pk${selStar === s ? " sel" : ""}" data-star="${s}">` +
+      `<span class="pk-n">${"★".repeat(s)}</span>` +
+      `<span class="pk-f">${themes.filter((t) => t.star === s).length} 套</span></div>`).join("");
+    starBox.querySelectorAll("[data-star]").forEach((el) => {
       el.onclick = () => {
-        const c = list.find((x) => x.id === Number(el.dataset.tid));
-        if (!c) return;
-        selTarget = c; selMat = null;
-        tSelLbl.textContent = `${c.name}（${c.price}面）`;
+        selStar = Number(el.dataset.star); selTheme = null; selTarget = null; selMat = null;
+        tSelLbl.textContent = "";
+        renderStars(); renderThemes(); renderTargets(); renderMaterials();
+      };
+    });
+  }
+
+  // ② 套卡：该星级下的可变套卡，「已有」标记（✓ have/n；满则「已集齐」）
+  function renderThemes() {
+    if (!selStar) { thBox.innerHTML = `<div class="pk-empty">先选星…</div>`; return; }
+    const list = themes.filter((t) => t.star === selStar)
+      .sort((a, b) => (b.have || 0) - (a.have || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
+    if (!list.length) { thBox.innerHTML = `<div class="pk-empty">该星级无可变套卡</div>`; return; }
+    thBox.innerHTML = list.map((t) => {
+      const done = t.n && t.have >= t.n;
+      const bdg = t.have > 0
+        ? `<span class="pk-bdg">${done ? "已集齐" : "✓ " + t.have + "/" + t.n}</span>` : "";
+      return `<div class="pk${selTheme && selTheme.tid === t.tid ? " sel" : ""}" data-ttid="${t.tid}" title="${esc(t.name)}">` +
+        `<span class="pk-n">${esc(t.name)}</span>${bdg}<span class="pk-f">${t.n}张</span></div>`;
+    }).join("");
+    thBox.querySelectorAll("[data-ttid]").forEach((el) => {
+      el.onclick = () => {
+        selTheme = list.find((x) => x.tid === Number(el.dataset.ttid)) || null;
+        selTarget = null; selMat = null; tSelLbl.textContent = "";
+        renderThemes(); renderTargets(); renderMaterials();
+      };
+    });
+  }
+
+  // ③ 目标卡：该套卡全部卡，按面额升序（transferable 是套卡级 → 整条可选）
+  const cardCache = new Map();
+  async function themeCards(tid) {
+    if (cardCache.has(tid)) return cardCache.get(tid);
+    let cards = [];
+    try {
+      const d = await (await fetch("/api/cards/theme/" + tid)).json();
+      cards = (d.cards || []).slice().sort((a, b) =>
+        (a.price || 0) - (b.price || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
+    } catch (e) { cards = []; }
+    cardCache.set(tid, cards);
+    return cards;
+  }
+  async function renderTargets() {
+    if (!selTheme) { tList.innerHTML = `<div class="pk-empty">先选套卡…</div>`; return; }
+    const cards = await themeCards(selTheme.tid);
+    if (!cards.length) { tList.innerHTML = `<div class="pk-empty">该套卡无可变卡</div>`; return; }
+    tList.innerHTML = cards.map((c) =>
+      `<div class="pk${selTarget && selTarget.id === c.id ? " sel" : ""}" data-cid="${c.id}">` +
+      `<span class="pk-n">${esc(c.name)}</span><span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
+    tList.querySelectorAll("[data-cid]").forEach((el) => {
+      el.onclick = () => {
+        selTarget = cards.find((x) => x.id === Number(el.dataset.cid)) || null;
+        selMat = null;
+        tSelLbl.textContent = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
         renderTargets(); renderMaterials();
       };
     });
   }
 
-  // ② 材料卡列表：道具卡（100/200/600，且面值 ≥ 目标）+ 卡箱卡（面额 ≥ 目标），按面值升序（最省优先）
-  function boxMaterials() {
-    if (!selTarget) return [];
-    const all = [...(cbState.change?.cards || []), ...(cbState.store?.cards || [])];
-    return all.filter((c) => (c.price || 0) >= (selTarget.price || 0))
-              .sort((a, b) => (a.price || 0) - (b.price || 0));
-  }
+  // 材料卡：道具卡（100/200/600，面值 ≥ 目标）+ 卡箱卡（面额 ≥ 目标，按 套卡 → 面额 排序）
   async function propMaterials() {
     if (_propsCache) return _propsCache;
     try {
@@ -2962,41 +2983,52 @@ async function initChangeForm() {
     } catch (e) { _propsCache = []; }
     return _propsCache;
   }
+  function boxMaterials() {
+    if (!selTarget) return [];
+    const tp = selTarget.price || 0;
+    const tag = (arr, bx) => (arr || []).map((c) => ({ ...c, box: bx }));
+    return [...tag(cbState.change?.cards, 0), ...tag(cbState.store?.cards, 1)]
+      .filter((c) => (c.price || 0) >= tp)
+      .sort((a, b) => (a.theme || "").localeCompare(b.theme || "", "zh") || (a.price || 0) - (b.price || 0));
+  }
   async function renderMaterials() {
     if (!selTarget) { mList.innerHTML = `<div class="pk-empty">先选目标卡…</div>`; return; }
-    const props = (await propMaterials()).filter((p) => cbPropFace(p) >= (selTarget.price || 0));
+    const tp = selTarget.price || 0;
+    const props = (await propMaterials()).filter((p) => cbPropFace(p) >= tp);
     const box = boxMaterials();
-    const kw = (mSearch.value || "").trim().toLowerCase();
-    const fProps = kw ? props.filter((p) => (p.name || "").toLowerCase().includes(kw)) : props;
-    const fBox = kw ? box.filter((c) => (c.name || "").toLowerCase().includes(kw)) : box;
     let html = "";
-    if (fProps.length) {
-      html += `<div class="pk-sec">道具卡（面值 ≥ ${selTarget.price}）</div>`;
-      html += fProps.map((p) =>
-        `<div class="pk${selMat && selMat.kind === "prop" && selMat.id === p.id ? " sel" : ""}" data-mk="prop" data-mid="${p.id}">` +
+    if (props.length) {
+      html += `<div class="pk-sec">道具卡（面值 ≥ ${tp}）</div>`;
+      html += props.map((p) =>
+        `<div class="pk${selMat && selMat.key === "prop:" + p.id ? " sel" : ""}" data-mkey="prop:${p.id}">` +
         `<span class="pk-n">${esc(p.name)}</span><span class="pk-f">×${p.count}</span></div>`).join("");
     }
-    if (fBox.length) {
-      html += `<div class="pk-sec">卡箱卡（面额 ≥ ${selTarget.price}）</div>`;
-      html += fBox.map((c) =>
-        `<div class="pk${selMat && selMat.kind === "box" && selMat.id === c.id ? " sel" : ""}" data-mk="box" data-mid="${c.id}">` +
+    let cur = null;
+    for (const c of box) {
+      const th = c.theme || "（无套卡）";
+      if (th !== cur) { cur = th; html += `<div class="pk-sec">${esc(th)}</div>`; }
+      const key = `box:${c.box}:${c.slot ?? ""}`;
+      html += `<div class="pk${selMat && selMat.key === key ? " sel" : ""}" data-mkey="${key}" data-mid="${c.id}" data-mnm="${esc(c.name)}" data-mpr="${c.price ?? 0}">` +
         `<span class="pk-n">${esc(c.name)}</span>` +
-        `<span class="pk-t">${(c.box ?? 0) === 0 ? "换卡箱" : "保险箱"}</span>` +
-        `<span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
+        `<span class="pk-t">${c.box === 0 ? "换卡箱" : "保险箱"}</span>` +
+        `<span class="pk-f">${c.price ?? 0}面</span></div>`;
     }
-    if (!fProps.length && !fBox.length) {
-      html = `<div class="pk-empty">${kw ? "没有匹配的材料" : `没有 ≥${selTarget.price} 面的材料（道具/卡箱都不够）`}</div>`;
+    if (!props.length && !box.length) {
+      html = `<div class="pk-empty">没有 ≥${tp} 面的材料（道具/卡箱都不够）</div>`;
     }
     mList.innerHTML = html;
-    mList.querySelectorAll("[data-mk]").forEach((el) => {
+    mList.querySelectorAll("[data-mkey]").forEach((el) => {
       el.onclick = () => {
-        const kind = el.dataset.mk, id = Number(el.dataset.mid);
-        if (kind === "prop") {
+        const key = el.dataset.mkey;
+        if (key.startsWith("prop:")) {
+          const id = Number(key.slice(5));
           const p = props.find((x) => x.id === id);
-          selMat = { kind, id, name: p ? p.name : "", price: p ? cbPropFace(p) : 0 };
+          selMat = { kind: "prop", id, key, name: p ? p.name : "", price: p ? cbPropFace(p) : 0 };
         } else {
-          const c = box.find((x) => x.id === id);
-          selMat = { kind, id, name: c ? c.name : "", price: c ? c.price : 0 };
+          selMat = {
+            kind: "box", id: Number(el.dataset.mid), key,
+            name: el.dataset.mnm || "", price: Number(el.dataset.mpr) || 0,
+          };
         }
         renderMaterials(); updatePreview();
       };
@@ -3009,13 +3041,11 @@ async function initChangeForm() {
     $("cb-change-preview").textContent = (t && m) ? `将用「${m}」→ 变为「${t}」` : (t ? "请点选一张材料卡" : "");
   }
 
-  thSel.onchange = () => { selTarget = null; selMat = null; tSelLbl.textContent = "未选目标卡"; renderTargets(); renderMaterials(); };
-  tSearch.oninput = renderTargets;
-  mSearch.oninput = renderMaterials;
-  renderTargets();
+  renderStars(); renderThemes(); renderTargets(); renderMaterials();
+
   // 变卡按钮
   $("cb-change-go").onclick = async () => {
-    if (!selTarget) { hint.textContent = "请先点选目标卡"; return; }
+    if (!selTarget) { hint.textContent = "请先点选目标卡（① 星 → ② 套卡 → ③ 卡）"; return; }
     if (!selMat) { hint.textContent = "请先点选一张材料卡"; return; }
     const dst = selTarget.id;
     const srcid = selMat.id;
