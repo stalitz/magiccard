@@ -204,9 +204,16 @@ res4b = dp.plan(rows_ok, {"chutou": 9, "line_tnt": 9, "jgg_tnt": 9})
 check("清干净后允许继续向下推进", res4b["action"] is not None)
 
 # 超级炸药格（格子属性）→ tier0 优先就地引爆
+# ⚠️ 必须放在 lo+2 行（超级炸药覆盖行±2，顶/底两行会被边界规则排除，属正确行为）
 rows_bomb = mk(
     (300, [0, 0, 0]),
-    (301, [0, (2, 0, True), 0]),   # j1 = 土 + 超级炸药格
+    (301, [0, 0, 0]),
+    (302, [0, (2, 0, True), 0]),   # j1 = 土 + 超级炸药格（lo+2，合法）
+    (303, [0, 0, 0]),
+    (304, [0, 0, 0]),
+    (305, [0, 0, 0]),
+    (306, [0, 0, 0]),
+    (307, [0, 0, 0]),
 )
 res5 = dp.plan(rows_bomb, {"chutou": 9, "line_tnt": 9, "jgg_tnt": 9})
 a5 = res5["action"]
@@ -284,6 +291,46 @@ rows_gift_push = mk(
 )
 stg = dp.load(rows_gift_push)
 check("gift_type=68 仍计入待收礼物（可收）", dp.has_gift_maybe(stg["gifts"], (401, 1)))
+
+
+# ───────────────── 5. 窗口边界：炸弹爆炸范围探出窗口必须排除 ─────────────────
+print("\n== 5. 边界炸弹排除（实机 2026-09-22） ==")
+# 造一个 8 行窗口：顶(100)/底(107) 全空，中间全土。lo=100 hi=107。
+rows_bnd = mk(
+    (100, [0, 0, 0, 0, 0, 0, 0]),   # lo（空，但九宫格会越界 → 排除）
+    (101, [0, 0, 0, 0, 0, 0, 0]),   # lo+1（空 → 合法）
+    (102, [2, 2, 2, 2, 2, 2, 2]),
+    (103, [2, 2, 2, 2, 2, 2, 2]),
+    (104, [2, 2, 2, 2, 2, 2, 2]),
+    (105, [2, 2, 2, 2, 2, 2, 2]),
+    (106, [0, 0, 0, 0, 0, 0, 0]),   # hi-1（空 → 合法）
+    (107, [0, 0, 0, 0, 0, 0, 0]),   # hi（空，但九宫格会越界 → 排除）
+)
+st_bnd = dp.load(rows_bnd)
+cands_bnd = dp.candidates(st_bnd, {"chutou": 9, "line_tnt": 9, "jgg_tnt": 9}, use_tnt=True)
+jgg_lines = sorted({c["line"] for c in cands_bnd if c["dig_type"] == dp.JGG})
+check("边界排除：九宫格不会选窗口顶/底行（lo/hi）",
+      dp.WINDOW_UP and 100 not in jgg_lines and 107 not in jgg_lines, f"JGG行={jgg_lines}")
+check("边界合法：九宫格可选 lo+1 / hi-1",
+      101 in jgg_lines and 106 in jgg_lines, f"JGG行={jgg_lines}")
+
+# 超级炸药（±2 行）：lo+2 / hi-2 合法，lo / hi 非法
+rows_sb = mk(
+    (100, [0, (2, 0, True), 0, 0, 0, 0, 0]),   # lo 上的超级炸药 → 应排除
+    (101, [0, 0, 0, 0, 0, 0, 0]),
+    (102, [0, (2, 0, True), 0, 0, 0, 0, 0]),   # lo+2 → 允许
+    (103, [0, 0, 0, 0, 0, 0, 0]),
+    (104, [0, 0, 0, 0, 0, 0, 0]),
+    (105, [0, (2, 0, True), 0, 0, 0, 0, 0]),   # hi-2 → 允许
+    (106, [0, 0, 0, 0, 0, 0, 0]),
+    (107, [0, (2, 0, True), 0, 0, 0, 0, 0]),   # hi 上的超级炸药 → 应排除
+)
+cands_sb = dp.candidates(dp.load(rows_sb), {"chutou": 9, "line_tnt": 9, "jgg_tnt": 9}, use_tnt=True)
+sup_lines = sorted({c["line"] for c in cands_sb if c["dig_type"] == dp.SUPER})
+check("边界排除：超级炸药不会选窗口顶/底行",
+      100 not in sup_lines and 107 not in sup_lines, f"SUPER行={sup_lines}")
+check("边界合法：超级炸药可选 lo+2 / hi-2",
+      102 in sup_lines and 105 in sup_lines, f"SUPER行={sup_lines}")
 
 
 print()

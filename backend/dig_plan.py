@@ -27,6 +27,11 @@
 
 **永久墙**：type 1 与 5 —— **任何工具都无效**，只能绕行（它们永远变不成空地，也就永远无法被「打开」）。
 
+**地图窗口边界**（实测 2026-09-22）：服务端只下发 8 行 `dig_index-5 .. dig_index+2`。
+  炸弹爆炸范围若**探出这 8 行**，服务端返 `code=-1`（desc="system busy"，但属「目标非法」非限流），
+  动作不执行、重试无用。故候选落点须满足：九宫格(覆盖行±1) 行∈`[lo+1,hi-1]`、
+  超级炸药(覆盖行±2) 行∈`[lo+2,hi-2]`；一字型(横向不出行)/锄头(单格) 不受限。`candidates()` 已据此排除。
+
 **网格礼物 gift_type**（= 大类，gift_id = 类内编号）：65=锄头 66=一字型炸药 68=九宫格炸药。
   这三类**可收**（act=18 收进库存，实测 `65_0_2` → chutou +2），也可**就地引爆**。
   ⚠️ **67=超级炸药不在此列**：它是格子属性，act=18 收不走（act=1 里也没有它的计数器），
@@ -228,37 +233,71 @@ def _must_clear(lines: list, types: dict, gifts: dict, rev: set, upto: int) -> l
 # ───────────────────────── 候选动作 ─────────────────────────
 
 def candidates(st: dict, tools: dict, use_tnt: bool = True, exclude: set | None = None) -> list:
-    """穷举合法动作：每个合法落点 × 每种还有库存的工具。exclude = 不再尝试的落点。"""
+    """穷举合法动作：每个合法落点 × 每种还有库存的工具。
+
+    exclude = 不再尝试的 (行,列,工具) / (行,列) 元组（自动循环把失败动作记进来）。
+
+    ⚠️ **窗口边界约束**（实机 2026-09-22 实证）：服务端只下发 8 行窗口
+    `dig_index-5 .. dig_index+2`。炸弹的爆炸范围若**探出这个窗口**，服务端直接
+    返 `code=-1`（desc="system busy"，但这是「目标非法」不是限流），动作根本不执行。
+    所以候选必须保证爆炸范围落在 [lo, hi] 内：
+      · 九宫格(±1 行) → 行必须在 [lo+1, hi-1]
+      · 超级炸药(±2 行) → 行必须在 [lo+2, hi-2]
+      · 一字型(横向，不出行) / 锄头(单格) → 无此约束
+    """
     types, gifts, supers = st["types"], st["gifts"], st.get("supers") or set()
     rev = revealed(types)
     exclude = exclude or set()
+    lines = st.get("lines") or []
+    lo = min(lines) if lines else None
+    hi = max(lines) if lines else None
+
+    def in_win(L: int) -> bool:
+        return lo is None or (lo <= L <= hi)
+
+    def blast_ok(dt: int, L: int) -> bool:
+        """炸弹 (行,dt) 的爆炸范围是否全在可见窗口内。"""
+        if dt == JGG:
+            return in_win(L - 1) and in_win(L + 1)
+        if dt == SUPER:
+            return in_win(L - 2) and in_win(L + 2)
+        return True  # 锄头 / 一字型 不探出窗口
+
+    def skipped(p, dt):
+        return p in exclude or (p[0], p[1], dt) in exclude
+
     out = []
 
     # ① 超级炸药格 → 就地引爆（用户要求「优先使用」；不耗库存）
-    #    条件：该格已探明（用户：从已探明格就能看出是不是它）
+    #    条件：该格已探明（用户：从已探明格就能看出是不是它）+ 爆炸不出窗口
     for p in sorted(supers):
-        if p not in exclude and p in rev:
-            out.append({"dig_type": SUPER, "line": p[0], "col": p[1],
-                        "tier": 0, "why": "引爆已探明的超级炸药格"})
+        if skipped(p, SUPER) or p not in rev or not blast_ok(SUPER, p[0]):
+            continue
+        out.append({"dig_type": SUPER, "line": p[0], "col": p[1],
+                    "tier": 0, "why": "引爆已探明的超级炸药格"})
 
     # ② 地里挖出的炸药礼物（66/68）→ 就地引爆
     for p, g in sorted(gifts.items()):
-        if g in BOMB_GIFT_TO_TYPE and types.get(p) != EMPTY and p not in exclude:
-            out.append({"dig_type": BOMB_GIFT_TO_TYPE[g], "line": p[0], "col": p[1],
-                        "tier": 0, "why": f"引爆地里的炸弹礼物 {g}"})
+        if g not in BOMB_GIFT_TO_TYPE or types.get(p) == EMPTY:
+            continue
+        dt = BOMB_GIFT_TO_TYPE[g]
+        if skipped(p, dt) or not blast_ok(dt, p[0]):
+            continue
+        out.append({"dig_type": dt, "line": p[0], "col": p[1],
+                    "tier": 0, "why": f"引爆地里的炸弹礼物 {g}"})
 
     for p, t in sorted(types.items()):
         L, j = p
-        if p in exclude:
+        if skipped(p, CT):
             continue
-        # ③ 锄头：已探明 且 是土/石/半开石
+        # ③ 锄头：已探明 且 是土/石/半开石（单格，不探出窗口）
         if t in DIGGABLE and p in rev and int(tools.get("chutou") or 0) > 0:
             out.append({"dig_type": CT, "line": L, "col": j, "tier": 1, "why": "锄头"})
         # ④ 炸药：落点须空地
         if t == EMPTY and use_tnt:
             if int(tools.get("line_tnt") or 0) > 0:
                 out.append({"dig_type": LINE, "line": L, "col": j, "tier": 1, "why": "一字型"})
-            if int(tools.get("jgg_tnt") or 0) > 0:
+            if int(tools.get("jgg_tnt") or 0) > 0 and blast_ok(JGG, L):
                 out.append({"dig_type": JGG, "line": L, "col": j, "tier": 1, "why": "九宫格"})
     return out
 

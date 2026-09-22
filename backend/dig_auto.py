@@ -595,7 +595,7 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
                   "use_tnt": use_tnt, "finished": None})
     _alog(f"自动挖启动：上限 {max_digs} 次，炸药 {'开' if use_tnt else '关（只锄头）'}，"
           f"清账缓冲 {clear_margin} 行", "ok")
-    bomb_bad = set()      # 引爆失败过的炸弹格，不再重试
+    failed = set()      # 失败过的 (行,列,工具)，下一轮重规划时排除，避免死磕同一个被拒动作
     try:
         while not _auto["stop"] and _auto["digs"] < max_digs:
             st = await get_state(session)
@@ -612,11 +612,11 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
                     _alog(f"一键收获失败：{c['message']}", "err")
                 if _auto["stop"]:
                     break
-            # 2) 规划
+            # 2) 规划（已排除失败动作 & 爆炸探出窗口的落点）
             tools = {"chutou": st.get("chutou"), "line_tnt": st.get("line_tnt"),
                      "jgg_tnt": st.get("jgg_tnt")}
             res = dplan.plan(st["rows"], tools, use_tnt=use_tnt,
-                             clear_margin=clear_margin, exclude=bomb_bad)
+                             clear_margin=clear_margin, exclude=failed)
             act = res.get("action")
             if not act:
                 _auto["finished"] = res.get("reason") or "没事可做"
@@ -637,15 +637,16 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
                       + (f"｜地层 D{res['dig_index']}→{new_idx}" if new_idx != res["dig_index"] else ""),
                       "ok")
             else:
-                if act["tier"] == 0:
-                    bomb_bad.add((line, col))
-                    _alog(f"引爆炸弹 {dt}@({line},{col}) 失败（code={r.get('code')}），"
-                          f"改用常规工具：{r['text']}", "warn")
-                    continue
-                _alog(r["text"], "err")
+                # 失败：记入排除集，下一轮重规划会选别的动作（不会原地重试同一个被拒动作）。
+                # 服务端对「爆炸探出窗口」的落点返 code=-1（desc="system busy"），
+                # 这是「目标非法」不是限流，重试无用 → 必须排除。
+                failed.add((line, col, dt))
+                _alog(f"{dplan.TOOL_NAME[dt]}@({line},{col}) 失败 code={r.get('code')} → 已排除，下轮换动作",
+                      "warn" if act["tier"] == 0 else "err")
                 _auto["_fail"] = _auto.get("_fail", 0) + 1
                 if _auto["_fail"] >= 3:
-                    _alog("连续失败 3 次，停止", "err")
+                    _auto["finished"] = "连续 3 个不同动作失败，疑似被限流，停止"
+                    _alog(_auto["finished"], "err")
                     break
                 continue
     finally:
