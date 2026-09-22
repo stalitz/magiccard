@@ -415,14 +415,10 @@ def reward_text(content: str) -> str:
         agg[(t, i)] = agg.get((t, i), 0) + n
     out = []
     for (t, i), n in agg.items():
-        nm = iid.item_name(t, i)
-        if not nm and t in (48, 69):
-            try:
-                nm = cq.cname(cq.indexes(), i)
-            except Exception:  # noqa: BLE001
-                nm = ""
+        # ⚠️ 必须走 `_gift_name`（而不是裸 `iid.item_name`）——否则 `_DIG_GIFT_OVERRIDE`
+        # 不生效：48_1148 是「积分」，但卡表 48 类的 1148 是卡「时髦抢镜」，会显示错名。
+        nm = _gift_name(t, i)
         if not nm:
-            _note_unknown(t, i)
             nm = f"#{t}_{i}"
         out.append(f"{nm}×{n}")
     return "、".join(out)
@@ -462,6 +458,85 @@ async def relic_submit(session, relic_id: int, num: int = 1) -> dict:
         "text": reward_text(content) if content else (data.get("desc") or "无产出"),
         "message": data.get("desc") or "",
     }
+
+
+# ─────────────────── 文物（76 类）全集与「一键上交」 ───────────────────
+# 76 的 sub-id = **挖地套卡按 tid 升序的序号**（2026-09-22 实证，两条锚点精确命中）：
+#   76_0 → act=10 得卡 8396 → 属于挖地套卡[0]「上古神兽」(tid=524, cards 8393..8402)
+#   76_3 → act=10 得卡 9757 → 属于挖地套卡[3]「中华国粹(下)」(tid=609, cards 9752..9760)
+# 故文物共 34 种（= 挖地套卡数），id 0..33。
+# ⚠️ 文物**没有独立显示名**（服务端不下发、SWF 文案里也没有），UI 用「对应套卡」标注，禁止猜名。
+RELIC_TYPE = 76
+
+
+def relic_kinds() -> list:
+    """文物种类全集 → [(id, 对应挖地套卡名)]，id 升序。"""
+    try:
+        ths = [t for t in cq.indexes()["themes"] if t.get("module") == "挖地"]
+        ths.sort(key=lambda t: t["tid"])
+        return [(i, t["name"]) for i, t in enumerate(ths)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def relic_submit_all(session, ids=None, per_id_cap: int = 8,
+                           probe_max: int = 20, gap_stop: int = 3) -> dict:
+    """一键上交全部文物：遍历文物 id 逐个 act=10（每类 num=1 交到交不动为止）。
+
+    ⚠️ act=1 **不下发**文物库存（2026-09-22 实测原始 act=1 无任何 76 类字段），
+    所以「仓库里有多少文物」只能靠遍历探测，没有只读接口。
+
+    **两种失败形态**（2026-09-22 打乱顺序实测，code 随 id 走、与请求顺序无关）：
+      · `code=-1` + desc=system busy  → **服务端认得该 id，只是没库存**（id 0/1/2/3 实测）
+      · `code=0`  + desc=system busy  → **不存在该 id**（id 4/5/20/33/999 实测）
+    据此可自适应探测：连续 `gap_stop` 个「不存在」就停 → 不用写死范围。
+    实测当前文物只有 **id 0..3 共 4 种**（= 挖地套卡最早 4 套：上古神兽/臧八宝/
+    中华国粹/中华国粹(下)），故实际只跑 0..6 ≈ 17s，而不是盲目跑 34 套卡。
+
+    ⚠️ 这里 `retries=1`（不重试）：默认 `retries=3` 会对 system busy 退避 1.5/3/4.5s，
+    且 `-1` 本就在 `_BUSY_CODES` 里会被当限流重试，白等；而 HAR 里连续两次 act=10
+    都成功 → 该接口不是严格限流。
+    """
+    kinds = relic_kinds()
+    name_of = dict(kinds)
+    if ids:
+        want, stop_on_gap = sorted({int(x) for x in ids}), False
+    else:
+        want, stop_on_gap = list(range(max(1, probe_max))), True
+    items, total, tried, gap, probes = [], 0, 0, 0, []
+    for rid in want:
+        tried += 1
+        got, exists, desc = [], False, ""
+        for _ in range(max(1, per_id_cap)):
+            r = await _act(session, retries=1, act=10, id=rid, num=1)
+            data = r.get("data") or {}
+            code = _code(r)
+            content = data.get("content") or ""
+            desc = data.get("desc") or r.get("message") or ""
+            if code == 0 and content:
+                got.append(content)
+                exists = True
+            elif code == -1:
+                exists = True          # 认得该 id：只是没库存（或已交完）
+                break
+            else:
+                break                  # code=0 + busy → 不存在该 id
+        if got:
+            items.append({"id": rid, "theme": name_of.get(rid, ""), "num": len(got),
+                          "cards": got, "text": reward_text(",".join(got))})
+            total += len(got)
+        if not exists:
+            probes.append(rid)
+        gap = 0 if exists else gap + 1
+        if stop_on_gap and gap >= max(1, gap_stop):
+            break
+    if items:
+        txt = f"上交 {total} 件文物：" + "、".join(
+            f"#{x['id']}×{x['num']}（{x['theme']}）→ {x['text']}" for x in items)
+    else:
+        txt = f"没有可上交的文物（已探测 {tried} 个 id；探测到存在的 id 会保留，不存在即跳过）"
+    return {"ok": True, "total": total, "tried": tried, "items": items,
+            "not_exist": probes, "all": [k[0] for k in kinds], "text": txt}
 
 
 async def collect(session) -> dict:
