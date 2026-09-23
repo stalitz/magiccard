@@ -444,6 +444,28 @@ def _parse_relics(content: str) -> list:
     return [{"id": k, "num": v} for k, v in out.items()]
 
 
+def _parse_gains(content: str) -> list:
+    """act=7 收鉴定产出的**全部**奖励 → [{type, id, num, name}]。
+
+    ⚠️ 晶石鉴定**不是必得文物**：也可能得「碎晶石」等其它产出（2026-09-23 用户指正）。
+    所以这里**不再只筛 76**，而是把所有 `type_id_num` 段都解析出来，供前端逐条展示。
+    文物(76)只是其中一种（需要 act=10 一键上交），其余（如碎晶石）直接入道具箱。
+    name 走 `_gift_name`：查不到就回落 `#type_id`（绝不猜名，项目铁律）。
+    """
+    out = {}
+    for part in str(content or "").split(","):
+        f = part.strip().split("_")
+        if len(f) < 3:
+            continue
+        try:
+            t, i, n = int(f[0]), int(f[1]), int(f[2])
+        except ValueError:
+            continue
+        out[(t, i)] = out.get((t, i), 0) + n
+    return [{"type": t, "id": i, "num": n, "name": _gift_name(t, i)}
+            for (t, i), n in sorted(out.items())]
+
+
 async def relic_submit(session, relic_id: int, num: int = 1) -> dict:
     """act=10 上交鉴定出的文物：id=文物编号(76 sub-id)，num=数量 → 得挖地套卡 69_<卡id>_<num>。
 
@@ -590,11 +612,16 @@ async def jd_start(session, machine: int = 0, stone: int = 0) -> dict:
 
 
 async def jd_collect(session) -> dict:
-    """act=7 收鉴定机产出：只收到期的槽。附带 relics（识别出的 76 类文物，可 act=10 上交）。"""
+    """act=7 收鉴定机产出：只收到期的槽。
+
+    返回 `relics`（识别出的 76 类文物，可 act=10 一键上交）+ `gains`（本次鉴定的**全部**产出，
+    含文物、碎晶石等；逐条给 name，未识别的回落 `#type_id`）。前端据此分别展示：
+    文物 → 可上交；其余（碎晶石等）→ 已直接入道具箱。
+    """
     st = await get_state(session)
     if st is None:
         return {"ok": False, "text": "读状态失败"}
-    items, ok_cnt, relics = [], 0, {}
+    items, ok_cnt, relics, gains = [], 0, {}, []
     for m in st.get("jd") or []:
         if int(m.get("lv") or 0) <= 0:
             continue
@@ -612,11 +639,22 @@ async def jd_collect(session) -> dict:
                 ok_cnt += 1
                 for rl in _parse_relics(content):
                     relics[rl["id"]] = relics.get(rl["id"], 0) + rl["num"]
+                for g in _parse_gains(content):
+                    gains.append(g)
     rel_list = [{"id": k, "num": v} for k, v in relics.items()]
+    # gains 按 (type,id) 合并数量（同一槽可能多段、多次收）
+    gmap = {}
+    for g in gains:
+        key = (g["type"], g["id"])
+        gmap[key] = gmap.get(key, 0) + g["num"]
+    gain_list = [{"type": t, "id": i, "num": n, "name": _gift_name(t, i)}
+                 for (t, i), n in sorted(gmap.items())]
     if not items:
-        return {"ok": True, "count": 0, "items": [], "relics": [], "text": "鉴定机暂无到期产出"}
+        return {"ok": True, "count": 0, "items": [], "relics": [], "gains": [],
+                "text": "鉴定机暂无到期产出"}
     return {
-        "ok": ok_cnt > 0, "count": ok_cnt, "items": items, "relics": rel_list,
+        "ok": ok_cnt > 0, "count": ok_cnt, "items": items,
+        "relics": rel_list, "gains": gain_list,
         "text": f"收获鉴定 {ok_cnt}/{len(items)} 槽：" + "、".join(x["text"] for x in items if x["ok"]),
     }
 
