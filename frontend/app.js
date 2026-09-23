@@ -934,19 +934,13 @@ function renderDigRelics(relics) {
     if (hit) hit.num += rl.num; else digRelics.push({ id: rl.id, num: rl.num });
   }
   digRelics = digRelics.filter((x) => x.num > 0);
-  // 「一键上交」常驻 —— 它**自动探测服务端全部文物 id**，不依赖本次收获列表。
-  // ⚠️ act=1 不下发文物库存，仓库里以往剩的文物只能靠遍历探测（见后端 relic_submit_all 注释）。
-  const gotHtml = digRelics.length
+  // 「一键上交全部」已改为 index.html 静态常驻（initDigOnce 绑定 digRelicSubmitAll），
+  // 不依赖本次收获列表——刷新页面后仓库里剩的文物也能一键上交（后端自动探测 id 空间）。
+  box.innerHTML = digRelics.length
     ? digRelics.map((rl) =>
         `<div class="rel-item"><span>文物 #${rl.id} ×${rl.num}</span>` +
         `<button class="btn xs ok" data-relic="${rl.id}" data-rnum="${rl.num}">上交</button></div>`).join("")
-    : `<div class="rel-empty">本次收获没有文物。仓库里以往剩下的文物，点上面「一键上交全部」即可（不用记编号）。</div>`;
-  box.innerHTML =
-    `<div class="rel-all"><button class="btn sm primary" id="relic-all">一键上交全部</button>` +
-    `<span class="muted" id="relic-all-note" style="font-size:12px;margin-left:8px">自动探测并上交仓库里所有文物</span></div>` +
-    gotHtml;
-  const allBtn = $("relic-all");
-  if (allBtn) allBtn.onclick = digRelicSubmitAll;
+    : `<div class="rel-empty">本会话暂未收获文物；点上方「一键上交全部」可上交仓库里所有文物。</div>`;
   box.querySelectorAll("[data-relic]").forEach((el) => {
     el.onclick = () => digRelicSubmit(el, el.dataset.relic, el.dataset.rnum);
   });
@@ -1094,6 +1088,8 @@ function initDigOnce() {
       fetch("/api/dig/state").then((x) => x.json()).then((r) => { if (r.ok) renderDigGrid(r); });
     };
     if ($("dig-clearlog")) $("dig-clearlog").onclick = () => logClear();
+    if ($("relic-all")) $("relic-all").onclick = digRelicSubmitAll;
+    renderDigRelics([]);   // 刷出空态提示（本会话暂无收获时也说明按钮用途）
   }
   loadDigState(false);
   digStartPoll();
@@ -2987,57 +2983,61 @@ async function initChangeForm() {
   if (cbChangeReady) return;
   cbChangeReady = true;
   const hint = $("cb-change-hint");
-  const starBox = $("cb-star"), thBox = $("cb-theme-list"), tList = $("cb-target-list");
-  const mList = $("cb-mat-list"), tSelLbl = $("cb-target-sel");
-  let selStar = 0, selTheme = null, selTarget = null, selMat = null;   // 三级选中态 + 材料
+  const themeBtn = $("cb-dd-theme-btn"), themeList = $("cb-dd-theme-list");
+  const tgtBtn = $("cb-dd-target-btn"), tgtList = $("cb-dd-target-list");
+  const matBtn = $("cb-dd-mat-btn"), matList = $("cb-dd-mat-list");
+  const goBtn = $("cb-change-go2");
+  let selTheme = null, selTarget = null, selMat = null;   // 套卡 / 目标卡 / 材料卡
   await propMaterials();   // 预热道具卡缓存：否则首次选目标卡时材料列表要等请求、短暂空白
 
-  // ① 星：可变套卡（transferable=1，套卡级属性）按星级分布
+  // 可变套卡（transferable=1，套卡级属性）
   let themes = [];
   try {
     const d = await (await fetch("/api/cards/themes?transferable=1&limit=2000")).json();
     themes = d.themes || [];
   } catch (e) { themes = []; }
-  const starSet = [...new Set(themes.map((t) => t.star))].filter((s) => s > 0).sort((a, b) => a - b);
-  if (!starSet.length) { starBox.innerHTML = `<div class="pk-empty">没有可变套卡</div>`; return; }
 
-  function renderStars() {
-    starBox.innerHTML = starSet.map((s) =>
-      `<div class="pk${selStar === s ? " sel" : ""}" data-star="${s}">` +
-      `<span class="pk-n">${"★".repeat(s)}</span>` +
-      `<span class="pk-f">${themes.filter((t) => t.star === s).length} 套</span></div>`).join("");
-    starBox.querySelectorAll("[data-star]").forEach((el) => {
-      el.onclick = () => {
-        selStar = Number(el.dataset.star); selTheme = null; selTarget = null; selMat = null;
-        tSelLbl.textContent = "";
-        renderStars(); renderThemes(); renderTargets(); renderMaterials();
-      };
-    });
+  const allBtns = [themeBtn, tgtBtn, matBtn], allLists = [themeList, tgtList, matList];
+  function closeAllDD() {
+    allLists.forEach((l) => { if (l) l.classList.add("hidden"); });
+    allBtns.forEach((b) => { if (b) b.classList.remove("dd-open"); });
   }
+  function toggleDD(list, btn) {
+    const willOpen = list && list.classList.contains("hidden");
+    closeAllDD();
+    if (willOpen) { list.classList.remove("hidden"); if (btn) btn.classList.add("dd-open"); }
+  }
+  // 点页面其它地方关闭浮动列表
+  document.addEventListener("click", (e) => {
+    if (!e.target || !e.target.closest || !e.target.closest(".cb-dd")) closeAllDD();
+  });
 
-  // ② 套卡：该星级下的可变套卡，「已有」标记（✓ have/n；满则「已集齐」）
-  function renderThemes() {
-    if (!selStar) { thBox.innerHTML = `<div class="pk-empty">先选星…</div>`; return; }
-    const list = themes.filter((t) => t.star === selStar)
-      .sort((a, b) => (b.have || 0) - (a.have || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
-    if (!list.length) { thBox.innerHTML = `<div class="pk-empty">该星级无可变套卡</div>`; return; }
-    thBox.innerHTML = list.map((t) => {
-      const done = t.n && t.have >= t.n;
-      const bdg = t.have > 0
-        ? `<span class="pk-bdg">${done ? "已集齐" : "✓ " + t.have + "/" + t.n}</span>` : "";
-      return `<div class="pk${selTheme && selTheme.tid === t.tid ? " sel" : ""}" data-ttid="${t.tid}" title="${esc(t.name)}">` +
-        `<span class="pk-n">${esc(t.name)}</span>${bdg}<span class="pk-f">${t.n}张</span></div>`;
-    }).join("");
-    thBox.querySelectorAll("[data-ttid]").forEach((el) => {
+  // ① 套卡下拉：全部可变套卡，按 星↓ 已有↓ 名 排序
+  function renderThemeDD() {
+    if (!themeList) return;
+    const list = themes.slice().sort((a, b) =>
+      (b.star || 0) - (a.star || 0) || (b.have || 0) - (a.have || 0)
+      || (a.name || "").localeCompare(b.name || "", "zh"));
+    themeList.innerHTML = list.length
+      ? list.map((t) => {
+          const done = t.n && t.have >= t.n;
+          const bdg = t.have > 0 ? `<span class="pk-bdg">${done ? "已集齐" : "✓ " + t.have + "/" + t.n}</span>` : "";
+          const star = "★".repeat(t.star || 0);
+          return `<div class="pk${selTheme && selTheme.tid === t.tid ? " sel" : ""}" data-ttid="${t.tid}" title="${esc(t.name)}">` +
+            `<span class="pk-n">${star ? star + " " : ""}${esc(t.name)}</span>${bdg}<span class="pk-f">${t.n}张</span></div>`;
+        }).join("")
+      : `<div class="pk-empty">没有可变套卡</div>`;
+    themeList.querySelectorAll("[data-ttid]").forEach((el) => {
       el.onclick = () => {
         selTheme = list.find((x) => x.tid === Number(el.dataset.ttid)) || null;
-        selTarget = null; selMat = null; tSelLbl.textContent = "";
-        renderThemes(); renderTargets(); renderMaterials();
+        selTarget = null; selMat = null;
+        if (tgtBtn) tgtBtn.disabled = !selTheme;
+        if (matBtn) matBtn.disabled = true;
+        renderTargetDD(); renderMatDD(); updatePreview(); closeAllDD();
       };
     });
   }
 
-  // ③ 目标卡：该套卡全部卡，按面额升序（transferable 是套卡级 → 整条可选）
   const cardCache = new Map();
   async function themeCards(tid) {
     if (cardCache.has(tid)) return cardCache.get(tid);
@@ -3050,27 +3050,28 @@ async function initChangeForm() {
     cardCache.set(tid, cards);
     return cards;
   }
-  async function renderTargets() {
-    if (!selTheme) { tList.innerHTML = `<div class="pk-empty">先选套卡…</div>`; return; }
+  // ② 目标卡下拉：所选套卡里的卡，标「有」
+  async function renderTargetDD() {
+    if (!tgtList) return;
+    if (!selTheme) { tgtList.innerHTML = `<div class="pk-empty">先选套卡</div>`; return; }
     const cards = await themeCards(selTheme.tid);
-    if (!cards.length) { tList.innerHTML = `<div class="pk-empty">该套卡无可变卡</div>`; return; }
-    const owned = cbOwnedSet();   // 自己已拥有的卡 → 标记 ✓
-    tList.innerHTML = cards.map((c) =>
+    if (!cards.length) { tgtList.innerHTML = `<div class="pk-empty">该套卡无可变卡</div>`; return; }
+    const owned = cbOwnedSet();
+    tgtList.innerHTML = cards.map((c) =>
       `<div class="pk${selTarget && selTarget.id === c.id ? " sel" : ""}" data-cid="${c.id}">` +
       `<span class="pk-n">${esc(c.name)}</span>` +
       (owned.has(Number(c.id)) ? `<span class="pk-bdg">有</span>` : "") +
       `<span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
-    tList.querySelectorAll("[data-cid]").forEach((el) => {
+    tgtList.querySelectorAll("[data-cid]").forEach((el) => {
       el.onclick = () => {
         selTarget = cards.find((x) => x.id === Number(el.dataset.cid)) || null;
         selMat = null;
-        tSelLbl.textContent = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
-        renderTargets(); renderMaterials(); updatePreview();
+        if (matBtn) matBtn.disabled = !selTarget;
+        renderMatDD(); updatePreview(); closeAllDD();
       };
     });
   }
 
-  // 材料卡：道具卡（100/200/600，面值 ≥ 目标）+ 卡箱卡（面额 ≥ 目标，按 套卡 → 面额 排序）
   async function propMaterials() {
     if (_propsCache) return _propsCache;
     try {
@@ -3087,10 +3088,12 @@ async function initChangeForm() {
       .filter((c) => (c.price || 0) >= tp)
       .sort((a, b) => (a.theme || "").localeCompare(b.theme || "", "zh") || (a.price || 0) - (b.price || 0));
   }
-  async function renderMaterials() {
-    if (!selTarget) { mList.innerHTML = `<div class="pk-empty">先选目标卡…</div>`; return; }
+  // ③ 材料卡下拉：道具卡（面值≥目标）+ 卡箱卡（面额≥目标）
+  function renderMatDD() {
+    if (!matList) return;
+    if (!selTarget) { matList.innerHTML = `<div class="pk-empty">先选目标卡</div>`; return; }
     const tp = selTarget.price || 0;
-    const props = (await propMaterials()).filter((p) => cbPropFace(p) >= tp);
+    const props = (_propsCache || []).filter((p) => cbPropFace(p) >= tp);
     const box = boxMaterials();
     let html = "";
     if (props.length) {
@@ -3109,11 +3112,9 @@ async function initChangeForm() {
         `<span class="pk-t">${c.box === 0 ? "换卡箱" : "保险箱"}</span>` +
         `<span class="pk-f">${c.price ?? 0}面</span></div>`;
     }
-    if (!props.length && !box.length) {
-      html = `<div class="pk-empty">没有 ≥${tp} 面的材料（道具/卡箱都不够）</div>`;
-    }
-    mList.innerHTML = html;
-    mList.querySelectorAll("[data-mkey]").forEach((el) => {
+    if (!props.length && !box.length) html = `<div class="pk-empty">没有 ≥${tp} 面的材料（道具/卡箱都不够）</div>`;
+    matList.innerHTML = html;
+    matList.querySelectorAll("[data-mkey]").forEach((el) => {
       el.onclick = () => {
         const key = el.dataset.mkey;
         if (key.startsWith("prop:")) {
@@ -3126,83 +3127,62 @@ async function initChangeForm() {
             name: el.dataset.mnm || "", price: Number(el.dataset.mpr) || 0,
           };
         }
-        renderMaterials(); updatePreview();
+        updatePreview(); closeAllDD();
       };
     });
-    updatePreview();
   }
+
   function updatePreview() {
-    const t = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
-    const m = selMat ? `${selMat.name}${selMat.price ? "（" + selMat.price + "面）" : ""}` : "";
-    const prev = $("cb-change-preview");
-    if (prev) prev.textContent = (t && m) ? `将用「${m}」→ 变为「${t}」` : (t ? "请点选一张材料卡" : "");
-    // 同步弹出框一行选择器的标签与可用态
-    const tp = $("cb-target-pick"), mp = $("cb-mat-pick"), go = $("cb-change-go2");
-    if (tp) { tp.textContent = selTarget ? `目标：${selTarget.name}` : "① 选目标卡"; tp.classList.toggle("sel", !!selTarget); }
-    if (mp) { mp.disabled = !selTarget; mp.textContent = selMat ? `消耗：${selMat.name}` : "② 选消耗卡"; mp.classList.toggle("sel", !!selMat); }
-    if (go) go.disabled = !(selTarget && selMat);
+    if (themeBtn) themeBtn.textContent = selTheme ? `套卡：${selTheme.name} ▾` : "选择套卡 ▾";
+    if (tgtBtn) tgtBtn.textContent = selTarget ? `目标：${selTarget.name} ▾` : "选择目标卡 ▾";
+    if (matBtn) matBtn.textContent = selMat ? `材料：${selMat.name} ▾` : "选择材料卡 ▾";
+    if (goBtn) goBtn.disabled = !(selTarget && selMat);
+    if (hint) {
+      if (!selTheme) hint.textContent = "依次选：套卡 → 目标卡 → 材料卡，再点「变卡」";
+      else if (!selTarget) hint.textContent = "再选目标卡（该套卡里要变出的卡）";
+      else if (!selMat) hint.textContent = "再选一张材料卡（面额须 ≥ 目标）";
+      else hint.textContent = `将用「${selMat.name}」→ 变为「${selTarget.name}」`;
+    }
   }
 
-  renderStars(); renderThemes(); renderTargets(); renderMaterials();
-
-  // 变卡提交（抽出，弹窗头部按钮与材料面板按钮共用；成功后立即刷新卡箱）
+  // 提交变卡（busyBtn 即时反馈 + 成功立即刷新卡箱）
   async function submitChange() {
-    if (!selTarget) { hint.textContent = "请先点选目标卡（① 星 → ② 套卡 → ③ 卡）"; return; }
-    if (!selMat) { hint.textContent = "请先点选一张材料卡"; return; }
+    if (!selTarget) { if (hint) hint.textContent = "请先选目标卡"; return; }
+    if (!selMat) { if (hint) hint.textContent = "请先选一张材料卡"; return; }
     const dst = selTarget.id;
     const srcid = selMat.id;
     const prop = selMat.kind === "prop" ? selMat.id : 0;
     const matNm = selMat.name + (selMat.price ? `（${selMat.price}面）` : "");
-    const g1 = $("cb-change-go"), g2 = $("cb-change-go2");
-    const r1 = g1 ? busyBtn(g1, "变卡中…") : null;
-    const r2 = g2 ? busyBtn(g2, "变卡中…") : null;
-    hint.textContent = `变卡中（${matNm} → ${selTarget.name}）…`;
+    const restore = goBtn ? busyBtn(goBtn, "变卡中…") : null;
+    if (hint) hint.textContent = `变卡中（${matNm} → ${selTarget.name}）…`;
     log(`变卡（魔变）：${matNm} → ${selTarget.name}(#${dst}) …`, "info");
     try {
       const r = await (await fetch("/api/gift/change", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ srcid, dstid: dst, prop }),
       })).json();
-      if (r.ok) { log(`变卡成功：${matNm} → ${selTarget.name}`, "ok"); hint.textContent = `成功：${matNm} → ${selTarget.name}`; await loadCardBox(); }
-      else { log(`变卡失败（约 50% 概率；-32002=该目标不支持或卡不在箱）：${r.message || r.code}`, "warn"); hint.textContent = `失败：${r.message || r.code}`; }
+      if (r.ok) {
+        log(`变卡成功：${matNm} → ${selTarget.name}`, "ok");
+        if (hint) hint.textContent = `成功：${matNm} → ${selTarget.name}`;
+        await loadCardBox();
+      } else {
+        log(`变卡失败（约 50% 概率；-32002=该目标不支持或卡不在箱）：${r.message || r.code}`, "warn");
+        if (hint) hint.textContent = `失败：${r.message || r.code}`;
+      }
     } catch (e) {
-      hint.textContent = "异常：" + e; log("变卡异常：" + e, "err");
+      if (hint) hint.textContent = "异常：" + e; log("变卡异常：" + e, "err");
     } finally {
-      if (r1) r1();
-      if (r2) r2();
+      if (restore) restore();
     }
   }
-  const goOld = $("cb-change-go"); if (goOld) goOld.onclick = submitChange;
-  const go2 = $("cb-change-go2"); if (go2) go2.onclick = submitChange;
 
-  // 弹出框：一行选择（目标卡 + 消耗卡 + 变卡），点选择器切换下方面板
-  function showTargetPanel() {
-    const tp = $("cb-target-panel"), mp = $("cb-mat-panel");
-    if (tp) tp.classList.remove("hidden");
-    if (mp) mp.classList.add("hidden");
-  }
-  function showMatPanel() {
-    const tp = $("cb-target-panel"), mp = $("cb-mat-panel");
-    if (tp) tp.classList.add("hidden");
-    if (mp) mp.classList.remove("hidden");
-  }
-  const openBtn = $("cb-change-open");
-  if (openBtn) openBtn.onclick = () => {
-    $("change-modal").classList.remove("hidden");
-    renderStars(); renderThemes(); renderTargets(); renderMaterials();
-    showTargetPanel();
-  };
-  const tpBtn = $("cb-target-pick"); if (tpBtn) tpBtn.onclick = showTargetPanel;
-  const mpBtn = $("cb-mat-pick"); if (mpBtn) mpBtn.onclick = () => { if (selTarget) showMatPanel(); };
+  if (goBtn) goBtn.onclick = submitChange;
+  if (themeBtn) themeBtn.onclick = (e) => { e.stopPropagation(); toggleDD(themeList, themeBtn); };
+  if (tgtBtn) tgtBtn.onclick = (e) => { e.stopPropagation(); if (!tgtBtn.disabled) toggleDD(tgtList, tgtBtn); };
+  if (matBtn) matBtn.onclick = (e) => { e.stopPropagation(); if (!matBtn.disabled) toggleDD(matList, matBtn); };
+
+  renderThemeDD(); renderTargetDD(); renderMatDD(); updatePreview();
 }
-
-// 关闭变卡弹出框（供 HTML 内联 onclick 调用）
-function closeChange() {
-  const m = $("change-modal");
-  if (m) m.classList.add("hidden");
-}
-
-
 
 // ---------- 合成路径弹窗（点卡箱任意卡 -> 显示所属套卡的合成路径 + 一键炼卡）----------
 function closeSynth() {
