@@ -423,8 +423,7 @@ async function loadTravelState() {
 async function travelRun(harvestOnly) {
   const dry = $("travel-dryrun").checked;
   const foodNum = parseInt($("travel-foodnum").value, 10) || 4;
-  const btn = $("travel-run");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("travel-run"), "运行中…");
   try {
     const r = await fetch("/api/travel/run", {
       method: "POST",
@@ -440,24 +439,28 @@ async function travelRun(harvestOnly) {
   } catch (e) {
     log(`[旅行] 请求异常：${esc(e.message)}`, "err");
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
     await loadTravelState();
   }
 }
 
 async function travelClover() {
-  const r = await fetch("/api/travel/clover", { method: "POST" })
-    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  const busy = (r.message || "").includes("busy");
-  if (r.ok) log(`[旅行] 收三叶草：成功（现 ${r.clover_num ?? "?"}）`, "ok");
-  else if (busy) log("[旅行] 收三叶草：暂无可收（无成熟三叶草）。", "info");
-  else log(`[旅行] 收三叶草失败：${r.message || "未知"}`, "err");
-  await loadTravelState();
+  const restore = busyBtn($("travel-clover"), "收三叶草中…");
+  try {
+    const r = await fetch("/api/travel/clover", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    const busy = (r.message || "").includes("busy");
+    if (r.ok) log(`[旅行] 收三叶草：成功（现 ${r.clover_num ?? "?"}）`, "ok");
+    else if (busy) log("[旅行] 收三叶草：暂无可收（无成熟三叶草）。", "info");
+    else log(`[旅行] 收三叶草失败：${r.message || "未知"}`, "err");
+    await loadTravelState();
+  } finally {
+    restore();
+  }
 }
 
 async function travelWater() {
-  const btn = $("travel-water");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("travel-water"), "浇水中…");
   try {
     const r = await fetch("/api/travel/water", { method: "POST" })
       .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
@@ -475,7 +478,7 @@ async function travelWater() {
       }
     }
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
     await loadTravelState();
     await travelFriendsList(true);
   }
@@ -483,8 +486,7 @@ async function travelWater() {
 
 // 手动收获旅行（act=23）：领取所有已返回猫的礼物
 async function travelHarvest() {
-  const btn = $("travel-harvest");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("travel-harvest"), "收获中…");
   try {
     const r = await fetch("/api/travel/harvest", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -492,7 +494,7 @@ async function travelHarvest() {
     if (!r.items) { log(`[旅行] 收获旅行失败：${r.message || "未知"}`, "err"); return; }
     for (const it of r.items) log(`[旅行] ${it.text}`, it.ok ? "ok" : "err");
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
     await loadTravelState();
   }
 }
@@ -540,8 +542,7 @@ function renderTravelFriends() {
 }
 
 async function travelFriendsList(silent) {
-  const btn = $("travel-friends");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("travel-friends"), "拉取中…");
   try {
     const r = await fetch("/api/travel/friends").then((x) => x.json())
       .catch((e) => ({ ok: false, message: e.message }));
@@ -549,17 +550,22 @@ async function travelFriendsList(silent) {
     renderTravelFriends();
     if (!silent) log(`[旅行] 好友列表：已开通 ${r.count ?? 0} 个，其中可浇 ${r.waterable ?? 0} 个（已种未成熟 · 今日未浇）。`, r.ok ? "ok" : "err");
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
   }
 }
 
 async function travelTasks() {
-  const r = await fetch("/api/travel/tasks", { method: "POST" })
-    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  if (!r.ok) { log(`[旅行] 领每日任务：${r.message || "失败"}`, "err"); }
-  else if (!(r.claimed || []).length) { log("[旅行] 领每日任务：暂无可领（未完成）。", "info"); }
-  else for (const c of r.claimed) log(`[旅行] 领每日任务#${c.index}：${c.ok ? "成功" : (c.message || "失败")}`, c.ok ? "ok" : "err");
-  await loadTravelState();
+  const restore = busyBtn($("travel-tasks"), "领任务中…");
+  try {
+    const r = await fetch("/api/travel/tasks", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (!r.ok) { log(`[旅行] 领每日任务：${r.message || "失败"}`, "err"); }
+    else if (!(r.claimed || []).length) { log("[旅行] 领每日任务：暂无可领（未完成）。", "info"); }
+    else for (const c of r.claimed) log(`[旅行] 领每日任务#${c.index}：${c.ok ? "成功" : (c.message || "失败")}`, c.ok ? "ok" : "err");
+    await loadTravelState();
+  } finally {
+    restore();
+  }
 }
 
 function travelStartAuto() {
@@ -716,7 +722,7 @@ function renderDigJd(st) {
   }
   box.innerHTML = html || `<div class="empty-tip">还没有可用的鉴定机（需要先升级/租用）。</div>`;
   box.querySelectorAll("[data-jd-stone]").forEach((el) => {
-    el.onclick = () => digJdStart(parseInt(el.dataset.jdMachine, 10), parseInt(el.dataset.jdStone, 10));
+    el.onclick = () => digJdStart(el, parseInt(el.dataset.jdMachine, 10), parseInt(el.dataset.jdStone, 10));
   });
   box.querySelectorAll("[data-jd-collect]").forEach((el) => {
     el.onclick = () => digJdCollect(parseInt(el.dataset.jdCollect, 10));
@@ -806,6 +812,16 @@ async function loadDigState(silent) {
   }
 }
 
+// 手动按钮即时反馈：点击立即置「处理中」并禁用，动作完成后再恢复。
+// 与定时刷新解耦——手动操作不等轮询，按下就有反应、完成就立即刷新相关界面。
+function busyBtn(btn, busy, idle) {
+  if (!btn) return () => {};
+  const old = btn.textContent;
+  btn.disabled = true;
+  if (busy) btn.textContent = busy;
+  return () => { btn.disabled = false; btn.textContent = idle || old; };
+}
+
 async function digClick(line, col, el) {
   if (digBusy) return;
   digBusy = true;
@@ -828,41 +844,57 @@ async function digClick(line, col, el) {
 }
 
 async function digCollect() {
-  const btn = $("dig-collect");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("dig-collect"), "收获中…");
   try {
     const r = await fetch("/api/dig/collect", { method: "POST" })
       .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
     if (r.ok) log(`[挖地] 一键收获：${r.text || "暂无可收"}`, "ok");
     else log(`[挖地] 一键收获失败：${r.message || "未知"}`, "err");
-    if (r.state) renderDigGrid(r.state);
+    await loadDigState(true);   // 立即刷新网格 + 道具箱（不依赖轮询）
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
   }
 }
 
 async function digMachines() {
-  const btn = $("dig-machines");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("dig-machines"), "收鉴定中…");
   try {
     const r = await fetch("/api/dig/jd/collect", { method: "POST" })
       .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
     if (r.count === 0) log(`[挖地] ${r.text || "鉴定机暂无到期产出"}`, "info");
-    else log(`[挖地] ${r.text || "收鉴定完成"}`, r.ok ? "ok" : "err");
+    else {
+      log(`[挖地] ${r.text || "收鉴定完成"}`, r.ok ? "ok" : "err");
+      // 逐条展示本次产出：晶石鉴定**不一定得文物**，也可能得碎晶石等 → 分别标注
+      const gains = (r.gains || []);
+      if (gains.length) {
+        const relicGain = gains.filter((g) => g.type === 76);
+        const other = gains.filter((g) => g.type !== 76);
+        if (relicGain.length)
+          log(`[挖地] 文物（可一键上交）：` + relicGain.map((g) => `文物#${g.id}×${g.num}`).join("、"), "info");
+        if (other.length)
+          log(`[挖地] 其余产出（已入道具箱）：` +
+            other.map((g) => `${g.name || ("#" + g.type + "_" + g.id)}×${g.num}`).join("、"), "info");
+      }
+    }
     renderDigRelics(r.relics || []);
-    await loadDigState(true);
+    await loadDigState(true);   // 立即刷新：网格 + 道具箱（碎晶石等已入库）
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
   }
 }
 
-async function digJdStart(machine, stone) {
-  const r = await fetch("/api/dig/jd/start", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ machine, stone }),
-  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  log(`[挖地] ${r.text || r.message || "投石失败"}`, r.ok ? "ok" : "err");
-  await loadDigState(true);
+async function digJdStart(btn, machine, stone) {
+  const restore = busyBtn(btn, "投石中…");
+  try {
+    const r = await fetch("/api/dig/jd/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine, stone }),
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    log(`[挖地] ${r.text || r.message || "投石失败"}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
+  } finally {
+    restore();
+  }
 }
 
 async function digJdCollect(machine) {
@@ -875,15 +907,20 @@ async function digJdCollect(machine) {
   await loadDigState(true);
 }
 
-async function digRelicSubmit(id, num) {
-  const r = await fetch("/api/dig/relic/submit", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id: Number(id), num: Number(num) }),
-  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  const got = r.text || r.message || "无产出";
-  log(`[挖地] 上交文物#${id}×${num} → ${got}`, r.ok ? "ok" : "err");
-  await loadDigState(true);
-  return r;
+async function digRelicSubmit(btn, id, num) {
+  const restore = busyBtn(btn, "上交中…");
+  try {
+    const r = await fetch("/api/dig/relic/submit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: Number(id), num: Number(num) }),
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    const got = r.text || r.message || "无产出";
+    log(`[挖地] 上交文物#${id}×${num} → ${got}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
+    return r;
+  } finally {
+    restore();
+  }
 }
 
 let digRelics = [];     // 本次页面会话内累计的文物（{id,num}），来自收鉴定产出
@@ -911,46 +948,52 @@ function renderDigRelics(relics) {
   const allBtn = $("relic-all");
   if (allBtn) allBtn.onclick = digRelicSubmitAll;
   box.querySelectorAll("[data-relic]").forEach((el) => {
-    el.onclick = () => digRelicSubmit(el.dataset.relic, el.dataset.rnum).then(() => loadDigState(true));
+    el.onclick = () => digRelicSubmit(el, el.dataset.relic, el.dataset.rnum);
   });
 }
 
 async function digRelicSubmitAll() {
-  const btn = $("relic-all");
-  if (btn) { btn.disabled = true; btn.textContent = "上交中…"; }
+  const restore = busyBtn($("relic-all"), "上交中…");
   log("[挖地] 一键上交：自动探测仓库里所有文物并逐个上交（约 15-20s）…", "info");
   // 后端自适应探测（id 0,1,2,3 存在 → 连续 3 个不存在即停），不再盲目跑 34 套卡
-  const r = await fetch("/api/dig/relic/submit_all", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ per_id_cap: 8 }),
-  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  if (!r || !r.ok) {
-    log(`[挖地] 一键上交失败：${(r && r.message) || "未知"}`, "err");
-    if (btn) { btn.disabled = false; btn.textContent = "一键上交全部"; }
-    return;
+  try {
+    const r = await fetch("/api/dig/relic/submit_all", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ per_id_cap: 8 }),
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (!r || !r.ok) {
+      log(`[挖地] 一键上交失败：${(r && r.message) || "未知"}`, "err");
+      return;
+    }
+    for (const it of (r.items || [])) {
+      log(`[挖地] 上交文物#${it.id}×${it.num}（对应套卡：${it.theme}）→ ${it.text}`, "ok");
+      const hit = digRelics.find((x) => x.id === it.id);
+      if (hit) hit.num = Math.max(0, hit.num - it.num);
+    }
+    digRelics = digRelics.filter((x) => x.num > 0);
+    renderDigRelics([]);
+    log(`[挖地] 一键上交完成：共上交 ${r.total || 0} 件（探测 ${r.tried || 0} 个 id）`, r.total ? "ok" : "warn");
+    await loadDigState(true);
+  } finally {
+    restore();
   }
-  for (const it of (r.items || [])) {
-    log(`[挖地] 上交文物#${it.id}×${it.num}（对应套卡：${it.theme}）→ ${it.text}`, "ok");
-    const hit = digRelics.find((x) => x.id === it.id);
-    if (hit) hit.num = Math.max(0, hit.num - it.num);
-  }
-  digRelics = digRelics.filter((x) => x.num > 0);
-  renderDigRelics([]);
-  log(`[挖地] 一键上交完成：共上交 ${r.total || 0} 件（探测 ${r.tried || 0} 个 id）`, r.total ? "ok" : "warn");
-  await loadDigState(true);
 }
 
 async function digJdAuto() {
-  const r = await fetch("/api/dig/jd/auto", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  log(`[挖地] 鉴定机一轮：${r.text || r.message || ""}`, r.ok ? "ok" : "err");
-  await loadDigState(true);
+  const restore = busyBtn($("dig-jd-auto"), "一轮中…");
+  try {
+    const r = await fetch("/api/dig/jd/auto", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    log(`[挖地] 鉴定机一轮：${r.text || r.message || ""}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
+  } finally {
+    restore();
+  }
 }
 
 async function digPush() {
-  const btn = $("dig-push");
-  if (btn) btn.disabled = true;
+  const restore = busyBtn($("dig-push"), "推进中…");
   try {
     const r = await fetch("/api/dig/push", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -959,17 +1002,23 @@ async function digPush() {
     log(`[挖地] ${r.text || r.message || "推进失败"}`, r.ok ? "ok" : "err");
     await loadDigState(true);
   } finally {
-    if (btn) btn.disabled = false;
+    restore();
   }
 }
 
 async function digDaily(kind) {
   const url = kind === "tools" ? "/api/dig/daily/tools" : "/api/dig/daily/gift";
   const nm = kind === "tools" ? "每日道具" : "每日礼包";
-  const r = await fetch(url, { method: "POST" })
-    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  log(`[挖地] 领${nm}：${r.text || r.message || "无"}`, r.ok ? "ok" : "err");
-  await loadDigState(true);
+  const btn = kind === "tools" ? $("dig-daily-tools") : $("dig-daily-gift");
+  const restore = busyBtn(btn, "领取中…");
+  try {
+    const r = await fetch(url, { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    log(`[挖地] 领${nm}：${r.text || r.message || "无"}`, r.ok ? "ok" : "err");
+    await loadDigState(true);
+  } finally {
+    restore();
+  }
 }
 
 async function digNameItem(key) {
@@ -984,27 +1033,39 @@ async function digNameItem(key) {
 }
 
 async function digStartAuto() {
+  const restore = busyBtn($("dig-auto-start"), "启动中…");
   const maxDigs = parseInt($("dig-max").value, 10) || 30;
   const useTnt = $("dig-tnt").checked;
   const marginEl = $("dig-margin");
   const clearMargin = marginEl ? (parseInt(marginEl.value, 10) || 0) : 1;
-  const r = await fetch("/api/dig/auto/start", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_digs: maxDigs, use_tnt: useTnt, clear_margin: clearMargin }),
-  }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  if (!r.ok) { log(`[挖地] 启动自动失败：${r.message || "未知"}`, "err"); return; }
-  window._digSeen = new Set();
-  log(`[挖地] 自动挖已启动：上限 ${maxDigs} 次，炸药${useTnt ? "开" : "关"}，`
-    + `清账缓冲 ${clearMargin} 行。`, "ok");
-  digAutoRunning = true;
-  await loadDigState(true);
+  try {
+    const r = await fetch("/api/dig/auto/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ max_digs: maxDigs, use_tnt: useTnt, clear_margin: clearMargin }),
+    }).then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    if (!r.ok) { log(`[挖地] 启动自动失败：${r.message || "未知"}`, "err"); restore(); return; }
+    window._digSeen = new Set();
+    log(`[挖地] 自动挖已启动：上限 ${maxDigs} 次，炸药${useTnt ? "开" : "关"}，`
+      + `清账缓冲 ${clearMargin} 行。`, "ok");
+    digAutoRunning = true;
+    await loadDigState(true);
+    restore();
+  } catch (e) {
+    log("自动挖启动异常：" + e, "err");
+    restore();
+  }
 }
 
 async function digStopAuto() {
-  const r = await fetch("/api/dig/auto/stop", { method: "POST" })
-    .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
-  log(`[挖地] ${r.message || "已停止"}`, "info");
-  await loadDigState(true);
+  const restore = busyBtn($("dig-auto-stop"), "停止中…");
+  try {
+    const r = await fetch("/api/dig/auto/stop", { method: "POST" })
+      .then((x) => x.json()).catch((e) => ({ ok: false, message: e.message }));
+    log(`[挖地] ${r.message || "已停止"}`, "info");
+    await loadDigState(true);
+  } finally {
+    restore();
+  }
 }
 
 function digStartPoll() {
@@ -1054,22 +1115,21 @@ async function onSlotAction(e) {
   if (!confirm(isCancel
       ? `取消炉位 ${slot} 的炼制？素材卡会退回卡箱。`
       : `取出炉位 ${slot} 已炼好的卡？`)) return;
-  b.disabled = true;
+  const restore = busyBtn(b, "处理中…");
   try {
     const url = isCancel ? `/api/card/cancel?slot=${slot}`
                          : `/api/refine/get?slotid=${slot}`;
     const d = await (await fetch(url, { method: isCancel ? "POST" : "GET" })).json();
     log(`${isCancel ? "取消炼卡" : "取卡"} 炉位 ${slot}：${d.ok ? "成功" : "失败 " + (d.message || d.code || "")}`,
         d.ok ? "ok" : "err");
-    // 取「自己炉位」的卡会派生 1 次翻牌机会，后端已顺手翻掉（main.py refine_get）：
-    // 不在这里补记，就会出现「牌翻了、次数没了、日志里却什么都没有」。
-    // 偷炉取卡走 get_steal_card 直接返回，不带 pai 字段，故用 in 判断区分。
     if (!isCancel && "pai" in d) {
       log(`翻牌（取卡附带）：${d.pai ? "成功" : "失败"} ${d.pai_message || ""}`,
           d.pai ? "ok" : "err");
     }
   } catch (err) {
     log("操作异常：" + err, "err");
+  } finally {
+    restore();
   }
   await loadState();
 }
@@ -1413,15 +1473,15 @@ async function exAutoStart() {
     max_peers: Number(($("ex-autoex-max").value || "0").trim() || 0),
     dry_run: !!$("ex-autoex-dry").checked,
   };
-  // 多选源套：复用「想收的套」多选，作为玩家池来源（可跨套换指定卡）。
   const srcTids = exTargetTids();
   if (srcTids.length) body.tids = srcTids;
-  // 多选指定卡：复用「指定卡」多选，作为要换入的目标（可跨套）。
   const tcards = [...exState.pickCards].filter(Boolean);
   if (tcards.length) body.card_ids = tcards;
   const pay = exPaySelected();
   if (pay.length) body.pay_card_ids = pay;
-  $("ex-autoex-start").disabled = true;
+  const b = $("ex-autoex-start");
+  const bold = b ? b.textContent : "";
+  if (b) { b.disabled = true; b.textContent = "启动中…"; }
   try {
     const d = await (await fetch("/api/exchange/auto/start", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -1442,13 +1502,18 @@ async function exAutoStart() {
   } catch (e) {
     exMsg("启动异常：" + (e.message || e), "err");
   } finally {
-    $("ex-autoex-start").disabled = false;
+    if (b) { b.disabled = false; b.textContent = bold; }
   }
 }
 
 async function exAutoStop() {
-  await fetch("/api/exchange/auto/stop", { method: "POST" });
-  exMsg("已请求停止自动换卡", "info");
+  const restore = busyBtn($("ex-autoex-stop"), "停止中…");
+  try {
+    await fetch("/api/exchange/auto/stop", { method: "POST" });
+    exMsg("已请求停止自动换卡", "info");
+  } finally {
+    restore();
+  }
 }
 
 async function exAutoPoll() {
@@ -1804,7 +1869,8 @@ function renderManualPeers() {
       </div>
     </div>`;
   $("ex-manual-ta").value = exState.manualText;
-  $("ex-manual-save").onclick = async () => {
+    $("ex-manual-save").onclick = async () => {
+    const restore = busyBtn($("ex-manual-save"), "保存中…");
     const lines = ($("ex-manual-ta").value || "").split("\n").map((s) => s.trim()).filter(Boolean);
     try {
       const d = await (await fetch("/api/exchange/manual", {
@@ -1819,8 +1885,10 @@ function renderManualPeers() {
       }
     } catch (e) {
       exMsg("保存失败：" + (e.message || e), "err");
+    } finally {
+      restore();
     }
-  };
+  };;
   $("ex-manual-scan").onclick = () => doScan(true);
 }
 
@@ -2527,6 +2595,7 @@ function initAutoOnce() {
 async function autoQueueAdd() {
   const tid = ($("auto-queue-tid").value || "").trim();
   if (!tid) { log("追加队列：请填套卡 ID", "err"); return; }
+  const restore = busyBtn($("auto-queue-add"), "追加中…");
   try {
     const d = await (await fetch(`/api/auto/queue/add?tid=${encodeURIComponent(tid)}`, { method: "POST" })).json();
     if (d.ok) {
@@ -2536,6 +2605,7 @@ async function autoQueueAdd() {
       log(`加入队列失败：${d.message || ""}`, "err");
     }
   } catch (e) { log("加入队列异常：" + e, "err"); }
+  finally { restore(); }
   autoRefresh();
 }
 
@@ -2579,15 +2649,15 @@ async function autoStart() {
   if (!tid) { log("自动炼卡：请先选择一套卡（下拉或输入套卡ID）", "err"); return; }
   const buy = $("auto-buy").checked ? 1 : 0;
   const rounds = parseInt($("auto-rounds").value, 10) || 0;
-  // 偷炉（借好友空炉多并行一炉）：开关 + 常去好友 QQ。留空则后端从好友列表最后一名往回找空炉。
   const steal = $("auto-steal").checked ? 1 : 0;
   const sf = ($("auto-steal-friend").value || "").trim();
-  // 礼物箱 → 变卡（可选环节，并入炼卡，不再是独立自动化）
   const gd = $("auto-gift-drain").checked ? 1 : 0;
   const gdst = parseInt($("auto-gift-dst").value, 10) || 26117;
   const gup = parseInt($("auto-gift-upper").value, 10) || 45;
   const glow = parseInt($("auto-gift-lower").value, 10) || 25;
-  $("auto-start").disabled = true;
+  const b = $("auto-start");
+  const bold = b ? b.textContent : "";
+  if (b) { b.disabled = true; b.textContent = "启动中…"; }
   try {
     const qs = `tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}&steal=${steal}`
       + (sf ? `&steal_friend=${encodeURIComponent(sf)}` : "")
@@ -2595,21 +2665,25 @@ async function autoStart() {
     const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
       log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）`, "ok");
-      autoLogCleared = false;   // 重新启动 → 右栏日志恢复记录
+      autoLogCleared = false;
       startAutoPoll();
     } else {
       log(`自动炼卡未启动：${d.message || ""}`, "err");
     }
   } catch (e) { log("自动炼卡启动异常：" + e, "err"); }
-  $("auto-start").disabled = false;
+  finally {
+    if (b) { b.disabled = false; b.textContent = bold; }
+  }
   autoRefresh();
 }
 
 async function autoStop() {
+  const restore = busyBtn($("auto-stop"), "停止中…");
   try {
     const d = await (await fetch("/api/auto/stop", { method: "POST" })).json();
     log("已请求停止自动炼卡", "warn");
   } catch (e) { log("停止异常：" + e, "err"); }
+  finally { restore(); }
   clearAutoPoll();
   autoRefresh();
 }
@@ -2862,27 +2936,27 @@ async function onCbAction(e) {
   const box = Number(b.dataset.box);
   const slot = Number(b.dataset.slot);
   const id = Number(b.dataset.id);
-  b.disabled = true;
+  const restore = busyBtn(b, "处理中…");
   try {
     if (act === "sell") {
       const price = Number(b.dataset.price || 0);
       if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {
-        b.disabled = false; return;
+        restore(); return;
       }
-      const bt = box === 0 ? 1 : 2;  // 1=换卡箱 / 2=保险箱
+      const bt = box === 0 ? 1 : 2;
       const d = await (await fetch(`/api/box/sell?card_id=${id}&slot=${slot}&box_type=${bt}`, { method: "POST" })).json();
       log(`卖卡 slot ${slot}（${box === 0 ? "换卡箱" : "保险箱"}）：${d.ok ? `成功 +${price} 金` : "失败 " + (d.message || d.code)}`,
           d.ok ? "ok" : "err");
     } else {
       const toName = box === 0 ? "保险箱" : "换卡箱";
-      // 移卡是双向可逆操作，不需要二次确认，直接移
       const d = await (await fetch(`/api/box/move?card_id=${id}&slot=${slot}&from_box=${box}`, { method: "POST" })).json();
       log(`移卡 slot ${slot} → ${toName}：${d.ok ? d.message : "失败 " + (d.message || d.code)}`, d.ok ? "ok" : "err");
     }
     await loadCardBox();
   } catch (err) {
     log("卡箱操作异常：" + err, "err");
-    b.disabled = false;
+  } finally {
+    restore();
   }
 }
 
@@ -2899,6 +2973,14 @@ function cbPropFace(p) {
   // 道具名形如「100面值卡」→ 提取面值数字；非这三类直接排除
   const m = /(\d+)\s*面值卡/.exec(p.name || "");
   return m ? Number(m[1]) : null;
+}
+
+// 卡箱（换卡箱 + 保险箱）里已拥有的卡 id 集合 —— 目标卡列表用 ✓ 标记「自己有的」
+function cbOwnedSet() {
+  const s = new Set();
+  for (const c of ((cbState.change && cbState.change.cards) || [])) if (c.id) s.add(Number(c.id));
+  for (const c of ((cbState.store && cbState.store.cards) || [])) if (c.id) s.add(Number(c.id));
+  return s;
 }
 
 async function initChangeForm() {
@@ -2972,15 +3054,18 @@ async function initChangeForm() {
     if (!selTheme) { tList.innerHTML = `<div class="pk-empty">先选套卡…</div>`; return; }
     const cards = await themeCards(selTheme.tid);
     if (!cards.length) { tList.innerHTML = `<div class="pk-empty">该套卡无可变卡</div>`; return; }
+    const owned = cbOwnedSet();   // 自己已拥有的卡 → 标记 ✓
     tList.innerHTML = cards.map((c) =>
       `<div class="pk${selTarget && selTarget.id === c.id ? " sel" : ""}" data-cid="${c.id}">` +
-      `<span class="pk-n">${esc(c.name)}</span><span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
+      `<span class="pk-n">${esc(c.name)}</span>` +
+      (owned.has(Number(c.id)) ? `<span class="pk-bdg">有</span>` : "") +
+      `<span class="pk-f">${c.price ?? 0}面</span></div>`).join("");
     tList.querySelectorAll("[data-cid]").forEach((el) => {
       el.onclick = () => {
         selTarget = cards.find((x) => x.id === Number(el.dataset.cid)) || null;
         selMat = null;
         tSelLbl.textContent = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
-        renderTargets(); renderMaterials();
+        renderTargets(); renderMaterials(); updatePreview();
       };
     });
   }
@@ -3049,19 +3134,28 @@ async function initChangeForm() {
   function updatePreview() {
     const t = selTarget ? `${selTarget.name}（${selTarget.price}面）` : "";
     const m = selMat ? `${selMat.name}${selMat.price ? "（" + selMat.price + "面）" : ""}` : "";
-    $("cb-change-preview").textContent = (t && m) ? `将用「${m}」→ 变为「${t}」` : (t ? "请点选一张材料卡" : "");
+    const prev = $("cb-change-preview");
+    if (prev) prev.textContent = (t && m) ? `将用「${m}」→ 变为「${t}」` : (t ? "请点选一张材料卡" : "");
+    // 同步弹出框一行选择器的标签与可用态
+    const tp = $("cb-target-pick"), mp = $("cb-mat-pick"), go = $("cb-change-go2");
+    if (tp) { tp.textContent = selTarget ? `目标：${selTarget.name}` : "① 选目标卡"; tp.classList.toggle("sel", !!selTarget); }
+    if (mp) { mp.disabled = !selTarget; mp.textContent = selMat ? `消耗：${selMat.name}` : "② 选消耗卡"; mp.classList.toggle("sel", !!selMat); }
+    if (go) go.disabled = !(selTarget && selMat);
   }
 
   renderStars(); renderThemes(); renderTargets(); renderMaterials();
 
-  // 变卡按钮
-  $("cb-change-go").onclick = async () => {
+  // 变卡提交（抽出，弹窗头部按钮与材料面板按钮共用；成功后立即刷新卡箱）
+  async function submitChange() {
     if (!selTarget) { hint.textContent = "请先点选目标卡（① 星 → ② 套卡 → ③ 卡）"; return; }
     if (!selMat) { hint.textContent = "请先点选一张材料卡"; return; }
     const dst = selTarget.id;
     const srcid = selMat.id;
     const prop = selMat.kind === "prop" ? selMat.id : 0;
     const matNm = selMat.name + (selMat.price ? `（${selMat.price}面）` : "");
+    const g1 = $("cb-change-go"), g2 = $("cb-change-go2");
+    const r1 = g1 ? busyBtn(g1, "变卡中…") : null;
+    const r2 = g2 ? busyBtn(g2, "变卡中…") : null;
     hint.textContent = `变卡中（${matNm} → ${selTarget.name}）…`;
     log(`变卡（魔变）：${matNm} → ${selTarget.name}(#${dst}) …`, "info");
     try {
@@ -3069,12 +3163,43 @@ async function initChangeForm() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ srcid, dstid: dst, prop }),
       })).json();
-      if (r.ok) { log(`变卡成功：${matNm} → ${selTarget.name}`, "ok"); hint.textContent = `成功：${matNm} → ${selTarget.name}`; }
+      if (r.ok) { log(`变卡成功：${matNm} → ${selTarget.name}`, "ok"); hint.textContent = `成功：${matNm} → ${selTarget.name}`; await loadCardBox(); }
       else { log(`变卡失败（约 50% 概率；-32002=该目标不支持或卡不在箱）：${r.message || r.code}`, "warn"); hint.textContent = `失败：${r.message || r.code}`; }
     } catch (e) {
       hint.textContent = "异常：" + e; log("变卡异常：" + e, "err");
+    } finally {
+      if (r1) r1();
+      if (r2) r2();
     }
+  }
+  const goOld = $("cb-change-go"); if (goOld) goOld.onclick = submitChange;
+  const go2 = $("cb-change-go2"); if (go2) go2.onclick = submitChange;
+
+  // 弹出框：一行选择（目标卡 + 消耗卡 + 变卡），点选择器切换下方面板
+  function showTargetPanel() {
+    const tp = $("cb-target-panel"), mp = $("cb-mat-panel");
+    if (tp) tp.classList.remove("hidden");
+    if (mp) mp.classList.add("hidden");
+  }
+  function showMatPanel() {
+    const tp = $("cb-target-panel"), mp = $("cb-mat-panel");
+    if (tp) tp.classList.add("hidden");
+    if (mp) mp.classList.remove("hidden");
+  }
+  const openBtn = $("cb-change-open");
+  if (openBtn) openBtn.onclick = () => {
+    $("change-modal").classList.remove("hidden");
+    renderStars(); renderThemes(); renderTargets(); renderMaterials();
+    showTargetPanel();
   };
+  const tpBtn = $("cb-target-pick"); if (tpBtn) tpBtn.onclick = showTargetPanel;
+  const mpBtn = $("cb-mat-pick"); if (mpBtn) mpBtn.onclick = () => { if (selTarget) showMatPanel(); };
+}
+
+// 关闭变卡弹出框（供 HTML 内联 onclick 调用）
+function closeChange() {
+  const m = $("change-modal");
+  if (m) m.classList.add("hidden");
 }
 
 
@@ -3659,9 +3784,15 @@ function spRenderAll(d) {
 
   const mts = ex.explore_ts || 0, mput = ex.put_spirites || [];
   const mStage = spPlaceText(d.pass_id, d.section_id);
+  // 大地图免费探索次数（灵宠）：free_explore_cnt = 剩余免费次数（每次出发 -1，归零改扣 permanent）；
+  // today_fri_explore_cnt = 今日已用（随 explore 变）。总数 = 剩余 + 已用。
+  const mFree = Number(d.free_explore_cnt ?? 0);
+  const mUsed = Number(d.today_fri_explore_cnt ?? 0);
+  const mTotal = mFree + mUsed;
+  const mCnt = `免费 ${mUsed}/${mTotal} 次 · 剩 ${mFree}`;
   const mapTxt = (mts && mput.length)
-    ? "进行中 " + Math.floor((now - mts) / 60) + " 分 · " + names(mput) + " @ " + mStage
-    : "无进行中 · 当前 " + mStage;
+    ? "进行中 " + Math.floor((now - mts) / 60) + " 分 · " + names(mput) + " @ " + mStage + " ｜ " + mCnt
+    : "无进行中 · 当前 " + mStage + " ｜ " + mCnt;
 
   const its = isl.explore_ts || 0, iput = isl.spirites || [];
   const islMax = Number(isl.daily_max) || 5, islUsed = Number(isl.today_cnt ?? 0);
@@ -3718,11 +3849,11 @@ function spRenderAll(d) {
       e.stopPropagation();
       const mode = el.closest(".sp-all-row").dataset.mode;
       const a = el.dataset.act;
-      if (a === "refresh") spRefresh();
-      else if (a === "harvest") spHarvest(mode);
-      else if (a === "once") spOnce(mode);
-      else if (a === "start") spStart(mode);
-      else if (a === "stop") spStop(mode);
+      if (a === "refresh") spRefresh(el);
+      else if (a === "harvest") spHarvest(mode, el);
+      else if (a === "once") spOnce(mode, el);
+      else if (a === "start") spStart(mode, el);
+      else if (a === "stop") spStop(mode, el);
     });
   }
 }
@@ -3819,8 +3950,9 @@ function spFmtSend(send, items) {
 // 手动收取已结束的探险。两套玩法的收获接口**不是同一个**：
 //   大地图 → act=4（无进行中时返回 -5）
 //   荒岛   → act=15（无参数；实测会把 hy_explore_ts 归零并真实入包）
-async function spHarvest(mode) {
+async function spHarvest(mode, el) {
   mode = mode || spMode;
+  const restore = el ? busyBtn(el, "收中…") : null;
   const isIsland = (mode === "island");
   const url = isIsland ? "/api/spirite/island/harvest" : "/api/cat/harvest";
   const tag = isIsland ? "荒岛" : "";
@@ -3838,18 +3970,20 @@ async function spHarvest(mode) {
       spSay(msg, (d.code === -5 || d.code === -2) ? "warn" : "err");
       log("灵宠" + msg, (d.code === -5 || d.code === -2) ? "warn" : "err");
     }
-    spTick();   // 收获后刷新灵宠资源（碎片/银锭/百变丹/金钥匙/藏宝图）
+    spTick();
   } catch (e) { spSay("收获异常：" + e, "err"); }
+  finally { if (restore) restore(); }
 }
 
 // 穿越丛林「单次历练」：act=11，**即时到账**（没有收获步骤）。
 // 参数由后端按 (1 级地图, 2 级地图) 换算成 id=1级-1、sub_id=2级-1（0-based，对应官方 open_c/open_s）。
-async function spOnce(mode) {
+async function spOnce(mode, el) {
   mode = mode || spMode;
   if (mode !== "across") { spSay("单次历练只在「穿越丛林」玩法下可用", "warn"); return; }
   const seq = Number($("sp-pass").value || 0);
   const found = spAcrossBySeq(seq);
   if (!found) { spSay("请选择要历练的关卡", "warn"); return; }
+  const restore = el ? busyBtn(el, "历练中…") : null;
   try {
     const d = await (await fetch("/api/spirite/across/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -3864,35 +3998,26 @@ async function spOnce(mode) {
     }
     spTick();
   } catch (e) { spSay("历练异常：" + e, "err"); }
+  finally { if (restore) restore(); }
 }
 
-async function spRefresh() {
+async function spRefresh(el) {
+  const restore = el ? busyBtn(el, "刷新中…") : null;
   try {
     const d = await (await fetch("/api/cat/travel")).json();
     if (!d.ok) { spSay("查询失败：" + (d.message || d.code), "err"); return; }
-    // 先存进度缓存，再渲染 —— 下拉的「未解锁」标注与默认定位都要用它
     if (d.recent) spRecent = d.recent;
     spRenderState(d);
-    // 名字表还没拿到（首次进入或接口慢）就先补一次，保证下拉与灵宠名都有
     if (!spMapIds.length || !Object.keys(spSpirits).length) await spLoadTable();
-    // 默认定位到「能去的最新关」：map = act=1 的 (pass_id, section_id)；
-    // across/island = 后端按官方 open_c/open_s + 灵宠等级推导（不再存任何本地进度值）。
-    // 用户手动改过就不覆盖。
     if (!spPicked[spMode]) spApplyDefault();
-
     spRenderSpirites(d.spirites);
     spSay("状态：免费 " + d.free_explore_cnt + " 次 / 灵力 " + d.power
       + " / 灵宠 " + (d.spirites || []).length + " 只", "info");
   } catch (e) { spSay("查询异常：" + e, "err"); }
+  finally { if (restore) restore(); }
 }
 
-async function spStart(mode) {
-  // 三套玩法共用同一个自动引擎，由 mode 分派（后端 spirite_auto._loop）：
-  //   map    act=3 出发 / act=4 收获（≥5 分钟）
-  //   island act=14 出发（id=连续编号 1..48）/ act=15 收获（3 分钟）
-  //   across act=11 即时历练（无收获；id=1 级地图-1、sub_id=2 级地图-1）
-  // ⚠️ 三套玩法的关卡编号语义不同（map=章内 section_id、island/across=连续 seq），
-  //    所以这里按模式取不同的下拉值，绝不能混用。
+async function spStart(mode, el) {
   mode = mode || spMode;
   spSetMode(mode);   // 同步切下拉到该玩法，下方按 spMode 读下拉构造 body
   const checked = [...document.querySelectorAll(".sp-sp:checked")].map((c) => Number(c.value));
@@ -3925,6 +4050,7 @@ async function spStart(mode) {
   }
   if (checked.length) where += ` 灵宠${checked.join(",")}`;
   else where += " 灵宠自动轮换";
+  const restore = el ? busyBtn(el, "启动中…") : null;
   try {
     const d = await (await fetch("/api/spirite/auto/start", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -3938,10 +4064,12 @@ async function spStart(mode) {
     spTimer = setInterval(spPoll, 3000);
     spPoll();
   } catch (e) { spSay("启动异常：" + e, "err"); }
+  finally { if (restore) restore(); }
 }
 
-async function spStop(mode) {
+async function spStop(mode, el) {
   mode = mode || spMode;
+  const restore = el ? busyBtn(el, "停止中…") : null;
   try {
     const d = await (await fetch("/api/spirite/auto/stop", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -3950,6 +4078,7 @@ async function spStop(mode) {
     spSay(d.message || "已停止", d.ok ? "warn" : "info");
     if (d.ok) log("停止灵宠自动探险（" + (SP_MODE_LABELS[spMode] ? SP_MODE_LABELS[spMode][0] : spMode) + "）", "warn");
   } catch (e) { spSay("停止异常：" + e, "err"); }
+  finally { if (restore) restore(); }
 }
 
 async function spPoll() {

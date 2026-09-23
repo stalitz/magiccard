@@ -378,33 +378,42 @@
   .bg-i.unk{cursor:pointer;background:#fff7e6;border-color:#f0b429}
   .bg-i.unk:hover{background:#ffeccc}
 
-  /* 卡箱页 */
+  /* 卡箱页 · 手动变卡（弹出框） */
   .cb-change-form{margin-top:10px;border:1px solid var(--line);border-radius:10px;
     background:#fafcff;padding:10px 12px;display:flex;flex-direction:column;gap:9px}
   .cb-change-form .cbcf-title{font-size:13px;font-weight:600;color:var(--text)}
-  .cb-change-form .cbcf-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .cb-change-form .cbcf-k{font-size:12.5px;font-weight:600;color:var(--text);min-width:48px}
-  .cb-change-form .cbcf-note{font-size:11.5px;color:var(--muted)}
-  .cb-change-form .cbcf-radio{font-size:12.5px;color:var(--text);display:flex;align-items:center;gap:4px}
-  .cb-change-form .cbcf-sel{font-size:12.5px;color:var(--qq-blue-d);font-weight:600}
-  .cb-change-form .cb-3lv{display:grid;grid-template-columns:0.9fr 1.15fr 1.25fr;gap:8px;align-items:start}
-  .cb-change-form .cb-3h{font-size:12px;font-weight:600;color:var(--muted);padding:2px 2px 4px}
-  .cb-change-form .cb-pick{border:1px solid var(--line);border-radius:8px;background:#fff;
+  .cbcf-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .cbcf-k{font-size:12.5px;font-weight:600;color:var(--text);min-width:48px}
+  .cbcf-note{font-size:11.5px;color:var(--muted)}
+  .cbcf-radio{font-size:12.5px;color:var(--text);display:flex;align-items:center;gap:4px}
+  .cbcf-sel{font-size:12.5px;color:var(--qq-blue-d);font-weight:600}
+  .cb-3lv{display:grid;grid-template-columns:0.9fr 1.15fr 1.25fr;gap:8px;align-items:start}
+  .cb-3col{display:flex;flex-direction:column;min-width:0}
+  .cb-3h{font-size:12px;font-weight:600;color:var(--muted);padding:2px 2px 4px}
+  .cb-pick{border:1px solid var(--line);border-radius:8px;background:#fff;
     max-height:186px;min-height:44px;overflow-y:auto;padding:4px}
-  .cb-change-form .cb-pick.cb-pick-tall{max-height:230px}
-  .cb-change-form .pk-bdg{flex:0 0 auto;font-size:10.5px;color:#0a7d43;background:#e3f6ec;
+  .cb-pick.cb-pick-tall{max-height:230px}
+  .pk-bdg{flex:0 0 auto;font-size:10.5px;color:#0a7d43;background:#e3f6ec;
     border-radius:8px;padding:0 6px;line-height:16px}
-  .cb-change-form .cb-pick .pk-sec{position:sticky;top:-4px;z-index:1;background:#fff;
+  .cb-pick .pk-sec{position:sticky;top:-4px;z-index:1;background:#fff;
     font-size:11.5px;font-weight:600;color:var(--muted);padding:5px 8px 3px}
-  .cb-change-form .cb-pick .pk{display:flex;align-items:center;gap:8px;padding:4px 8px;
+  .cb-pick .pk{display:flex;align-items:center;gap:8px;padding:4px 8px;
     border-radius:6px;font-size:12.5px;color:var(--text);cursor:pointer;line-height:1.5}
-  .cb-change-form .cb-pick .pk:hover{background:var(--chip-bg)}
-  .cb-change-form .cb-pick .pk.sel{background:#e6f4ff;box-shadow:inset 0 0 0 1px var(--qq-blue)}
-  .cb-change-form .cb-pick .pk .pk-n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .cb-change-form .cb-pick .pk .pk-t{flex:0 0 auto;max-width:120px;overflow:hidden;
+  .cb-pick .pk:hover{background:var(--chip-bg)}
+  .cb-pick .pk.sel{background:#e6f4ff;box-shadow:inset 0 0 0 1px var(--qq-blue)}
+  .cb-pick .pk .pk-n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cb-pick .pk .pk-t{flex:0 0 auto;max-width:120px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted)}
-  .cb-change-form .cb-pick .pk .pk-f{flex:0 0 auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-  .cb-change-form .cb-pick .pk-empty{font-size:12px;color:var(--muted);padding:8px}
+  .cb-pick .pk .pk-f{flex:0 0 auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .cb-pick .pk-empty{font-size:12px;color:var(--muted);padding:8px}
+  /* 弹出框：一行选择（目标卡 + 消耗卡 + 变卡） */
+  .cb-row1{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .cb-pickbtn{border:1px solid var(--qq-blue);background:#fff;color:var(--qq-blue-d);
+    border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600;cursor:pointer}
+  .cb-pickbtn:disabled{opacity:.5;cursor:not-allowed;border-color:var(--line);color:var(--muted)}
+  .cb-pickbtn.sel{background:#e6f4ff}
+  .cb-panel{margin-top:10px}
+  .cb-panel.hidden{display:none}
   .relic-box{margin-top:10px;border:1px dashed var(--line);border-radius:10px;background:#fffdf6;
     padding:10px 12px;display:flex;flex-direction:column;gap:9px}
   .relic-box .rb-head{font-size:13px;font-weight:600;color:var(--text)}
@@ -952,34 +961,9 @@
             <button id="cb-refresh" class="btn sm">刷新卡箱</button>
             <span id="cb-hint" class="muted" style="font-size:12px"></span>
           </div>
-          <!-- 手动变卡（魔变）：目标卡三级下钻（①星 → ②套卡 → ③卡，卡按面额排）；材料卡=卡箱卡(按套卡·面额) + 道具卡 -->
-          <div class="cb-change-form">
-            <div class="cbcf-title">手动变卡（魔变）</div>
-            <div class="cb-3lv">
-              <div class="cb-3col">
-                <div class="cb-3h">① 星</div>
-                <div id="cb-star" class="cb-pick"><div class="pk-empty">读取中…</div></div>
-              </div>
-              <div class="cb-3col">
-                <div class="cb-3h">② 套卡 <span class="muted" style="font-weight:400">（✓=已有）</span></div>
-                <div id="cb-theme-list" class="cb-pick"><div class="pk-empty">先选星…</div></div>
-              </div>
-              <div class="cb-3col">
-                <div class="cb-3h">③ 目标卡 <span id="cb-target-sel" class="cbcf-sel"></span></div>
-                <div id="cb-target-list" class="cb-pick"><div class="pk-empty">先选套卡…</div></div>
-              </div>
-            </div>
-            <div class="cbcf-row">
-              <span class="cbcf-k">材料卡</span>
-              <span class="cbcf-note">卡箱卡按「套卡 · 面额」列出；道具卡（100/200/600 面值）另列一段。面额须 ≥ 目标</span>
-            </div>
-            <div id="cb-mat-list" class="cb-pick cb-pick-tall"><div class="pk-empty">先选目标卡…</div></div>
-            <div class="cbcf-row">
-              <button id="cb-change-go" class="btn sm primary">变卡</button>
-              <span id="cb-change-preview" class="muted" style="font-size:12.5px"></span>
-              <span id="cb-change-hint" class="muted" style="font-size:12px"></span>
-            </div>
-          </div>
+          <!-- 手动变卡（魔变）：改为弹出框，不占卡箱位置；弹窗内一行选择（目标卡 + 消耗卡 + 变卡） -->
+          <button id="cb-change-open" class="btn sm primary">🪄 魔变（手动变卡）</button>
+          <span id="cb-change-hint2" class="muted" style="font-size:12px">点「魔变」在弹出框里选 目标卡 + 消耗卡</span>
           <div class="cb-box">
             <div class="cb-head">换卡箱 <span id="cb-change-cap" class="cb-cap"></span></div>
             <div id="cb-change" class="cb-scroll"></div>
@@ -1230,7 +1214,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260922e"></script>
+<script src="/app.js?v=20260923b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
@@ -1242,6 +1226,52 @@
       <button class="btn sm ghost" onclick="closeSynth()">关闭</button>
     </div>
     <div id="synth-body" class="modal-body"></div>
+  </div>
+</div>
+
+<div id="change-modal" class="modal hidden">
+  <div class="modal-mask" onclick="closeChange()"></div>
+  <div class="modal-box" style="width:min(860px,95vw)">
+    <div class="modal-head">
+      <span>🪄 手动变卡（魔变）</span>
+      <span class="spacer"></span>
+      <button class="btn sm ghost" onclick="closeChange()">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div class="cb-row1">
+        <button id="cb-target-pick" class="cb-pickbtn">① 选目标卡</button>
+        <button id="cb-mat-pick" class="cb-pickbtn" disabled>② 选消耗卡</button>
+        <button id="cb-change-go2" class="btn sm primary" disabled>变卡</button>
+        <span id="cb-change-preview" class="muted" style="font-size:12.5px;margin-left:6px"></span>
+      </div>
+      <div id="cb-change-hint" class="muted" style="font-size:12px;margin:6px 0 2px"></div>
+      <div id="cb-target-panel" class="cb-panel">
+        <div class="cb-3lv">
+          <div class="cb-3col">
+            <div class="cb-3h">① 星</div>
+            <div id="cb-star" class="cb-pick"><div class="pk-empty">读取中…</div></div>
+          </div>
+          <div class="cb-3col">
+            <div class="cb-3h">② 套卡 <span class="muted" style="font-weight:400">（✓=已有）</span></div>
+            <div id="cb-theme-list" class="cb-pick"><div class="pk-empty">先选星…</div></div>
+          </div>
+          <div class="cb-3col">
+            <div class="cb-3h">③ 目标卡 <span id="cb-target-sel" class="cbcf-sel"></span></div>
+            <div id="cb-target-list" class="cb-pick"><div class="pk-empty">先选套卡…</div></div>
+          </div>
+        </div>
+      </div>
+      <div id="cb-mat-panel" class="cb-panel hidden">
+        <div class="cbcf-row">
+          <span class="cbcf-k">材料卡</span>
+          <span class="cbcf-note">卡箱卡按「套卡 · 面额」列出；道具卡（100/200/600 面值）另列一段。面额须 ≥ 目标</span>
+        </div>
+        <div id="cb-mat-list" class="cb-pick cb-pick-tall"><div class="pk-empty">先选目标卡…</div></div>
+        <div class="cbcf-row" style="margin-top:8px">
+          <button id="cb-change-go" class="btn sm primary">变卡</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 </body>
