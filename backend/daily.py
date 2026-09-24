@@ -40,31 +40,40 @@ async def _daily_gift(session) -> dict:
 async def _daily_send_gift(session) -> dict:
     """每日送礼：freegift_send 送 48 面卡（freegift_id=81）给好友。
 
-    2026-09-20 songli.har 实证：端点 freegift/freegift_send 在 card.qzone.qq.com，
-    参数 freegift_id=81 = 送 48 面卡；friends 为 `;` 分隔的 uin 列表。
-    2026-09-21 用户补充：**每次调用最多 5 个好友**（gift_send 按 5 人拆批），
-    每天似乎没有总量上限、能把全部好友送完；但好友里僵尸号很多，
-    所以默认只送**前 30 人**（gift.SEND_LIMIT，传 limit=0 可全送）。
+    2026-09-24 用户从游戏界面确认：**每天只能送 50 次**（gift.DAILY_CAP）。
+    按「当日剩余额度」从 freegift 好友池（今天还没送的人）取前 N 人，按 card_user_list 的
+    exp 从高到低排序（活跃高等级优先）；送完更新本地日计数。额度用尽或列表空如实回报。
     """
-    r = await _gift.gift_send(session, friends=None, freegift_id=_gift.FREEGIFT_ID_48)
+    remaining = _gift.gift_daily_remaining()
+    if remaining <= 0:
+        return {"ok": False, "code": -2,
+                "text": f"今日送礼额度已用完（{_gift.DAILY_CAP}/{_gift.DAILY_CAP}），明天再送",
+                "quota_done": True, "sent_list": []}
+    r = await _gift.gift_send(session, friends=None, freegift_id=_gift.FREEGIFT_ID_48,
+                              limit=remaining, sort_by_level=True)
     sent = r.get("sent", 0)
     failed = r.get("failed", 0)
     sent_list = r.get("sent_list") or []
     if sent > 0:
-        tot = r.get("friends_total")
+        d = _gift._load_daily()
+        d["sent"] = d.get("sent", 0) + sent
+        _gift._save_daily(d)
+        left = _gift.gift_daily_remaining()
         return {"ok": True, "code": 0,
-                "text": f"送礼 48面卡 成功 {sent} 人（按等级从高到低，好友共 {tot} 人）"
+                "text": f"送礼 48面卡 成功 {sent} 人（按等级从高到低，今日 "
+                        f"{_gift.DAILY_CAP - left}/{_gift.DAILY_CAP}）"
                         + (f"，{failed} 人失败" if failed else ""),
                 "sent_list": sent_list}
     return {"ok": False, "code": r.get("code", -1),
-            "text": r.get("message") or "送礼失败（好友列表空或接口拒绝）",
+            "text": (r.get("message") or "今日免费礼物列表为空")
+                    + "（游戏内可能已达 50 次上限，或好友都已送过）",
             "sent_list": []}
 
 
 # (key, 中文名, 执行函数) —— 加项必须先在上面写明实证依据
 ACTIONS = [
     ("gift", "每日登陆礼包", _daily_gift),
-    ("sendgift", "每日送礼（48卡，按等级前30位好友）", _daily_send_gift),
+    ("sendgift", "每日送礼（48卡，按等级送，每日上限50）", _daily_send_gift),
 ]
 
 

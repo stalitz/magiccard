@@ -27,7 +27,9 @@
 """
 import asyncio
 import html
+import json
 import logging
+import os
 import re
 import time
 from typing import Optional
@@ -46,7 +48,11 @@ FREEGIFT_ID_48 = 81
 GIFT_BOX_CAP = 50
 # 送礼：**每次调用最多 5 个好友**（用户口述 + 实测），所以按 5 人拆批。
 SEND_BATCH = 5
-# 送礼默认只送前 30 人（好友里僵尸号多，全送没意义；用户 2026-09-21 指定 30）。
+# 每日送礼硬上限（用户 2026-09-24 从游戏界面确认：每天只能送 50 次）。
+# 本地计数器跟踪本工具今天已送人数，跨多次点击/重启不超 50；游戏内手动送的不计入，
+# 但 freegift_get_frds 在额度用尽后返回空列表，工具会如实报「无可送」。
+DAILY_CAP = 50
+# 单次送礼默认人数上限（每日送礼按当日剩余额度覆盖此值）。
 SEND_LIMIT = 30
 # 变卡默认目标（HAR 实证：srcid=7773 → dstid=26117 涡旋仪，40 面卡）。
 # 用户可在 UI 改成自己正在炼的套卡对应的 40 面卡 id。
@@ -61,6 +67,35 @@ GIFT_ITEM_THEME = 487      # 48 面礼物卡所在套卡主题（仅作说明/�
 # qzreferrer 固定串（HAR 里 freegift_send/take 都带，照原样回传避免被服务端当成异常来源）。
 _QZ_REFERRER = "https://appimg2.qq.com/card/index.htm?appid=365&page=receive"
 
+# 每日送礼额度本地计数器（与游戏内 50 次/天上限对账；游戏内手动送的不计入本计数，
+# 但 freegift_get_frds 在额度用尽后返回空列表，工具会如实报「无可送」）。
+_DAILY_PATH = os.path.join("/tmp", "mc_gift_daily.json")
+
+
+def _load_daily() -> dict:
+    today = time.strftime("%Y-%m-%d")
+    try:
+        with open(_DAILY_PATH) as f:
+            d = json.load(f)
+        if d.get("date") != today:
+            return {"date": today, "sent": 0}
+        return d
+    except Exception:
+        return {"date": today, "sent": 0}
+
+
+def _save_daily(d: dict) -> None:
+    try:
+        with open(_DAILY_PATH, "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def gift_daily_remaining() -> int:
+    """返回今天还能通过本工具送的人数（DAILY_CAP - 今天已送）。"""
+    return max(0, DAILY_CAP - _load_daily().get("sent", 0))
+
 # 变卡成功判定：code=0 且原始响应带 result="1"（见 HAR 两次成功样本）。
 # 50% 失败时服务端多半返回 code!=0 或其他 result 值 —— 一律当失败，记录后继续。
 
@@ -73,8 +108,14 @@ async def gift_friends(session: LoginSession) -> dict:
     """
     r = await session.qzone("get", EP_FREEGIFT_FRDS)
     d = r.get("data") or {}
-    friends = [str(f.get("uin")) for f in (d.get("friends") or []) if f.get("uin")]
+    friends = [str(f.get("uin")) for f in (d.get("friends") or []) if isinstance(f, dict) and f.get("uin")]
     def_friends = [str(x) for x in (d.get("def_friends") or []) if x]
+    if not friends:
+        # 兜底：扫描 data 里任何「元素为带 uin 的 dict」的列表（接口字段名偶尔变动）
+        for v in d.values():
+            if isinstance(v, list) and v and all(isinstance(x, dict) and x.get("uin") for x in v):
+                friends = [str(x.get("uin")) for x in v if x.get("uin")]
+                break
     return {"ok": r.get("code") == 0, "code": r.get("code"),
             "friends": friends, "def_friends": def_friends,
             "total": len(friends)}
@@ -124,8 +165,8 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
     """送 48 面卡（freegift_id=81）给好友。会真实发出，谨慎调用。
 
     ⚠️ 实测服务端**每次调用最多接受 5 个好友**（>5 人一起发不生效），所以按 5 人一批拆。
-    每天似乎没有总量上限，理论上能把全部好友送完；但好友里僵尸号很多，默认只送前 30 人
-    （`limit`，可传 0 表示不限、全送）。
+    每天上限 50 次（DAILY_CAP，用户 2026-09-24 从游戏界面确认）；每日送礼按当日剩余额度取人，
+    （`limit` 在每日送礼场景下被「当日剩余额度」覆盖）。
     friends 留空（自动模式）→ 送礼对象按 **card_user_list 的 exp 从高到低** 取前 limit 人
     （排除自己；不在玩家列表里的好友 exp 记 0，自然排到最后）。sort_by_level=False 则退回
     原始 QQ 好友列表顺序取前 limit 人。
