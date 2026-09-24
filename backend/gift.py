@@ -26,14 +26,16 @@
 礼物箱上限 50 是服务端行为（超出自动丢 time 最老的），本模块只读 + 取，不试图在本地维持容量。
 """
 import asyncio
+import html
 import logging
+import re
 import time
 from typing import Optional
 
 from .mc_api import LoginSession
 from .constants import (
     EP_FREEGIFT_SEND, EP_FREEGIFT_LIST, EP_FREEGIFT_TAKE, EP_FREEGIFT_FRDS,
-    EP_TRANSFER, EP_MAINPAGE,
+    EP_TRANSFER, EP_MAINPAGE, EP_USER_LIST,
 )
 
 logger = logging.getLogger("mc.gift")
@@ -78,25 +80,73 @@ async def gift_friends(session: LoginSession) -> dict:
             "total": len(friends)}
 
 
+async def _player_index(session: LoginSession) -> dict:
+    """拉 card_user_list（玩家列表，含 uin/nick/exp），解析成 uin -> {nick, exp}。只读。"""
+    try:
+        r = await session.post(EP_USER_LIST)
+    except Exception:
+        return {}
+    raw = r.get("raw", "")
+    out = {}
+    for m in re.finditer(r'<user\s+uin="(\d+)"\s+nick="([^"]*)"([^>]*)>', raw):
+        exp = re.search(r'exp="(\d+)"', m.group(3) or "")
+        out[m.group(1)] = {
+            "nick": html.unescape(m.group(2)),
+            "exp": int(exp.group(1)) if exp else 0,
+        }
+    return out
+
+
+async def _level_sorted_gift_friends(session: LoginSession, limit: int):
+    """送礼自动模式：取 freegift 好友池，按 card_user_list 的 exp 从高到低排序，排除自己，取前 limit。
+
+    非玩家好友（不在 card_user_list）exp 记 0，自然排到最后；玩家按等级优先。
+    返回 (ranked_list[{uin,nick,exp}], pool_total)。
+    """
+    fr = await gift_friends(session)
+    pool = fr.get("friends") or []
+    pool_total = fr.get("total", 0)
+    players = await _player_index(session)
+    self_uin = str(session.uin or "")
+    rows = []
+    for uin in pool:
+        if uin == self_uin:
+            continue
+        p = players.get(uin, {})
+        rows.append({"uin": uin, "nick": p.get("nick", ""), "exp": p.get("exp", 0)})
+    rows.sort(key=lambda x: x["exp"], reverse=True)
+    return rows[:limit], pool_total
+
+
 async def gift_send(session: LoginSession, friends: Optional[list] = None,
-                    freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT) -> dict:
+                    freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT,
+                    sort_by_level: bool = True) -> dict:
     """送 48 面卡（freegift_id=81）给好友。会真实发出，谨慎调用。
 
     ⚠️ 实测服务端**每次调用最多接受 5 个好友**（>5 人一起发不生效），所以按 5 人一批拆。
     每天似乎没有总量上限，理论上能把全部好友送完；但好友里僵尸号很多，默认只送前 30 人
     （`limit`，可传 0 表示不限、全送）。
-    friends 留空 → 自动拉好友列表。
+    friends 留空（自动模式）→ 送礼对象按 **card_user_list 的 exp 从高到低** 取前 limit 人
+    （排除自己；不在玩家列表里的好友 exp 记 0，自然排到最后）。sort_by_level=False 则退回
+    原始 QQ 好友列表顺序取前 limit 人。
+    返回 sent_list：[{uin, nick, exp}]，供上层打日志显示「送给谁」。
     """
-    if not friends:
-        fr = await gift_friends(session)
-        if not fr.get("friends"):
-            return {"ok": False, "code": -1, "message": "没有可送的好友",
-                    "batches": [], "sent": 0, "failed": 0}
-        friends = fr["friends"]
+    meta: dict = {}
+    pool_total = 0
+    if friends is None:
+        if sort_by_level:
+            ranked, pool_total = await _level_sorted_gift_friends(session, limit)
+            friends = [x["uin"] for x in ranked]
+            meta = {x["uin"]: {"nick": x.get("nick", ""), "exp": x.get("exp", 0)} for x in ranked}
+        else:
+            fr = await gift_friends(session)
+            friends = fr["friends"]
+            pool_total = fr.get("total", 0)
     friends = [str(u).strip() for u in friends if str(u).strip().isdigit()]
     if not friends:
-        return {"ok": False, "code": -1, "message": "好友列表为空",
-                "batches": [], "sent": 0, "failed": 0}
+        return {"ok": False, "code": -1, "message": "没有可送的好友",
+                "batches": [], "sent": 0, "failed": 0, "friends_total": pool_total,
+                "sent_list": []}
     total_friends = len(friends)
     if limit and limit > 0:
         friends = friends[:limit]
@@ -105,6 +155,7 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
     results = []
     sent = 0
     failed = 0
+    sent_list = []
     for bt in batches:
         payload = {
             "friends": ";".join(bt),
@@ -118,6 +169,9 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
         ok = r.get("code") == 0
         if ok:
             sent += len(bt)
+            for u in bt:
+                m = meta.get(u, {})
+                sent_list.append({"uin": u, "nick": m.get("nick", ""), "exp": m.get("exp", 0)})
         else:
             failed += len(bt)
         results.append({"uins": bt, "ok": ok,
@@ -126,8 +180,9 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
         # 批间稍歇，避免触发限流
         await asyncio.sleep(0.4)
     return {"ok": failed == 0, "batches": results, "sent": sent, "failed": failed,
-            "friends_total": total_friends,
-            "message": f"已送 {sent} 人（好友共 {total_friends} 人），失败 {failed} 人"}
+            "friends_total": pool_total or total_friends,
+            "sent_list": sent_list,
+            "message": f"已送 {sent} 人（好友共 {pool_total or total_friends} 人），失败 {failed} 人"}
 
 
 async def gift_inbox(session: LoginSession) -> dict:

@@ -49,19 +49,22 @@ async def _daily_send_gift(session) -> dict:
     r = await _gift.gift_send(session, friends=None, freegift_id=_gift.FREEGIFT_ID_48)
     sent = r.get("sent", 0)
     failed = r.get("failed", 0)
+    sent_list = r.get("sent_list") or []
     if sent > 0:
         tot = r.get("friends_total")
         return {"ok": True, "code": 0,
-                "text": f"送礼成功 {sent} 人" + (f"（好友共 {tot} 人）" if tot else "")
-                        + (f"，{failed} 人失败" if failed else "")}
+                "text": f"送礼 48面卡 成功 {sent} 人（按等级从高到低，好友共 {tot} 人）"
+                        + (f"，{failed} 人失败" if failed else ""),
+                "sent_list": sent_list}
     return {"ok": False, "code": r.get("code", -1),
-            "text": r.get("message") or "送礼失败（好友列表空或接口拒绝）"}
+            "text": r.get("message") or "送礼失败（好友列表空或接口拒绝）",
+            "sent_list": []}
 
 
 # (key, 中文名, 执行函数) —— 加项必须先在上面写明实证依据
 ACTIONS = [
     ("gift", "每日登陆礼包", _daily_gift),
-    ("sendgift", "每日送礼（48卡，送前30位好友）", _daily_send_gift),
+    ("sendgift", "每日送礼（48卡，按等级前30位好友）", _daily_send_gift),
 ]
 
 
