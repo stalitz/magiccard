@@ -3317,6 +3317,11 @@ async function dailyRun() {
     let got = false;
     for (const it of d.items) {
       log(`一键日常 · ${it.name}：${it.text}`, it.ok ? "ok" : "err");
+      if (it.ok && it.code === 0 && it.sent_list && it.sent_list.length) {
+        for (const x of it.sent_list) {
+          log(`  · 48面卡 → ${x.uin}${x.nick ? "（" + x.nick + "）" : ""}${x.exp ? " [exp " + x.exp + "]" : ""}`, "info");
+        }
+      }
       if (it.ok && it.code === 0) got = true;
     }
     if (last) last.textContent = d.items.map(i => `${i.name}：${i.text}`).join("；");
