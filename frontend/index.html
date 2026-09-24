@@ -418,11 +418,11 @@
   .cb-change-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 4px}
   .cb-dd{position:relative;display:inline-block}
   .cb-dd-btn{border:1px solid var(--line);background:#fff;color:var(--text);
-    border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
+    border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap;max-width:none}
   .cb-dd-btn:disabled{opacity:.5;cursor:not-allowed}
   .cb-dd-btn.dd-open{border-color:var(--qq-blue);background:#e6f4ff}
   .cb-dd-list{position:absolute;top:calc(100% + 4px);left:0;z-index:60;
-    min-width:220px;max-width:340px;max-height:300px;overflow-y:auto;
+    width:max-content;min-width:150px;max-width:calc(100vw - 28px);max-height:300px;overflow-y:auto;
     border:1px solid var(--line);border-radius:8px;background:#fff;
     box-shadow:0 6px 18px rgba(0,0,0,.12);padding:4px}
   .cb-dd-list.hidden{display:none}
@@ -430,7 +430,7 @@
     border-radius:6px;font-size:12.5px;color:var(--text);cursor:pointer;line-height:1.5}
   .cb-dd-list .pk:hover{background:var(--chip-bg)}
   .cb-dd-list .pk.sel{background:#e6f4ff;box-shadow:inset 0 0 0 1px var(--qq-blue)}
-  .cb-dd-list .pk .pk-n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cb-dd-list .pk .pk-n{flex:1 1 auto;min-width:0;white-space:nowrap}
   .cb-dd-list .pk .pk-t{flex:0 0 auto;max-width:120px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--muted)}
   .cb-dd-list .pk .pk-f{flex:0 0 auto;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -987,7 +987,11 @@
           <!-- 手动变卡（魔变）：一行内联浮动下拉（套卡 / 目标卡 / 材料卡）；每个下拉单独弹出、浮在卡箱上方不撑高 -->
           <div id="cb-change-bar" class="cb-change-bar">
             <span class="cb-dd">
-              <button id="cb-dd-theme-btn" class="cb-dd-btn" type="button">选择套卡 ▾</button>
+              <button id="cb-dd-star-btn" class="cb-dd-btn" type="button">选择星级 ▾</button>
+              <div id="cb-dd-star-list" class="cb-dd-list hidden"></div>
+            </span>
+            <span class="cb-dd">
+              <button id="cb-dd-theme-btn" class="cb-dd-btn" type="button" disabled>选择套卡 ▾</button>
               <div id="cb-dd-theme-list" class="cb-dd-list hidden"></div>
             </span>
             <span class="cb-dd">
@@ -1253,7 +1257,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260923c"></script>
+<script src="/app.js?v=20260924a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

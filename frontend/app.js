@@ -2983,11 +2983,12 @@ async function initChangeForm() {
   if (cbChangeReady) return;
   cbChangeReady = true;
   const hint = $("cb-change-hint");
+  const starBtn = $("cb-dd-star-btn"), starList = $("cb-dd-star-list");
   const themeBtn = $("cb-dd-theme-btn"), themeList = $("cb-dd-theme-list");
   const tgtBtn = $("cb-dd-target-btn"), tgtList = $("cb-dd-target-list");
   const matBtn = $("cb-dd-mat-btn"), matList = $("cb-dd-mat-list");
   const goBtn = $("cb-change-go2");
-  let selTheme = null, selTarget = null, selMat = null;   // 套卡 / 目标卡 / 材料卡
+  let selStar = 0, selTheme = null, selTarget = null, selMat = null;   // 星级 / 套卡 / 目标卡 / 材料卡
   await propMaterials();   // 预热道具卡缓存：否则首次选目标卡时材料列表要等请求、短暂空白
 
   // 可变套卡（transferable=1，套卡级属性）
@@ -2996,8 +2997,10 @@ async function initChangeForm() {
     const d = await (await fetch("/api/cards/themes?transferable=1&limit=2000")).json();
     themes = d.themes || [];
   } catch (e) { themes = []; }
+  // 星级档位（可变套卡按 star 分布，如 ★★★ → 3 套）
+  const starSet = [...new Set(themes.map((t) => t.star))].filter((s) => s > 0).sort((a, b) => a - b);
 
-  const allBtns = [themeBtn, tgtBtn, matBtn], allLists = [themeList, tgtList, matList];
+  const allBtns = [starBtn, themeBtn, tgtBtn, matBtn], allLists = [starList, themeList, tgtList, matList];
   function closeAllDD() {
     allLists.forEach((l) => { if (l) l.classList.add("hidden"); });
     allBtns.forEach((b) => { if (b) b.classList.remove("dd-open"); });
@@ -3012,21 +3015,41 @@ async function initChangeForm() {
     if (!e.target || !e.target.closest || !e.target.closest(".cb-dd")) closeAllDD();
   });
 
-  // ① 套卡下拉：全部可变套卡，按 星↓ 已有↓ 名 排序
+  // ⓪ 星级下拉：可变套卡按星级分档（★★★ → 3 套）
+  function renderStarDD() {
+    if (!starList) return;
+    starList.innerHTML = starSet.length
+      ? starSet.map((s) =>
+          `<div class="pk${selStar === s ? " sel" : ""}" data-star="${s}">` +
+          `<span class="pk-n">${"★".repeat(s)}</span>` +
+          `<span class="pk-f">${themes.filter((t) => t.star === s).length} 套</span></div>`).join("")
+      : `<div class="pk-empty">没有可变套卡</div>`;
+    starList.querySelectorAll("[data-star]").forEach((el) => {
+      el.onclick = () => {
+        selStar = Number(el.dataset.star);
+        selTheme = null; selTarget = null; selMat = null;
+        if (themeBtn) themeBtn.disabled = !selStar;   // 选了星级才可开套卡下拉
+        if (tgtBtn) tgtBtn.disabled = true;
+        if (matBtn) matBtn.disabled = true;
+        renderStarDD(); renderThemeDD(); renderTargetDD(); renderMatDD(); updatePreview(); closeAllDD();
+      };
+    });
+  }
+
+  // ① 套卡下拉：所选星级下的可变套卡，按 已有↓ 名 排序
   function renderThemeDD() {
     if (!themeList) return;
-    const list = themes.slice().sort((a, b) =>
-      (b.star || 0) - (a.star || 0) || (b.have || 0) - (a.have || 0)
-      || (a.name || "").localeCompare(b.name || "", "zh"));
+    if (!selStar) { themeList.innerHTML = `<div class="pk-empty">先选星级</div>`; return; }
+    const list = themes.filter((t) => t.star === selStar).slice().sort((a, b) =>
+      (b.have || 0) - (a.have || 0) || (a.name || "").localeCompare(b.name || "", "zh"));
     themeList.innerHTML = list.length
       ? list.map((t) => {
           const done = t.n && t.have >= t.n;
           const bdg = t.have > 0 ? `<span class="pk-bdg">${done ? "已集齐" : "✓ " + t.have + "/" + t.n}</span>` : "";
-          const star = "★".repeat(t.star || 0);
           return `<div class="pk${selTheme && selTheme.tid === t.tid ? " sel" : ""}" data-ttid="${t.tid}" title="${esc(t.name)}">` +
-            `<span class="pk-n">${star ? star + " " : ""}${esc(t.name)}</span>${bdg}<span class="pk-f">${t.n}张</span></div>`;
+            `<span class="pk-n">${esc(t.name)}</span>${bdg}<span class="pk-f">${t.n}张</span></div>`;
         }).join("")
-      : `<div class="pk-empty">没有可变套卡</div>`;
+      : `<div class="pk-empty">该星级无可变套卡</div>`;
     themeList.querySelectorAll("[data-ttid]").forEach((el) => {
       el.onclick = () => {
         selTheme = list.find((x) => x.tid === Number(el.dataset.ttid)) || null;
@@ -3133,12 +3156,14 @@ async function initChangeForm() {
   }
 
   function updatePreview() {
+    if (starBtn) starBtn.textContent = selStar ? `星级：${"★".repeat(selStar)} ▾` : "选择星级 ▾";
     if (themeBtn) themeBtn.textContent = selTheme ? `套卡：${selTheme.name} ▾` : "选择套卡 ▾";
     if (tgtBtn) tgtBtn.textContent = selTarget ? `目标：${selTarget.name} ▾` : "选择目标卡 ▾";
     if (matBtn) matBtn.textContent = selMat ? `材料：${selMat.name} ▾` : "选择材料卡 ▾";
     if (goBtn) goBtn.disabled = !(selTarget && selMat);
     if (hint) {
-      if (!selTheme) hint.textContent = "依次选：套卡 → 目标卡 → 材料卡，再点「变卡」";
+      if (!selStar) hint.textContent = "依次选：星级 → 套卡 → 目标卡 → 材料卡，再点「变卡」";
+      else if (!selTheme) hint.textContent = "再选套卡（该星级下的可变套卡）";
       else if (!selTarget) hint.textContent = "再选目标卡（该套卡里要变出的卡）";
       else if (!selMat) hint.textContent = "再选一张材料卡（面额须 ≥ 目标）";
       else hint.textContent = `将用「${selMat.name}」→ 变为「${selTarget.name}」`;
@@ -3177,11 +3202,12 @@ async function initChangeForm() {
   }
 
   if (goBtn) goBtn.onclick = submitChange;
-  if (themeBtn) themeBtn.onclick = (e) => { e.stopPropagation(); toggleDD(themeList, themeBtn); };
+  if (starBtn) starBtn.onclick = (e) => { e.stopPropagation(); toggleDD(starList, starBtn); };
+  if (themeBtn) themeBtn.onclick = (e) => { e.stopPropagation(); if (!themeBtn.disabled) toggleDD(themeList, themeBtn); };
   if (tgtBtn) tgtBtn.onclick = (e) => { e.stopPropagation(); if (!tgtBtn.disabled) toggleDD(tgtList, tgtBtn); };
   if (matBtn) matBtn.onclick = (e) => { e.stopPropagation(); if (!matBtn.disabled) toggleDD(matList, matBtn); };
 
-  renderThemeDD(); renderTargetDD(); renderMatDD(); updatePreview();
+  renderStarDD(); renderThemeDD(); renderTargetDD(); renderMatDD(); updatePreview();
 }
 
 // ---------- 合成路径弹窗（点卡箱任意卡 -> 显示所属套卡的合成路径 + 一键炼卡）----------
