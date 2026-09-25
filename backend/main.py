@@ -35,6 +35,7 @@ from . import daily
 from . import gift as gf
 from . import travel_elf_auto as te
 from . import dig_auto as dg
+from . import match as mt
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_XIYOU, EP_WORLD_SANGUO)
@@ -2133,6 +2134,51 @@ async def dig_auto_stop():
     if err := _require_login():
         return err
     return dg.stop_auto()
+
+
+# ---- 每日比赛只读看板（2026-09-25 bisai.har 实证）----
+# 数据源与 act 语义见 backend/match.py 顶部注释。**全部只读**，不构造任何写操作。
+
+
+@app.get("/api/match/state")
+async def match_state(want_equip: bool = False):
+    if err := _require_login():
+        return err
+    try:
+        return await mt.match_state(_session, want_equip=bool(want_equip))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/pvp")
+async def match_pvp(top: int = 50, rank_id: int = 0):
+    """PVP 日榜；top 控制返回条数（HAR 实测榜单本身有 1000 人）。"""
+    if err := _require_login():
+        return err
+    try:
+        return await mt.pvp_rank(_session, rank_id=int(rank_id), top=int(top))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/union")
+async def match_union():
+    if err := _require_login():
+        return err
+    try:
+        return await mt.union_info(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/gold")
+async def match_gold():
+    if err := _require_login():
+        return err
+    try:
+        return await mt.gold_buy(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
 
 
 class NoCacheStaticFiles(StaticFiles):

@@ -59,6 +59,12 @@ EP_MINI_GET     = "card_mini_get"                # 集卡册进度：<Node theme
 EP_WORLD_XIYOU  = "card_worldexplore"            # 西游大地图（8 张小地图＝套卡 1604..1611）
 EP_WORLD_SANGUO = "card_worldsanguo"             # 三国大地图（9 张小地图＝套卡 1745..1756）
 EP_TRAVEL_MATCH = "card_travel_elf_competition"  # 每日比赛（猫咪旅行·精灵比赛）
+# 2026-09-25 bisai.har 实证（每日比赛抓包）：
+#   card_travel_elf_pvp    act=14,rank_id=0  → PVP 日榜（1000 人，78KB）
+#   card_travel_elf_union  act=1 → 工会信息（41 字段）；act=22 → 远征关卡；
+#                                  act=14,uins=… → 批量查成员所属工会
+EP_TRAVEL_PVP = "card_travel_elf_pvp"
+EP_TRAVEL_UNION = "card_travel_elf_union"
 # ⚠️ 关卡参数名是**全小写** levelid（不是 levelId / level_id）—— 用 levelId 一律
 #    返 -40006「错误的关卡ID」，改 levelid=101 才通。
 EP_PROPS_INFO   = "card_market_props_info"       # 道具持有清单（2026-09-15 抓包发现）
