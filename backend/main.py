@@ -2270,6 +2270,138 @@ async def match_race(req: dict):
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.get("/api/match/comp-extra")
+async def match_comp_extra():
+    """每日比赛附加：英雄榜（act=9）+ 积分次数（act=16）。只读。"""
+    if err := _require_login():
+        return err
+    hero = await mt.comp_hero(_session)
+    score = await mt.comp_score(_session)
+    return {"ok": True, "hero": hero, "score": score}
+
+
+@app.get("/api/match/pvp-extra")
+async def match_pvp_extra():
+    """竞技场：主页（act=1，含对手 enemy_list）+ 商店（act=17）。只读。"""
+    if err := _require_login():
+        return err
+    st = await mt.pvp_state(_session)
+    store = await mt.pvp_store(_session)
+    return {"ok": True, "state": st, "store": store}
+
+
+@app.get("/api/match/union-extra")
+async def match_union_extra(level: int = 8):
+    """工会：任务（act=15）+ 贡献（act=16）+ 商店（act=30）+ 关卡对手（act=27）。只读。"""
+    if err := _require_login():
+        return err
+    return {"ok": True,
+            "task": await mt.union_task(_session),
+            "chip": await mt.union_chip(_session),
+            "shop": await mt.union_shop(_session),
+            "enemies": await mt.union_enemies(_session, level)}
+
+
+@app.get("/api/match/explore-extra")
+async def match_explore_extra():
+    """世界探索：队伍（act=11）+ 任务（act=15）+ 商店（act=26）+ 排行（act=28）。只读。"""
+    if err := _require_login():
+        return err
+    return {"ok": True,
+            "team": await mt.explore_team(_session),
+            "task": await mt.explore_task(_session),
+            "shop": await mt.explore_shop(_session),
+            "rank": await mt.explore_rank(_session)}
+
+
+@app.get("/api/match/sanguo-extra")
+async def match_sanguo_extra(levelid: int = 0):
+    """西游三国：任务（act=7）+ 关卡（act=9）+ 阵容（act=16）。只读。"""
+    if err := _require_login():
+        return err
+    return {"ok": True,
+            "task": await mt.sanguo_task(_session),
+            "levels": await mt.sanguo_list(_session),
+            "lineup": await mt.sanguo_lineup(_session, levelid) if levelid else None}
+
+
+@app.post("/api/match/claim-all")
+async def match_claim_all(req: dict | None = None):
+    """一键领奖：依次领各玩法的奖励（都是零消耗的领奖 act）。
+
+    覆盖 competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=8。
+    返回每一项的结果，失败的单独标出，不影响其他项。
+    """
+    if err := _require_login():
+        return err
+    req = req or {}
+    cids = req.get("comp_ids") or [1]
+    out = []
+    for cid in cids:
+        out.append({"k": f"比赛领奖 act=17 id={cid}", "r": await mt.comp_claim(_session, cid)})
+        out.append({"k": f"比赛领奖 act=21 id={cid}", "r": await mt.comp_claim2(_session, cid)})
+    for k, coro in (
+        ("竞技场领奖 act=15", mt.pvp_claim(_session, req.get("pvp_id", 1))),
+        ("工会领奖 act=17", mt.union_claim(_session)),
+        ("探索领奖 act=25", mt.explore_claim(_session, req.get("explore_id", 1))),
+        ("三国领奖 act=8", mt.sanguo_claim(_session, req.get("sanguo_id", 0))),
+    ):
+        out.append({"k": k, "r": await coro})
+    return {"ok": True, "items": out}
+
+
+@app.post("/api/match/pvp-fight")
+async def match_pvp_fight(req: dict):
+    """PVP 挑战（pvp act=8，type=fight）。**消耗 pvp_num**，需传 euin（从 pvp-extra 的 enemy_list 取）。"""
+    if err := _require_login():
+        return err
+    euin = req.get("euin")
+    if not euin:
+        return {"ok": False, "message": "缺少 euin"}
+    return await mt.pvp_fight(_session, str(euin))
+
+
+@app.post("/api/match/pvp-flush")
+async def match_pvp_flush():
+    """刷新 PVP 对手（pvp act=7）。"""
+    if err := _require_login():
+        return err
+    return await mt.pvp_flush(_session)
+
+
+@app.post("/api/match/union-fight")
+async def match_union_fight(req: dict | None = None):
+    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。"""
+    if err := _require_login():
+        return err
+    req = req or {}
+    return await mt.union_fight(_session, req.get("optype", 4), req.get("uptype", 1))
+
+
+@app.post("/api/match/sanguo-run")
+async def match_sanguo_run(req: dict):
+    """三国闯关（sanguo act=11）。**消耗闯关次数**。
+
+    cats/eqs 必须来自 sanguo act=16 读到的真实阵容（铁律：参数取真实值）。
+    """
+    if err := _require_login():
+        return err
+    cats = req.get("cats") or []
+    eqs = req.get("eqs") or []
+    levelid = req.get("levelid")
+    if not cats or not eqs or levelid is None:
+        return {"ok": False, "message": "缺少 levelid / cats / eqs"}
+    return await mt.sanguo_run(_session, int(levelid), cats, eqs, req.get("mode", 0))
+
+
+@app.get("/api/match/race-log")
+async def match_race_log(limit: int = 20):
+    """最近 N 次出战记录（哪只猫 / 穿什么 / 哪场 / 得分 / 剩余次数）。"""
+    if err := _require_login():
+        return err
+    return {"ok": True, "items": mt.load_race_log(limit)}
+
+
 @app.get("/api/match/theme")
 async def match_theme():
     """今日主题 + 最优穿装建议（每日比赛）。

@@ -337,6 +337,36 @@ async def competition_feed(session, elf_id: int, candy_type: int = 1) -> dict:
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
+_RACE_LOG = "/tmp/mc_match_race.jsonl"  # 注意：本文件 _Path 在后面才 import
+
+
+def save_race_log(entry: dict) -> None:
+    """追加一条出战记录（jsonl）。失败不影响主流程。"""
+    try:
+        entry = dict(entry)
+        entry.setdefault("ts", _time.strftime("%Y-%m-%d %H:%M:%S"))
+        with open(_RACE_LOG, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_race_log(limit: int = 20) -> list:
+    """最近 limit 条出战记录（新的在前）。"""
+    try:
+        with open(_RACE_LOG, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for ln in lines[-limit:]:
+        try:
+            out.append(_json.loads(ln))
+        except Exception:  # noqa: BLE001
+            continue
+    return list(reversed(out))
+
+
 async def competition_race(session, cat_id: int, equip_ids: list,
                            race_id: int | None = None) -> dict:
     """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
@@ -353,12 +383,20 @@ async def competition_race(session, cat_id: int, equip_ids: list,
       · act=4 响应里的 theme_attr 是**下一场**的主题，不是本场
         （本场主题看 race_value 的属性 id，与赛前 act=2 读到的完全一致）。
     """
+    _last_theme_rows = []
     if race_id is None:
         th = await competition_theme(session)
         if not th.get("ok") or th.get("race_id") is None:
             return {"ok": False,
                     "message": f"读本场比赛 id 失败：{th.get('message') or th.get('code')}"}
         race_id = th["race_id"]
+        _last_theme_rows = th.get("theme") or []
+    if not _last_theme_rows:
+        try:
+            _th = await competition_theme(session)
+            _last_theme_rows = _th.get("theme") or []
+        except Exception:  # noqa: BLE001
+            pass
     ids = "|".join(str(x) for x in equip_ids)
     try:
         r = await session.post(EP_TRAVEL_MATCH, act=4,
@@ -374,6 +412,19 @@ async def competition_race(session, cat_id: int, equip_ids: list,
         save_theme_attr(d.get("theme_attr"), d.get("theme_arr"))
     d["race_id_used"] = int(race_id)
     d["equip_used"] = ids
+    if d.get("code") == 0:
+        save_race_log({
+            "cat_id": int(cat_id),
+            "equip_ids": [int(x) for x in equip_ids],
+            "race_id": int(race_id),
+            "theme": _last_theme_rows,
+            "total_value": d.get("total_value"),
+            "level_score": d.get("level_score"),
+            "race_value": d.get("race_value"),
+            "performe_num": d.get("performe_num"),
+            "content": d.get("content"),
+            "next_theme": d.get("theme_attr"),
+        })
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
@@ -387,6 +438,7 @@ async def competition_race(session, cat_id: int, equip_ids: list,
 # 注意：theme_attr 只有打过才返回，所以取上次实打缓存（last_theme_attr）。
 
 import json as _json
+import time as _time
 import itertools as _itertools
 from pathlib import Path as _Path
 
@@ -588,3 +640,193 @@ async def pvp_lineup(session, cat_ids: list) -> dict:
         return {"ok": False, "code": r.get("code"),
                 "message": r.get("message") or "PVP 阵容请求未返回数据"}
     return {"ok": True, "code": r.get("code"), "data": d}
+
+
+# ==================== 其余玩法（2026-09-26 bisai2.har 实证）====================
+# 端点常量：EP_TRAVEL_PVP / EP_TRAVEL_UNION / EP_WORLD_SANGUO / EP_WORLD_EXPLORE
+# act 语义全部来自 HAR 真实请求与响应，未臆造。
+
+
+async def _act(session, ep: str, act: int, **kw) -> dict:
+    """通用：发一个 act 请求，返回 {ok, code, data}。"""
+    try:
+        r = await session.post(ep, act=act, **kw)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"{ep} act={act} 异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or f"act={act} 未返回数据"}
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+# ---------- 每日比赛：英雄榜 / 积分 / 领奖 / 抽奖 ----------
+
+async def comp_hero(session) -> dict:
+    """英雄榜（competition act=9，dayindex=0）。读。"""
+    return await _act(session, EP_TRAVEL_MATCH, 9, dayindex=0)
+
+
+async def comp_score(session) -> dict:
+    """比赛积分与次数（competition act=16）。读：score / free_num / signleTimes / multiTimes。"""
+    return await _act(session, EP_TRAVEL_MATCH, 16)
+
+
+async def comp_claim(session, cid: int) -> dict:
+    """领奖（competition act=17 {id}）。HAR 实证：返回 content + limit_times。"""
+    return await _act(session, EP_TRAVEL_MATCH, 17, id=int(cid))
+
+
+async def comp_claim2(session, cid: int) -> dict:
+    """领奖（competition act=21 {id}）。HAR：content=92_32_8。"""
+    return await _act(session, EP_TRAVEL_MATCH, 21, id=int(cid))
+
+
+async def comp_draw(session, num: int = 1, idx: int = 1) -> dict:
+    """抽奖（competition act=18 {num, idx}）。**消耗积分**（score 697 回落），谨慎。"""
+    return await _act(session, EP_TRAVEL_MATCH, 18, num=int(num), idx=int(idx))
+
+
+async def comp_zan(session, opuin: str, rank_idx: int = 0) -> dict:
+    """英雄榜点赞（competition act=22 {opuin, rank_idx}）。HAR：content=44_0_3034。"""
+    return await _act(session, EP_TRAVEL_MATCH, 22, opuin=str(opuin), rank_idx=int(rank_idx))
+
+
+# ---------- 竞技场 PVP ----------
+
+async def pvp_state(session) -> dict:
+    """PVP 主页（pvp act=1）。读：pvp_num / free_pvp_num / enemy_list / battle_arr / week_theme。"""
+    return await _act(session, EP_TRAVEL_PVP, 1)
+
+
+async def pvp_flush(session) -> dict:
+    """刷新对手（pvp act=7）。"""
+    return await _act(session, EP_TRAVEL_PVP, 7)
+
+
+async def pvp_fight(session, euin: str) -> dict:
+    """挑战（pvp act=8 {type:'fight', euin}）。**消耗 pvp_num**。"""
+    return await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=str(euin))
+
+
+async def pvp_claim(session, cid: int = 1) -> dict:
+    """领奖（pvp act=15 {id}）。HAR：content=48_1514_10,92_62_1,92_58_1。"""
+    return await _act(session, EP_TRAVEL_PVP, 15, id=int(cid))
+
+
+async def pvp_store(session) -> dict:
+    """PVP 商店（pvp act=17）。读：list 8 项 + store_end_ts。"""
+    return await _act(session, EP_TRAVEL_PVP, 17)
+
+
+async def pvp_peek(session, opuin: str) -> dict:
+    """查看对方阵容（pvp act=2 {opuin}）。读。"""
+    return await _act(session, EP_TRAVEL_PVP, 2, opuin=str(opuin))
+
+
+async def pvp_zan(session, rank_uin: str, rank_idx: int = 0) -> dict:
+    """PVP 点赞（pvp act=22 {rank_uin, rank_idx}）。HAR：content=92_9_130。"""
+    return await _act(session, EP_TRAVEL_PVP, 22, rank_uin=str(rank_uin), rank_idx=int(rank_idx))
+
+
+# ---------- 工会 / 公会战 ----------
+
+async def union_task(session) -> dict:
+    """工会任务状态（union act=15）。读：num / resetnum / bits。"""
+    return await _act(session, EP_TRAVEL_UNION, 15)
+
+
+async def union_chip(session) -> dict:
+    """工会碎片/贡献（union act=16）。读：data=22315。"""
+    return await _act(session, EP_TRAVEL_UNION, 16)
+
+
+async def union_claim(session) -> dict:
+    """工会领奖（union act=17）。HAR：content=92_32_10,48_1543_1。"""
+    return await _act(session, EP_TRAVEL_UNION, 17)
+
+
+async def union_fight(session, optype: int = 4, uptype: int = 1) -> dict:
+    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。"""
+    return await _act(session, EP_TRAVEL_UNION, 21, optype=int(optype), uptype=int(uptype))
+
+
+async def union_enemies(session, level: int = 8) -> dict:
+    """公会战关卡对手名单（union act=27 {level}）。读。"""
+    return await _act(session, EP_TRAVEL_UNION, 27, level=int(level))
+
+
+async def union_shop(session) -> dict:
+    """工会兑换商店（union act=30）。读：data 6 项 [{consume,id,maxnum,type}]。"""
+    return await _act(session, EP_TRAVEL_UNION, 30)
+
+
+async def union_zan(session, uins: list) -> dict:
+    """工会批量点赞（union act=14 {uins:'逗号分隔'}）。HAR 里调了 17 次，零消耗。"""
+    return await _act(session, EP_TRAVEL_UNION, 14, uins=",".join(str(int(u)) for u in uins))
+
+
+# ---------- 世界探索 ----------
+
+async def explore_team(session) -> dict:
+    """探索队伍（explore act=11）。读：teamlist。"""
+    return await _act(session, EP_WORLD_EXPLORE, 11)
+
+
+async def explore_task(session) -> dict:
+    """探索任务（explore act=15）。读：task_detail。"""
+    return await _act(session, EP_WORLD_EXPLORE, 15)
+
+
+async def explore_log(session) -> dict:
+    """探索记录（explore act=22）。读：data 117 条。"""
+    return await _act(session, EP_WORLD_EXPLORE, 22)
+
+
+async def explore_claim(session, cid: int = 1) -> dict:
+    """探索领奖（explore act=25 {id}）。HAR：content=48_1604_18。"""
+    return await _act(session, EP_WORLD_EXPLORE, 25, id=int(cid))
+
+
+async def explore_shop(session) -> dict:
+    """探索商店（explore act=26）。读：data 8 项。"""
+    return await _act(session, EP_WORLD_EXPLORE, 26)
+
+
+async def explore_rank(session) -> dict:
+    """探索排行榜（explore act=28）。读：data 4 项。"""
+    return await _act(session, EP_WORLD_EXPLORE, 28)
+
+
+# ---------- 西游三国 ----------
+
+async def sanguo_task(session) -> dict:
+    """三国任务（sanguo act=7）。读：task_detail。"""
+    return await _act(session, EP_WORLD_SANGUO, 7)
+
+
+async def sanguo_list(session) -> dict:
+    """三国关卡/记录（sanguo act=9）。读：data 56 项。"""
+    return await _act(session, EP_WORLD_SANGUO, 9)
+
+
+async def sanguo_claim(session, cid: int = 0) -> dict:
+    """三国领奖（sanguo act=8 {id}）。HAR：content=48_1614_10,92_32_1,92_58_1。"""
+    return await _act(session, EP_WORLD_SANGUO, 8, id=int(cid))
+
+
+async def sanguo_lineup(session, levelid: int) -> dict:
+    """三国阵容（sanguo act=16 {levelid, cats:'0|0|0|0'}）。读。"""
+    return await _act(session, EP_WORLD_SANGUO, 16, levelid=int(levelid), cats="0|0|0|0")
+
+
+async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0) -> dict:
+    """三国闯关（sanguo act=11 {mode, levelid, eqs, cats}）。
+
+    HAR 实证：eqs 是 N×4 个装备 id 平铺（同 union act=23），cats='3|4|2|1|'（**末尾带 |**）。
+    **消耗闯关次数** —— 只在用户主动点时才调。
+    """
+    return await _act(session, EP_WORLD_SANGUO, 11, mode=int(mode), levelid=int(levelid),
+                      eqs="|".join(str(int(x)) for x in eqs) + "|",
+                      cats="|".join(str(int(c)) for c in cats) + "|")
+
