@@ -2181,6 +2181,39 @@ async def match_gold():
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.get("/api/match/gvg")
+async def match_gvg():
+    """公会战（union act=22）。只读。"""
+    if err := _require_login():
+        return err
+    try:
+        return await mt.union_gvg(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/sanguo")
+async def match_sanguo():
+    """西游三国（card_worldsanguo act=1）。只读。"""
+    if err := _require_login():
+        return err
+    try:
+        return await mt.sanguo_state(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/explore")
+async def match_explore():
+    """世界探索（card_worldexplore act=1）。只读。"""
+    if err := _require_login():
+        return err
+    try:
+        return await mt.explore_state(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 class NoCacheStaticFiles(StaticFiles):
     """静态资源禁用浏览器缓存。
 

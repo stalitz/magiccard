@@ -20,6 +20,7 @@ from typing import Optional
 
 from .constants import (
     EP_TRAVEL_MATCH, EP_TRAVEL_PVP, EP_TRAVEL_UNION,
+    EP_WORLD_SANGUO, EP_WORLD_EXPLORE,
 )
 
 # HAR 实测返回的字段（不确定的与中文猜测并列，宁可原样透出也不瞎译）
@@ -65,6 +66,21 @@ def _cats(rows: list) -> list:
     return out
 
 
+def _plain_uin(session) -> str:
+    """opuin 必须传**不带前导零**的纯数字 uin（2026-09-25 实测踩坑）。
+
+    session.uin 是前端补零格式（如 "0004821992"），直接拿去当 opuin 传，
+    服务端照样回 code=0，但 data 只剩 11 个 key、travel_elf_arr 为空
+    （talent_score=0 / performe_num 缺失）——极易被误读成「该号未开通」。
+    传 "4821992" 则完整返回 4 只精灵 + talent_score=650。
+    """
+    u = str(session.uin or "").strip()
+    try:
+        return str(int(u))
+    except (TypeError, ValueError):
+        return u
+
+
 async def _json_of(r: dict) -> dict:
     """响应统一解成 dict：qzone 类响应把 JSON 放在 data / raw 里。"""
     if not isinstance(r, dict):
@@ -89,7 +105,7 @@ async def match_state(session, want_equip: bool = False) -> dict:
     want_equip=True 会顺带拉 act=6（39KB 装备/属性包），供「装备详情」展示。
     """
     try:
-        r1 = await session.post(EP_TRAVEL_MATCH, act=1, opuin=session.uin)
+        r1 = await session.post(EP_TRAVEL_MATCH, act=1, opuin=_plain_uin(session))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"请求比赛主页异常：{e}"}
     d = await _json_of(r1)
@@ -101,9 +117,8 @@ async def match_state(session, want_equip: bool = False) -> dict:
     out.update(_pick(d))
     rows = d.get("travel_elf_arr") or []
     out["cats"] = _cats(rows)
-    # 实测（2026-09-25）：未玩过「猫咪旅行 / 比赛」的号 act=1 会返回空壳
-    # （travel_elf_arr=[] 且没有 performe_num/clover_num），Unionid 仍会有值。
-    # 不标出来前端会显示成「全部 0」，容易被误读成数据异常。
+    # 空态标记：只有 opuin 传对（见 _plain_uin）之后，仍返回空壳才可能是
+    # 「未开通比赛模块」。此前误把 opuin 前导零导致的空壳当成未开通，已修正。
     out["bound"] = bool(rows) or "performe_num" in d or "clover_num" in d
     if want_equip:
         try:
@@ -191,6 +206,90 @@ async def union_info(session) -> dict:
         if k in d:
             out[k] = d[k]
     out["members"] = d.get("members") or {}
+    return out
+
+
+async def union_gvg(session) -> dict:
+    """公会战（card_travel_elf_union act=22）。只读。
+
+    HAR 实测返回 17 个字段，语义较明确的是等级/关卡/进度/敌方工会 + 送礼记录：
+      level / inlv / e_levelid   己方等级、敌方等级（e_ 前缀＝敌方）
+      progress / e_progress      己方与敌方总进度
+      enemy_uinon / e_name       敌方工会 id 与名称
+      level_rank_bit / levelgetbits  关卡领取位
+      gift_record                 已领/已送记录（逗号串，含自己 uin → 今日已参与）
+      season_gift / ts
+    gvg_sign / gvg_cheer 在 competition act=1 里也有（0/1），含义与公会战相关。
+    """
+    try:
+        r = await session.post(EP_TRAVEL_UNION, act=22)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求公会战异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "读取公会战失败"}
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+async def sanguo_state(session, want_task: bool = False) -> dict:
+    """西游三国（card_worldsanguo act=1，约 18KB）。只读。
+
+    act=1 主界面：levelId / freenum(每日免费次数) / passId / talent_score /
+    talent_rate / formation(12 条技能等级) / logData(86 条关卡记录，含
+    bossid/levelid/percent_hp/passData) / travel_elf_arr(4 只精灵，与
+    competition 同源) / img_items / ex_box_num / safe_box_num。
+    want_task=True 会顺带拉 act=7（task_detail 每日任务）。
+    act=9（data 56 条）暂未纳入，等抓包确认语义。
+    """
+    try:
+        r1 = await session.post(EP_WORLD_SANGUO, act=1, opuin=_plain_uin(session))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求西游三国异常：{e}"}
+    d = await _json_of(r1)
+    if not d:
+        return {"ok": False, "code": r1.get("code"),
+                "message": r1.get("message") or "读取西游三国失败"}
+    out = {"ok": True, "code": r1.get("code")}
+    for k in ("levelId", "passId", "freenum", "buynum", "talent_score", "talent_rate",
+              "levelData", "formation", "logData", "travel_elf_arr", "img_items",
+              "ex_box_num", "safe_box_num", "new_box_num", "shoplist", "ispoup",
+              "tick", "sjb", "nlb", "txd"):
+        if k in d:
+            out[k] = d[k]
+    if want_task:
+        try:
+            r7 = await session.post(EP_WORLD_SANGUO, act=7, opuin=_plain_uin(session))
+            d7 = await _json_of(r7)
+            if d7:
+                out["task_bits"] = d7.get("task_bits")
+                out["task_detail"] = d7.get("task_detail")
+        except Exception as e:  # noqa: BLE001
+            out["task_err"] = str(e)
+    return out
+
+
+async def explore_state(session) -> dict:
+    """世界探索（card_worldexplore act=1）。只读。
+
+    HAR 实测：currLevelData(当前关卡 stepData) / logData / formationList(布阵,
+    含 catid/ce/eqlist) / freepowerbit / luckydata / shoplist / 各类 box 数据。
+    act=15 是每日任务（task_detail），act=22 返回 117 条 data。
+    """
+    try:
+        r1 = await session.post(EP_WORLD_EXPLORE, act=1, opuin=_plain_uin(session))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求世界探索异常：{e}"}
+    d = await _json_of(r1)
+    if not d:
+        return {"ok": False, "code": r1.get("code"),
+                "message": r1.get("message") or "读取世界探索失败"}
+    out = {"ok": True, "code": r1.get("code")}
+    for k in ("levelId", "currLevelData", "logData", "formationList", "freepowerbit",
+              "luckydata", "shoplist", "ex_box_num", "new_box_num", "safe_box_num",
+              "maxLevelId", "nlb", "sjb", "txd", "guide", "newbiebit", "suitcard"):
+        if k in d:
+            out[k] = d[k]
     return out
 
 
