@@ -354,7 +354,7 @@ async def competition_race(session, cat_id: int, equip_ids: list) -> dict:
         return {"ok": False, "code": r.get("code"),
                 "message": r.get("message") or "比赛请求未返回数据"}
     if "theme_attr" in d:
-        save_theme_attr(d.get("theme_attr"))
+        save_theme_attr(d.get("theme_attr"), d.get("theme_arr"))
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
@@ -386,20 +386,52 @@ def last_theme_attr() -> dict:
         return {}
 
 
-def save_theme_attr(theme: list) -> None:
-    """act=4 成功后回写主题，供下次比赛前算建议。"""
+def save_theme_attr(theme: list, theme_arr: list = None) -> None:
+    """act=4 / act=23 成功后回写主题，供下次比赛前算建议。"""
     try:
-        _THEME_CACHE.write_text(_json.dumps({"theme_attr": theme or []}, ensure_ascii=False),
-                                encoding="utf-8")
+        payload = {"theme_attr": theme or []}
+        if theme_arr:
+            payload["theme_arr"] = theme_arr
+        cur = {}
+        try:
+            cur = _json.loads(_THEME_CACHE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+        cur.update(payload)
+        _THEME_CACHE.write_text(_json.dumps(cur, ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
 
-def best_equip(equip: dict, theme) -> dict:
+def _load_theme_arr() -> dict:
+    """union act=23 返回的 12 项主题权重表（bisai2.har 实证：4/8/12 权重 14，其余 10）。
+
+    这张表是「本场主题需求」的完整分布，比 competition act=4 的 theme_attr（只有 4 项加成量）
+    更完整，优先用它算最优穿装。
+    """
+    try:
+        rows = _json.loads(_THEME_CACHE.read_text(encoding="utf-8")).get("theme_arr") or []
+    except Exception:  # noqa: BLE001
+        return {}
+    if isinstance(rows, list):
+        return {a.get("id"): a.get("val", a.get("value", 0)) for a in rows if isinstance(a, dict)}
+    return rows or {}
+
+
+def best_equip(equip: dict, theme=None) -> dict:
     # 接口返回的是 [{"id":4,"value":48}, ...]，函数内部按 {属性id: 要求值} 使用，
     # 两种形态都收下（2026-09-26 实测 500 就是这里只收 dict 导致的）。
-    if isinstance(theme, list):
-        theme = {a.get("id"): a.get("value", 0) for a in theme if isinstance(a, dict)}
+    # theme 兼容三种来源：① list[{id,val}] ② dict{属性id: 权重} ③ 省略 → 取 12 项主题权重表
+    # 12 项主题权重表（union act=23 的 theme_arr）比 competition act=4 的 4 项 theme_attr
+    # 更完整，只要缓存里有就优先用它；theme_attr 仅作兜底（其 value 是「加成量」不是权重，
+    # 直接当权重会让覆盖度虚高，2026-09-26 实测就是这个坑）。
+    arr = _load_theme_arr()
+    if arr:
+        theme = arr
+    elif theme is None:
+        return {}
+    elif isinstance(theme, list):
+        theme = {a.get("id"): a.get("val", a.get("value", 0)) for a in theme if isinstance(a, dict)}
     if not theme:
         return {}
     """穷举「头/手/衣/各 一件」，给出对 theme 覆盖最大的组合（只读，不发请求）。
@@ -420,7 +452,8 @@ def best_equip(equip: dict, theme) -> dict:
             for k, v in (attrs or {}).items():
                 prov[k] = prov.get(k, 0) + v
             tot += sum((attrs or {}).values())
-        cover = sum(prov.get(k, 0) for k in theme)
+        # 加权覆盖：theme_arr 里权重 14 的属性（4/8/12）比权重 10 的更吃重
+        cover = sum(prov.get(k, 0) * (theme.get(k, 0) / 10.0) for k in theme)
         score = cover * 1000 + tot
         if score > best_score:
             best_score, best = score, combo
@@ -433,7 +466,68 @@ def best_equip(equip: dict, theme) -> dict:
             attrs[k] = attrs.get(k, 0) + v
     return {
         "equip_ids": ids,
-        "cover": sum(attrs.get(k, 0) for k in theme),
+        "cover": round(sum(attrs.get(k, 0) * (theme.get(k, 0) / 10.0) for k in theme), 1),
         "attrs": attrs,
         "theme_cover": {k: attrs.get(k, 0) for k in theme},
+        "theme_src": "theme_arr" if _load_theme_arr() else "theme_attr",
     }
+
+
+# ---------------- 换装（2026-09-26 bisai2.har 实证，补齐了此前缺失的一环）----------------
+# union act=23  {cats:'3|4|2', eqs:'id|id|id|id|...'}  → battle_data
+#     · **cats 有 N 项，eqs 就是 N×4 个装备 id，顺序按 cats 平铺**（cat3 拿前 4 个，cat4 接后 4 个…）
+#     · 装备 id 首位即槽位：1=头 2=手 3=衣 4=各，所以合法组合天然是每槽各一件
+#     · **不扣 performe_num**（HAR 全程 performe_num 恒为 2，#89→#92→#96 读回证实换装立即生效）
+#     · 返回 battle_data：attack_accounts/total_score、attack_elf_list（每只猫 ce/equiparr/talentarr）、
+#       theme_arr（12 项主题权重，4/8/12 权重 14，其余 10）
+# union act=39  {cats:'0|0|0'}                        → elf_list[{id, equip_list}]
+#     · cats 传 0 就是「读」当前阵容，用来校验 act=23 是否生效
+# pvp act=3     {ids:'3,4,2'}（逗号分隔，不是 |）      → elf_list   PVP 出战阵容设置
+
+async def union_lineup(session, cats: list) -> dict:
+    """读当前出战阵容（union act=39）：cats 传全 0 即为只读。"""
+    try:
+        r = await session.post(EP_TRAVEL_UNION, act=39,
+                               cats="|".join(str(int(c)) for c in cats))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求阵容异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "请求阵容未返回数据"}
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+async def union_equip(session, cats: list, equip_flat: list) -> dict:
+    """一键换装（union act=23）：cats=['3','4','2'] + equip_flat=12 个装备 id 平铺。
+
+    HAR 实证 #90：cats='3|4|2', eqs='10493|20162|30203|40273|10663|20463|30383|40353|10353|20353|30122|40141'
+    """
+    if len(cats) != len(equip_flat) // 4:
+        return {"ok": False, "message": f"装备数量应为猫数的 4 倍（当前 {len(cats)} 猫 / "
+                                       f"{len(equip_flat)} 件）"}
+    try:
+        r = await session.post(EP_TRAVEL_UNION, act=23,
+                               cats="|".join(str(int(c)) for c in cats),
+                               eqs="|".join(str(int(x)) for x in equip_flat))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求换装异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "换装请求未返回数据"}
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+async def pvp_lineup(session, cat_ids: list) -> dict:
+    """设置 PVP 出战阵容（pvp act=3）：ids 用逗号分隔（不是 |），如 '3,4,2'。"""
+    try:
+        r = await session.post(EP_TRAVEL_PVP, act=3,
+                               ids=",".join(str(int(c)) for c in cat_ids))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求 PVP 阵容异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "PVP 阵容请求未返回数据"}
+    return {"ok": True, "code": r.get("code"), "data": d}

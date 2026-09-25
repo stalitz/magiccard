@@ -2290,4 +2290,54 @@ async def match_theme():
     }
 
 # ★ 静态挂载必须放在所有 API 路由之后，否则会先吞掉 /api/*
+@app.get("/api/match/lineup")
+async def match_lineup():
+    """读当前出战阵容（union act=39，cats 全 0 即只读）。"""
+    if err := _require_login():
+        return err
+    try:
+        st = await mt.match_state(_session, want_equip=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+    return {
+        "ok": True,
+        "cats": st.get("cats"),
+        "suggest": mt.best_equip(st.get("equip") or {}),
+        "theme_arr": mt._load_theme_arr(),
+    }
+
+
+@app.post("/api/match/equip")
+async def match_equip(req: dict):
+    """一键换装（union act=23）：cats + 每只猫 4 件装备，平铺后一次提交。
+
+    不扣每日比赛次数，可放心调用；调用后可再读 /api/match/lineup 校验。
+    """
+    if err := _require_login():
+        return err
+    cats = req.get("cats") or []
+    eq = req.get("equip") or []
+    if not cats or not eq:
+        return {"ok": False, "message": "缺少 cats 或 equip"}
+    try:
+        return await mt.union_equip(_session, [int(c) for c in cats], [int(x) for x in eq])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/match/pvp-lineup")
+async def match_pvp_lineup(req: dict):
+    """设置 PVP 出战阵容（pvp act=3，ids 用逗号分隔）。"""
+    if err := _require_login():
+        return err
+    ids = req.get("ids") or []
+    if not ids:
+        return {"ok": False, "message": "缺少 ids"}
+    try:
+        return await mt.pvp_lineup(_session, [int(x) for x in ids])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+# ★ 静态挂载必须放在所有 API 路由**之后**：它是 mount('/', html=True)，
+#   注册在前会先吞掉 /api/*（GET 找不到文件→404，非 GET→405）。
 app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND), html=True), name="static")
