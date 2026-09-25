@@ -2248,12 +2248,13 @@ async def match_feed(req: dict):
 
 @app.post("/api/match/race")
 async def match_race(req: dict):
-    """打一场比赛（competition act=4）：用该猫当前正穿着的装备出战。
+    """打一场比赛（competition act=4）：按传入的 4 件装备直接上台。
 
-    真机实证（2026-09-26）：
-      · 成功 {catId:4, id:3, ids:'10663|20353|30203|40162'} → code=0，performe_num 3→2
-      · 失败 {catId:4, id:<猫id>, ids:任意组合} → code=-1 参数错误（不扣次数）
-    说明：id 是**出战方案 id**（不是猫 id），ids 必须是该方案下当前穿着的装备。
+    真机实证（2026-09-26）：{catId:4, id:8, ids:'10493|20141|30383|40582'}
+      → code=0、total_value=1174、performe_num 2→1。
+    · id = 本场比赛 id（act=2 实时读，每场都变），不传则后端自动取
+    · ids **可现场搭配**，不必是猫当前穿着的——每日比赛没有独立穿装接口
+    · 参数错误只回 code=-1，不扣次数
     """
     if err := _require_login():
         return err
@@ -2261,35 +2262,51 @@ async def match_race(req: dict):
     equip = req.get("equip") or []
     if cat_id is None or not equip:
         return {"ok": False, "message": "缺少 cat_id 或 equip"}
+    race_id = req.get("race_id")
     try:
-        return await mt.competition_race(_session, int(cat_id), [int(x) for x in equip])
+        return await mt.competition_race(_session, int(cat_id), [int(x) for x in equip],
+                                         int(race_id) if race_id is not None else None)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
 
 @app.get("/api/match/theme")
 async def match_theme():
-    """本场主题适配：读最新一次比赛的 theme_attr，给出 4 槽最优穿装建议（只读）。
+    """今日主题 + 最优穿装建议（每日比赛）。
 
-    theme_attr 只有在打过之后才会返回，所以取「上一次实打缓存」。
-    建议组合 = 对 theme 属性覆盖最大的 4 件（头/手/衣/各 slots 各一件，穷举）。
+    主题来自 competition act=2（赛前可读、每场随机，必须出发前现读）；
+    衣橱来自 act=6；建议 = 穷举头/手/衣/各一件、按主题百分比加权的最优组合。
+    另带每只猫「当前穿着 vs 最优」的覆盖对比。
     """
     if err := _require_login():
         return err
     try:
+        th = await mt.competition_theme(_session)
+        if not th.get("ok"):
+            return th
+        theme_rows = th.get("theme") or []
+        theme = {a["id"]: a["value"] for a in theme_rows}
         st = await mt.match_state(_session, want_equip=True)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
-    theme = mt.last_theme_attr()
+    equip = st.get("equip") or {}
+    suggest = mt.best_equip(equip, theme) if theme else None
+    cats = []
+    for c in (st.get("cats") or []):
+        worn = c.get("equip") or []
+        cats.append({
+            "elf_id": c.get("elf_id"), "level": c.get("level"), "mood": c.get("mood"),
+            "equip": worn,
+            "cover": mt.current_cover(equip, worn, theme) if theme and worn else None,
+        })
     return {
         "ok": True,
-        "equip": st.get("equip"),
-        "cats": st.get("cats"),
-        "theme_attr": theme,
-        "suggest": mt.best_equip(st.get("equip") or {}, theme) if theme else None,
+        "theme": theme_rows,          # [{id, value, name}]
+        "cats": cats,
+        "suggest": suggest,
+        "performe_num": st.get("performe_num"),
     }
 
-# ★ 静态挂载必须放在所有 API 路由之后，否则会先吞掉 /api/*
 @app.get("/api/match/lineup")
 async def match_lineup():
     """读当前出战阵容（union act=39，cats 全 0 即只读）。"""

@@ -337,24 +337,43 @@ async def competition_feed(session, elf_id: int, candy_type: int = 1) -> dict:
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
-async def competition_race(session, cat_id: int, equip_ids: list) -> dict:
+async def competition_race(session, cat_id: int, equip_ids: list,
+                           race_id: int | None = None) -> dict:
     """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
 
-    params 里 HAR 的 id 与 catId 同值，这里照抄；ids 必须取**当前真实装备**
-    （项目铁律：坐标/槽位类参数绝不用固定值）。
+    2026-09-26 真机实证（推翻此前「id=猫 id / ids 必须是当前穿着」的错误结论）：
+
+      · **id = 本场比赛 id**，由 competition act=2 实时返回，每场都变
+        （HAR 那天 4、上一场 3、今天 8）。**绝不写死，也不等于 catId**——
+        HAR 里二者同为 4 纯属巧合，害我误判了一整天。
+      · **ids 可以现场自由搭配**，不必是猫当前穿着的：bisai1.har 那次真实请求的
+        4 件里只有 1 件与 cat4 当前装相同 → 每日比赛**没有独立穿装接口**，
+        是前端搭配好直接带 ids 上台（用户 2026-09-26 指出，实打验证通过）。
+      · 参数错误只回 code=-1 且**不扣** performe_num，可安全重试。
+      · act=4 响应里的 theme_attr 是**下一场**的主题，不是本场
+        （本场主题看 race_value 的属性 id，与赛前 act=2 读到的完全一致）。
     """
+    if race_id is None:
+        th = await competition_theme(session)
+        if not th.get("ok") or th.get("race_id") is None:
+            return {"ok": False,
+                    "message": f"读本场比赛 id 失败：{th.get('message') or th.get('code')}"}
+        race_id = th["race_id"]
     ids = "|".join(str(x) for x in equip_ids)
     try:
         r = await session.post(EP_TRAVEL_MATCH, act=4,
-                               catId=int(cat_id), id=int(cat_id), ids=ids)
+                               catId=int(cat_id), id=int(race_id), ids=ids)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"请求比赛异常：{e}"}
     d = await _json_of(r)
     if not d:
         return {"ok": False, "code": r.get("code"),
                 "message": r.get("message") or "比赛请求未返回数据"}
+    # theme_attr 是「下一场」主题，只作参考缓存，不参与本场建议
     if "theme_attr" in d:
         save_theme_attr(d.get("theme_attr"), d.get("theme_arr"))
+    d["race_id_used"] = int(race_id)
+    d["equip_used"] = ids
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
@@ -376,6 +395,37 @@ _DRESS_TABLES = (
     "cat_home_dress_head_attr", "cat_home_dress_hand_attr",
     "cat_home_dress_clothing_attr", "cat_home_dress_other_attr",
 )
+
+
+# ---------------- 今日主题（competition act=2，2026-09-26 用户截图+实读双实证）----------------
+# act=2 零参数、赛前可读、零副作用：attr=[{id,value}...] 合计=100，就是 UI「今日主题」的百分比。
+# 重要：**每场比赛主题独立随机**（09-25 一天三场三个主题），所以必须在每次「出发」前重新读。
+# 属性名实证（装备数值与游戏截图逐一匹配）：1=唱歌 2=舞蹈 3=朗诵 4=演奏；5~12 名字待补。
+ATTR_NAMES = {1: "唱歌", 2: "舞蹈", 3: "朗诵", 4: "演奏"}
+
+
+def attr_name(aid: int) -> str:
+    return ATTR_NAMES.get(int(aid), f"属性{aid}")
+
+
+async def competition_theme(session) -> dict:
+    """读今日主题（competition act=2）。返回 {ok, theme:[{id,value,name}], raw_id}。"""
+    try:
+        r = await session.post(EP_TRAVEL_MATCH, act=2)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求主题异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "主题请求未返回数据"}
+    rows = d.get("attr") or []
+    theme = [{"id": a.get("id"), "value": a.get("value"),
+              "name": attr_name(a.get("id"))} for a in rows if isinstance(a, dict)]
+    # 实时主题顺手入缓存（lineup / 兜底逻辑可用）
+    if theme:
+        save_theme_attr(rows)
+    return {"ok": True, "code": r.get("code"), "theme": theme,
+            "race_id": d.get("id")}
 
 
 def last_theme_attr() -> dict:
@@ -419,25 +469,21 @@ def _load_theme_arr() -> dict:
 
 
 def best_equip(equip: dict, theme=None) -> dict:
-    # 接口返回的是 [{"id":4,"value":48}, ...]，函数内部按 {属性id: 要求值} 使用，
-    # 两种形态都收下（2026-09-26 实测 500 就是这里只收 dict 导致的）。
-    # theme 兼容三种来源：① list[{id,val}] ② dict{属性id: 权重} ③ 省略 → 取 12 项主题权重表
-    # 12 项主题权重表（union act=23 的 theme_arr）比 competition act=4 的 4 项 theme_attr
-    # 更完整，只要缓存里有就优先用它；theme_attr 仅作兜底（其 value 是「加成量」不是权重，
-    # 直接当权重会让覆盖度虚高，2026-09-26 实测就是这个坑）。
-    arr = _load_theme_arr()
-    if arr:
-        theme = arr
-    elif theme is None:
-        return {}
-    elif isinstance(theme, list):
+    """穷举「头/手/衣/各 一件」，按今日主题百分比给出最优组合（只读，不发请求）。
+
+    theme 权威来源 = competition act=2 的 attr（[{id,value}]，value 合计 100，
+    即 UI「今日主题」的百分比，2026-09-26 实读与用户截图完全一致）。
+    评分 = Σ(组合提供的属性k × 主题百分比k/100)，同分再比总属性量。
+    传省略时兜底用上次比赛的 theme_attr 缓存。
+    注意：union act=23 battle_data 里的 theme_arr（10/14 基准权重）是公会战的表，
+    与每日比赛主题无关，不再优先使用（2026-09-26 修正上一版的错误优先级）。
+    """
+    if theme is None:
+        theme = last_theme_attr()
+    if isinstance(theme, list):
         theme = {a.get("id"): a.get("val", a.get("value", 0)) for a in theme if isinstance(a, dict)}
     if not theme:
         return {}
-    """穷举「头/手/衣/各 一件」，给出对 theme 覆盖最大的组合（只读，不发请求）。
-
-    评分 = 命中 theme 的属性含量 × 1000 + 全部属性总量（同分时取属性更多的组合）。
-    """
     opts = []
     for key in _DRESS_TABLES:
         lst = equip.get(key) or []
@@ -445,18 +491,16 @@ def best_equip(equip: dict, theme=None) -> dict:
                      for it in lst])
     if not all(opts) or len(opts) != 4:
         return {}
-    best, best_score = None, -1
+    best, best_score, best_tot = None, -1.0, 0
     for combo in _itertools.product(*opts):
         prov, tot = {}, 0
         for _eid, attrs in combo:
             for k, v in (attrs or {}).items():
                 prov[k] = prov.get(k, 0) + v
             tot += sum((attrs or {}).values())
-        # 加权覆盖：theme_arr 里权重 14 的属性（4/8/12）比权重 10 的更吃重
-        cover = sum(prov.get(k, 0) * (theme.get(k, 0) / 10.0) for k in theme)
-        score = cover * 1000 + tot
-        if score > best_score:
-            best_score, best = score, combo
+        cover = sum(prov.get(k, 0) * (theme.get(k, 0) / 100.0) for k in theme)
+        if cover > best_score or (cover == best_score and tot > best_tot):
+            best_score, best_tot, best = cover, tot, combo
     if best is None:
         return {}
     ids, attrs = [], {}
@@ -466,11 +510,24 @@ def best_equip(equip: dict, theme=None) -> dict:
             attrs[k] = attrs.get(k, 0) + v
     return {
         "equip_ids": ids,
-        "cover": round(sum(attrs.get(k, 0) * (theme.get(k, 0) / 10.0) for k in theme), 1),
+        "cover": round(best_score, 1),
         "attrs": attrs,
-        "theme_cover": {k: attrs.get(k, 0) for k in theme},
-        "theme_src": "theme_arr" if _load_theme_arr() else "theme_attr",
+        "theme_cover": {str(k): attrs.get(k, 0) for k in theme},
+        "theme_src": "act2_live" if theme else "cache",
     }
+
+
+def current_cover(equip: dict, worn: list, theme: dict) -> dict:
+    """某只猫当前穿着对主题的覆盖（用于「当前 vs 最优」对比）。"""
+    idx = {}
+    for key in _DRESS_TABLES:
+        for it in (equip.get(key) or []):
+            idx[it.get("id")] = {a.get("id"): a.get("value", 0) for a in (it.get("eq_attr") or [])}
+    prov = {}
+    for i in (worn or []):
+        for k, v in (idx.get(int(i)) or {}).items():
+            prov[k] = prov.get(k, 0) + v
+    return round(sum(prov.get(k, 0) * (theme.get(k, 0) / 100.0) for k in theme), 1)
 
 
 # ---------------- 换装（2026-09-26 bisai2.har 实证，补齐了此前缺失的一环）----------------
