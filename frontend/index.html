@@ -680,6 +680,7 @@
           <button class="btn sm ghost" data-pane="spirite">灵宠探险</button>
           <button class="btn sm ghost" data-pane="travel">猫咪旅行</button>
           <button class="btn sm ghost" data-pane="dig">挖地</button>
+          <button class="btn sm ghost" data-pane="match">每日比赛</button>
         </div>
         <span class="who">已登录：<b id="dash-uin"></b></span>
         <span class="spacer"></span>
@@ -1252,12 +1253,65 @@
             </div>
           </div>
         </div>
+      <div id="pane-match" class="pane hidden">
+        <div class="lib">
+          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
+            <span style="font-weight:600;font-size:13.5px">每日比赛：</span>
+            <span id="match-res" style="font-size:12px;color:var(--muted)"></span>
+            <span class="sep"></span>
+            <button id="match-refresh" class="btn sm primary">刷新状态</button>
+            <button id="match-pvp" class="btn sm">刷新 PVP 日榜</button>
+            <button id="match-union" class="btn sm">刷新工会</button>
+            <button id="match-equip" class="btn sm">装备详情</button>
+            <button id="match-gold" class="btn sm">金卡限购</button>
+          </div>
+
+          <div class="lib-body dg-cols">
+            <div class="dg-col" style="flex:1.05">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">我的比赛状态</span>
+                  <span class="cnt" id="match-state-cnt"></span></div>
+                <div id="match-state-box" class="state-box">
+                  <span class="spinner"></span>正在读取比赛状态…</div>
+                <div id="match-cats" class="lst" style="max-height:none;padding:8px"></div>
+              </div>
+            </div>
+            <div class="dg-col" style="flex:1.35">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">PVP 日榜</span>
+                  <span class="cnt" id="match-pvp-cnt"></span></div>
+                <div id="match-pvp-box">
+                  <div class="state-box"><span class="spinner"></span>正在读取 PVP 日榜…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lib-body dg-cols">
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">工会</span>
+                  <span class="cnt" id="match-union-cnt"></span></div>
+                <div id="match-union-box"></div>
+              </div>
+            </div>
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">金卡每日限购（act=20）</span>
+                  <span class="cnt" id="match-gold-cnt"></span></div>
+                <div id="match-gold-box"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       </div>
 
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260924b"></script>
+<script src="/app.js?v=20260925b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

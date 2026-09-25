@@ -142,6 +142,7 @@ function showDash(uin) {
   $("login-view").classList.add("hidden");
   $("dash-view").classList.remove("hidden");
   $("dash-uin").textContent = uin || "(未知)";
+  window.__myUin = String(uin || "");   // 每日比赛 PVP 榜用于标出「我」那一行
   $("top-user").textContent = uin ? `QQ ${uin}` : "";
   logHistory();  // 登录后先恢复历史操作日志（刷新/重开仍在）
   log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
@@ -292,6 +293,7 @@ function switchPane(pane) {
   $("pane-spirite").classList.toggle("hidden", pane !== "spirite");
   $("pane-travel").classList.toggle("hidden", pane !== "travel");
   $("pane-dig").classList.toggle("hidden", pane !== "dig");
+  $("pane-match").classList.toggle("hidden", pane !== "match");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
@@ -306,6 +308,8 @@ function switchPane(pane) {
   else travelStopAuto();
   if (pane === "dig") initDigOnce();
   else digStopPoll();
+  if (pane === "match") initMatchOnce();
+  else matchStopPoll();
 }
 document.querySelectorAll(".subnav .btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
@@ -3209,6 +3213,197 @@ async function initChangeForm() {
 
   renderStarDD(); renderThemeDD(); renderTargetDD(); renderMatDD(); updatePreview();
 }
+
+
+// ===================== 每日比赛（bisai.har 实证，2026-09-25）=====================
+// 只读：competition act=1 主页 / act=6 装备 / act=20 金卡限购；pvp act=14 日榜；union act=1 工会。
+// 后端 backend/match.py；未证实语义的字段一律原样透出，不做中文硬译。
+
+let matchState = null, matchPvp = null, matchUnion = null, matchGold = null;
+let matchPvpTimer = null, matchUnionTimer = null;
+
+function matchFmtTs(ts) {
+  if (!ts) return "-";
+  try { return new Date(Number(ts) * 1000).toLocaleString("zh-CN", { hour12: false }); }
+  catch (e) { return String(ts); }
+}
+function matchRow(k, v) {
+  if (v === undefined || v === null || v === "") return "";
+  return `<div class="rv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+}
+
+function renderMatchState() {
+  const box = $("match-state-box"), cats = $("match-cats"), cnt = $("match-state-cnt");
+  const d = matchState || {};
+  if (!d.ok) {
+    box.className = "state-box";
+    box.innerHTML = `<span style="color:var(--danger)">读取失败：${d.message || "未知"}${d.code ? "（code=" + d.code + "）" : ""}</span>`;
+    cats.innerHTML = "";
+    return;
+  }
+  if (!d.bound) {
+    box.className = "state-box";
+    box.innerHTML = `<span style="color:var(--warn)">该号未开通 / 暂无比赛数据：
+      <br>接口 act=1 返回空壳（travel_elf_arr 为空）。工会与 PVP 榜通常仍可读。</span>`;
+  } else {
+    const n = (d.cats || []).length;
+    box.className = "state-box";
+    box.innerHTML =
+      matchRow("猫咪数量", n) +
+      matchRow("天赋分 talent_score", d.talent_score) +
+      matchRow("天赋率 talent_rate", d.talent_rate) +
+      matchRow("每日期望次数 performe_num", d.performe_num) +
+      matchRow("次数重置时间", d.perform_limit_ts ? matchFmtTs(d.perform_limit_ts) : "-") +
+      matchRow("三叶草 clover_num", d.clover_num) +
+      matchRow("dzs / hbs / ele / jhs",
+        [d.dzs, d.hbs, d.ele, d.jhs].filter((x) => x !== undefined && x !== null).join(" / ") || "-") +
+      matchRow("赛季历史分（season_rank_gift）",
+        (d.season_rank_gift || []).length ? `${d.season_rank_gift.length} 条，最近 ${d.season_rank_gift[0] && d.season_rank_gift[0].score}` : "-") +
+      matchRow("工会 unionid", d.unionid);
+  }
+  cnt.textContent = d.ok ? (d.bound ? "已开通" : "空态") : "失败";
+  const cs = d.cats || [];
+  cats.innerHTML = cs.length
+    ? cs.map((c, i) => `<div class="pk" style="margin-bottom:6px">
+        <div class="pk-bdg ${(c.skills || []).length ? "ok" : ""}">#${c.elf_id}</div>
+        <div><b>等级 ${c.level ?? "-"}</b> · 星 ${c.star ?? "-"}
+          · 心情 ${c.mood ?? "-"} · 运动 ${c.motion ?? "-"} · 表演 ${c.perform ?? "-"}
+          <br><span style="color:var(--muted);font-size:12px">
+            技能 ${(c.skills || []).map((s) => `#${s.cat_skill_id}·L${s.cat_skill_level}`).join("、") || "-"}
+            · 装备 ${(c.equip || []).filter((x) => x).join("/") || "-"}
+          </span></div></div>`).join("")
+    : `<div class="empty-tip">暂无猫咪数据${d.bound ? "" : "（该号未开通比赛模块）"}</div>`;
+}
+
+function renderMatchPvp() {
+  const box = $("match-pvp-box"), cnt = $("match-pvp-cnt");
+  const d = matchPvp || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    return;
+  }
+  const meUin = (window.__myUin || "");
+  const rows = d.list || [];
+  cnt.textContent = `榜单 ${d.total || 0} 人`;
+  box.innerHTML =
+    `<div class="state-box">` +
+    matchRow("我的分数 my_score", d.my_score) +
+    matchRow("我的战力 my_ce", d.my_ce) +
+    matchRow("榜内我的名次", d.my_rank ? `第 ${d.my_rank} 名` : "未进前 1000") +
+    matchRow("今日已赞 my_zan_num", d.my_zan_num) +
+    matchRow("点赞位 zan_bit", d.zan_bit) +
+    matchRow("今日可赞对象", (d.zan_targets || []).length ? `${(d.zan_targets || []).length} 人` : "无") +
+    matchRow("榜单日期 day_ts", matchFmtTs(d.day_ts)) +
+    `</div>` +
+    `<div class="lst" style="max-height:none;padding:6px">` +
+    (rows.length
+      ? rows.map((r) => {
+          const isMe = String(r.uin) === String(meUin);
+          return `<div class="pk" style="margin-bottom:4px${isMe ? ";border-color:var(--qq-blue)" : ""}">
+            <div class="pk-bdg ${isMe ? "ok" : ""}">${r.rank || r.rank === 0 ? r.rank : "-"}</div>
+            <div style="flex:1"><b>${r.nick || "-"}</b>${isMe ? " <span style='color:var(--qq-blue)'>（我）</span>" : ""}
+              <br><span style="color:var(--muted);font-size:12px">分数 ${r.score ?? "-"} · 战力 ${r.ce ?? "-"} · ${matchFmtTs(r.ts)}</span></div>
+          </div>`;
+        }).join("")
+      : `<div class="empty-tip">榜单为空</div>`) +
+    `</div>`;
+}
+
+function renderMatchUnion() {
+  const box = $("match-union-box"), cnt = $("match-union-cnt");
+  const d = matchUnion || {};
+  if (!d.ok) { box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`; cnt.textContent = "失败"; return; }
+  cnt.textContent = `会员 ${d.mem_num ?? "-"}/${d.max_num ?? "-"}`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("工会名", d.union_name) +
+    matchRow("工会 id", d.unionid) +
+    matchRow("等级 lv", d.lv) +
+    matchRow("贡献 exp", d.exp) +
+    matchRow("会员 / 上限", `${d.mem_num ?? "-"}/${d.max_num ?? "-"}`) +
+    matchRow("金币 coin / 碎片 chip", `${d.coin ?? "-"} / ${d.chip ?? "-"}`) +
+    matchRow("活跃度", d.union_activity) +
+    matchRow("会长", d.patriarch_name) +
+    matchRow("成员数", Object.keys(d.members || {}).length) +
+    `</div>`;
+}
+
+function renderMatchGold() {
+  const box = $("match-gold-box"), cnt = $("match-gold-cnt");
+  const d = matchGold || {};
+  if (!d.ok) { box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`; cnt.textContent = "失败"; return; }
+  const g = d.data || {};
+  cnt.textContent = "act=20";
+  let bought = 0;
+  for (let i = 1; i <= 6; i++) { if (Number(g["gold_buy_id" + i]) > 0) bought++; }
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("今日已购分组", bought ? `${bought} 组有购买记录` : "无") +
+    matchRow("gold_buy_id1..6",
+      [1, 2, 3, 4, 5, 6].map((i) => g["gold_buy_id" + i]).join(" / ")) +
+    `</div><div class="empty-tip" style="font-size:12px">分组含义未证实，仅透出接口原值。</div>`;
+}
+
+function matchStopPoll() {
+  if (matchPvpTimer) { clearInterval(matchPvpTimer); matchPvpTimer = null; }
+  if (matchUnionTimer) { clearInterval(matchUnionTimer); matchUnionTimer = null; }
+}
+
+async function loadMatchState(force) {
+  // 手动刷新由 busyBtn 控制禁用，接口失败也只提示、不置死界面
+  const r = await fetch("/api/match/state").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchState = r;
+  renderMatchState();
+  const res = $("match-res");
+  if (res) res.textContent = r.ok ? "状态已读取" : (r.message || "读取失败");
+}
+
+async function loadMatchPvp() {
+  const r = await fetch("/api/match/pvp?top=50").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchPvp = r;
+  renderMatchPvp();
+}
+
+async function loadMatchUnion() {
+  const r = await fetch("/api/match/union").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchUnion = r;
+  renderMatchUnion();
+}
+
+async function loadMatchGold() {
+  const r = await fetch("/api/match/gold").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchGold = r;
+  renderMatchGold();
+}
+
+function initMatchOnce() {
+  if (window.__matchInited) return;
+  window.__matchInited = true;
+  const bind = (id, fn) => {
+    const b = $(id);
+    if (b) b.onclick = () => { fn(b); };
+  };
+  // 手动按钮：点下立即禁用 + 「处理中」，完成立即刷新（项目铁律）
+  bind("match-refresh", (b) => busyBtn(b, "读取中…", "刷新状态")(loadMatchState(true)));
+  bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
+  bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
+  bind("match-equip", async (b) => {
+    const restore = busyBtn(b, "读取中…", "装备详情");
+    const r = await fetch("/api/match/state?want_equip=1").then((x) => x.json()).catch(() => null);
+    matchState = r || matchState;
+    renderMatchState();
+    log("[每日比赛] 装备详情：" + (r && r.equip ? "已读取 " + Object.keys(r.equip).length + " 组属性" : (r && r.message) || "空"),
+      r && r.equip ? "ok" : "warn");
+    restore();
+  });
+  bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
+  // 首次进入即拉一次；之后 60s 兜底轮询（与手动操作解耦）
+  loadMatchState(true);
+  loadMatchPvp();
+  loadMatchUnion();
+  loadMatchGold();
+  if (!matchPvpTimer) matchPvpTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchPvp(); }, 60000);
+  if (!matchUnionTimer) matchUnionTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchUnion(); }, 60000);
+}
+
 
 // ---------- 合成路径弹窗（点卡箱任意卡 -> 显示所属套卡的合成路径 + 一键炼卡）----------
 function closeSynth() {
