@@ -1264,6 +1264,8 @@
             <button id="match-union" class="btn sm">刷新工会</button>
             <button id="match-equip" class="btn sm">装备详情</button>
             <button id="match-gold" class="btn sm">金卡限购</button>
+            <button id="match-gvg" class="btn sm">刷新公会战</button>
+            <button id="match-sanguo" class="btn sm">刷新西游三国</button>
           </div>
 
           <div class="lib-body dg-cols">
@@ -1303,6 +1305,27 @@
               </div>
             </div>
           </div>
+
+          <div class="lib-body dg-cols">
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">公会战（union act=22）</span>
+                  <span class="cnt" id="match-gvg-cnt"></span></div>
+                <div id="match-gvg-box">
+                  <div class="state-box"><span class="spinner"></span>正在读取公会战…</div>
+                </div>
+              </div>
+            </div>
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">西游三国（worldsanguo act=1）</span>
+                  <span class="cnt" id="match-sanguo-cnt"></span></div>
+                <div id="match-sanguo-box">
+                  <div class="state-box"><span class="spinner"></span>正在读取西游三国…</div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1311,7 +1334,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260925b"></script>
+<script src="/app.js?v=20260925d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

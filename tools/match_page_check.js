@@ -48,6 +48,18 @@ const PVP = {
 };
 const UNION = { ok: true, union_name: "搞起耍", unionid: "10177", lv: "18", exp: "5445880", mem_num: 29, max_num: 29, coin: 4044, chip: 72, union_activity: 41, members: { "1006409757": "x" } };
 const GOLD = { ok: true, data: { gold_buy_id1: 0, gold_buy_id2: 5, gold_buy_id3: 0, gold_buy_id4: 0, gold_buy_id5: 0, gold_buy_id6: 0 } };
+const GVG = { ok: true, code: 0, data: {
+  level: 8, inlv: 8, progress: "365804", e_levelid: "9", e_name: "夜半钟声到客船",
+  enemy_uinon: "21718", e_progress: "330939", level_rank_bit: 252, level_rank_bit2: 0,
+  levelgetbits: ",10100,20100", gift_record: "1260277398,1292723575,4821992",
+  season_gift: 0, ts: 1787673667 } };
+const SANGUO = { ok: true, code: 0, levelId: 204, passId: 0, freenum: 3, buynum: 0,
+  talent_score: 650, talent_rate: 12.0, logData: Array.from({ length: 86 }, (_, i) => ({
+    bossid: 101, levelid: 101 + i, percent_hp: 0, passData: { getts: 1790322817, isget: i % 2 } })),
+  formation: [{ id: 0, lv: 10 }, { id: 1, lv: 9 }],
+  travel_elf_arr: [{ elf_id: 1 }, { elf_id: 2 }, { elf_id: 3 }, { elf_id: 4 }],
+  img_items: [{ id: 1 }, { id: 2 }], ex_box_num: 15, safe_box_num: 12, new_box_num: 15,
+  shoplist: [{ id: 1, cnt: 0 }] };
 
 const calls = [];
 const resp = (o) => ({ json: async () => o, ok: true });
@@ -61,6 +73,8 @@ async function fetchStub(url) {
   if (url.startsWith("/api/match/pvp")) return resp(PVP);
   if (url.startsWith("/api/match/union")) return resp(UNION);
   if (url.startsWith("/api/match/gold")) return resp(GOLD);
+  if (url.startsWith("/api/match/gvg")) return resp(GVG);
+  if (url.startsWith("/api/match/sanguo")) return resp(SANGUO);
   return resp({ ok: false, message: "404" });
 }
 
@@ -70,7 +84,7 @@ function ok(name, cond, extra) { R.push([cond ? "PASS" : "FAIL", name, extra || 
 (async () => {
   const factory = new Function(
     "document", "window", "fetch", "$", "log", "busyBtn",
-    "return (async () => { " + code + "\n; return { renderMatchState, renderMatchPvp, renderMatchUnion, renderMatchGold, loadMatchState, loadMatchPvp, loadMatchUnion, loadMatchGold, initMatchOnce, matchStopPoll, matchFmtTs, matchRow }; })();"
+    "return (async () => { " + code + "\n; return { renderMatchState, renderMatchPvp, renderMatchUnion, renderMatchGold, renderMatchGvg, renderMatchSanguo, loadMatchState, loadMatchPvp, loadMatchUnion, loadMatchGold, loadMatchGvg, loadMatchSanguo, initMatchOnce, matchStopPoll, matchFmtTs, matchRow }; })();"
   );
   const M = await factory(document, window, fetchStub, $, log, busyBtn);
 
@@ -115,6 +129,8 @@ function ok(name, cond, extra) { R.push([cond ? "PASS" : "FAIL", name, extra || 
 
   // --- 渲染：金卡限购 ---
   await M.loadMatchGold();
+  await M.loadMatchGvg();
+  await M.loadMatchSanguo();
   const gBox = $("match-gold-box").textContent;
   ok("④ 金卡已购分组提示", gBox.includes("1 组有购买记录"), gBox.slice(0, 50));
   ok("④ 金卡原值透出", gBox.includes("0 / 5 / 0"));
@@ -128,6 +144,34 @@ function ok(name, cond, extra) { R.push([cond ? "PASS" : "FAIL", name, extra || 
   ok("⑤ 完成后恢复可点", b.disabled === false);
   ok("⑤ 完成后恢复文案", b.textContent === "刷新 PVP 日榜", b.textContent);
 
+  // --- 公会战（union act=22）渲染 ---
+  const gbox = $("match-gvg-box");
+  const gTxt = gbox.textContent;
+  ok("⑧ 公会战敌方名称渲染", gTxt.includes("夜半钟声到客船"), gTxt.slice(0, 80));
+  ok("⑧ 公会战我方/敌方等级", gTxt.includes("我方等级 level8") && gTxt.includes("敌方等级 e_levelid9"));
+  ok("⑧ 公会战进度对比", gTxt.includes("365804") && gTxt.includes("330939"));
+  ok("⑧ 公会战计数", $("match-gvg-cnt").textContent.includes("我方 Lv8"), $("match-gvg-cnt").textContent);
+
+  // --- 西游三国（worldsanguo act=1）渲染 ---
+  const sbox = $("match-sanguo-box");
+  const sTxt = sbox.textContent;
+  ok("⑨ 西游三国关卡渲染", sTxt.includes("当前关卡 levelId204"), sTxt.slice(0, 80));
+  ok("⑨ 西游三国每日次数", sTxt.includes("每日免费次数 freenum3"));
+  ok("⑨ 西游三国关卡记录统计", sTxt.includes("86 条") && sTxt.includes("已通"));
+  ok("⑨ 西游三国精灵数", sTxt.includes("4 只"));
+  ok("⑨ 西游三国计数", $("match-sanguo-cnt").textContent.includes("关卡 204"), $("match-sanguo-cnt").textContent);
+
+  // --- 新按钮即时反馈（项目铁律）---
+  const gb = $("match-gvg"), sb = $("match-sanguo");
+  const gr = busyBtn(gb, "读取中…", "刷新公会战");
+  ok("⑩ 公会战按钮点下禁用", gb.disabled === true);
+  gr();
+  ok("⑩ 公会战按钮恢复", gb.disabled === false && gb.textContent === "刷新公会战");
+  const sr = busyBtn(sb, "读取中…", "刷新西游三国");
+  ok("⑩ 西游三国按钮点下禁用", sb.disabled === true);
+  sr();
+  ok("⑩ 西游三国按钮恢复", sb.disabled === false && sb.textContent === "刷新西游三国");
+
   // --- 切换 pane 才拉数据，非本页不轮询 ---
   M.matchStopPoll();
   ok("⑥ matchStopPoll 不报错", true);
@@ -137,6 +181,8 @@ function ok(name, cond, extra) { R.push([cond ? "PASS" : "FAIL", name, extra || 
   ok("⑦ PVP 接口被调", calls.some((u) => u.startsWith("/api/match/pvp")));
   ok("⑦ 工会接口被调", calls.some((u) => u.startsWith("/api/match/union")));
   ok("⑦ 金卡接口被调", calls.some((u) => u.startsWith("/api/match/gold")));
+  ok("⑧ 公会战接口被调", calls.some((u) => u.startsWith("/api/match/gvg")));
+  ok("⑨ 西游三国接口被调", calls.some((u) => u.startsWith("/api/match/sanguo")));
 
   const pass = R.filter((r) => r[0] === "PASS").length;
   const fail = R.filter((r) => r[0] === "FAIL").length;

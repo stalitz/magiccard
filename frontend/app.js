@@ -3220,7 +3220,8 @@ async function initChangeForm() {
 // 后端 backend/match.py；未证实语义的字段一律原样透出，不做中文硬译。
 
 let matchState = null, matchPvp = null, matchUnion = null, matchGold = null;
-let matchPvpTimer = null, matchUnionTimer = null;
+let matchGvg = null, matchSanguo = null;
+let matchPvpTimer = null, matchUnionTimer = null, matchGvgTimer = null, matchSanguoTimer = null;
 
 function matchFmtTs(ts) {
   if (!ts) return "-";
@@ -3327,6 +3328,64 @@ function renderMatchUnion() {
     `</div>`;
 }
 
+function renderMatchGvg() {
+  const box = $("match-gvg-box"), cnt = $("match-gvg-cnt");
+  const d = matchGvg || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const g = d.data || {};
+  cnt.textContent = `我方 Lv${g.level ?? "-"} · 敌方 Lv${g.e_levelid ?? "-"}`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("我方等级 level", g.level) +
+    matchRow("我方进度 progress", g.progress) +
+    matchRow("我方关卡 inlv", g.inlv) +
+    matchRow("敌方等级 e_levelid", g.e_levelid) +
+    matchRow("敌方名称 e_name", g.e_name) +
+    matchRow("敌方工会 enemy_uinon", g.enemy_uinon) +
+    matchRow("敌方进度 e_progress", g.e_progress) +
+    matchRow("关卡领取位 levelgetbits", g.levelgetbits) +
+    matchRow("rank_bit / rank_bit2", `${g.level_rank_bit ?? "-"} / ${g.level_rank_bit2 ?? "-"}`) +
+    matchRow("last_lv", g.last_lv) +
+    matchRow("赛季礼包 season_gift", g.season_gift) +
+    matchRow("gift_record（已赠送记录）",
+      g.gift_record ? String(g.gift_record).split(",").filter(Boolean).length + " 条" : "-") +
+    matchRow("时间戳 ts", matchFmtTs(g.ts)) +
+    `</div>`;
+}
+
+function renderMatchSanguo() {
+  const box = $("match-sanguo-box"), cnt = $("match-sanguo-cnt");
+  const d = matchSanguo || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const t = d;
+  // 关卡记录按 HAR 原样统计，段位含义未证实 → 不硬译
+  const logs = t.logData || [];
+  const passed = logs.filter((x) => x && x.passData && x.passData.isget).length;
+  cnt.textContent = `关卡 ${t.levelId ?? "-"} · 记录 ${logs.length}`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("当前关卡 levelId", t.levelId) +
+    matchRow("passId", t.passId) +
+    matchRow("每日免费次数 freenum", t.freenum) +
+    matchRow("已购 buynum", t.buynum) +
+    matchRow("天赋分 / 天赋率", `${t.talent_score ?? "-"} / ${t.talent_rate ?? "-"}`) +
+    matchRow("formation（技能等级）", (t.formation || []).map((f) => `id${f.id}·lv${f.lv}`).join("、") || "-") +
+    matchRow("关卡记录 logData", logs.length ? `${logs.length} 条，已通 ${passed} 关` : "-") +
+    matchRow("精灵（Travel_elf_arr）", (t.travel_elf_arr || []).length + " 只") +
+    matchRow("道具 img_items", (t.img_items || []).length ? `${(t.img_items || []).length} 种` : "-") +
+    matchRow("宝箱 ex / safe / new", `${t.ex_box_num ?? "-"} / ${t.safe_box_num ?? "-"} / ${t.new_box_num ?? "-"}`) +
+    matchRow("每日任务 task_detail",
+      (t.task_detail || []).length ? `${(t.task_detail || []).length} 项，bits=${t.task_bits}` : "（未拉）") +
+    matchRow("shoplist", (t.shoplist || []).length ? `${(t.shoplist || []).length} 项` : "-") +
+    `</div>`;
+}
+
 function renderMatchGold() {
   const box = $("match-gold-box"), cnt = $("match-gold-cnt");
   const d = matchGold || {};
@@ -3368,6 +3427,18 @@ async function loadMatchUnion() {
   renderMatchUnion();
 }
 
+async function loadMatchGvg() {
+  const r = await fetch("/api/match/gvg").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchGvg = r;
+  renderMatchGvg();
+}
+
+async function loadMatchSanguo() {
+  const r = await fetch("/api/match/sanguo").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchSanguo = r;
+  renderMatchSanguo();
+}
+
 async function loadMatchGold() {
   const r = await fetch("/api/match/gold").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchGold = r;
@@ -3395,13 +3466,25 @@ function initMatchOnce() {
     restore();
   });
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
+  bind("match-gvg", (b) => busyBtn(b, "读取中…", "刷新公会战")(loadMatchGvg()));
+  bind("match-sanguo", async (b) => {
+    const restore = busyBtn(b, "读取中…", "刷新西游三国");
+    const r = await fetch("/api/match/sanguo?want_task=1").then((x) => x.json()).catch(() => null);
+    matchSanguo = r || matchSanguo;
+    renderMatchSanguo();
+    restore();
+  });
   // 首次进入即拉一次；之后 60s 兜底轮询（与手动操作解耦）
   loadMatchState(true);
   loadMatchPvp();
   loadMatchUnion();
   loadMatchGold();
+  loadMatchGvg();
+  loadMatchSanguo();
   if (!matchPvpTimer) matchPvpTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchPvp(); }, 60000);
   if (!matchUnionTimer) matchUnionTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchUnion(); }, 60000);
+  if (!matchGvgTimer) matchGvgTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchGvg(); }, 60000);
+  if (!matchSanguoTimer) matchSanguoTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchSanguo(); }, 60000);
 }
 
 
