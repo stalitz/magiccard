@@ -2228,4 +2228,66 @@ class NoCacheStaticFiles(StaticFiles):
         return resp
 
 
+
+# ---------------- 每日比赛：写操作（2026-09-26 bisai1.har 实证 + 真机实打）----------------
+# act=11 喂食 / act=4 打一场；参数规则均由真机 A-B 验证得出（详见 match.py）。
+
+@app.post("/api/match/feed")
+async def match_feed(req: dict):
+    """喂猫（competition act=11）：把心情喂到阈值才能做其他任务。"""
+    if err := _require_login():
+        return err
+    elf_id = req.get("elf_id")
+    if elf_id is None:
+        return {"ok": False, "message": "缺少 elf_id"}
+    try:
+        return await mt.competition_feed(_session, int(elf_id), int(req.get("candy_type") or 1))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/match/race")
+async def match_race(req: dict):
+    """打一场比赛（competition act=4）：用该猫当前正穿着的装备出战。
+
+    真机实证（2026-09-26）：
+      · 成功 {catId:4, id:3, ids:'10663|20353|30203|40162'} → code=0，performe_num 3→2
+      · 失败 {catId:4, id:<猫id>, ids:任意组合} → code=-1 参数错误（不扣次数）
+    说明：id 是**出战方案 id**（不是猫 id），ids 必须是该方案下当前穿着的装备。
+    """
+    if err := _require_login():
+        return err
+    cat_id = req.get("cat_id")
+    equip = req.get("equip") or []
+    if cat_id is None or not equip:
+        return {"ok": False, "message": "缺少 cat_id 或 equip"}
+    try:
+        return await mt.competition_race(_session, int(cat_id), [int(x) for x in equip])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.get("/api/match/theme")
+async def match_theme():
+    """本场主题适配：读最新一次比赛的 theme_attr，给出 4 槽最优穿装建议（只读）。
+
+    theme_attr 只有在打过之后才会返回，所以取「上一次实打缓存」。
+    建议组合 = 对 theme 属性覆盖最大的 4 件（头/手/衣/各 slots 各一件，穷举）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        st = await mt.match_state(_session, want_equip=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+    theme = mt.last_theme_attr()
+    return {
+        "ok": True,
+        "equip": st.get("equip"),
+        "cats": st.get("cats"),
+        "theme_attr": theme,
+        "suggest": mt.best_equip(st.get("equip") or {}, theme) if theme else None,
+    }
+
+# ★ 静态挂载必须放在所有 API 路由之后，否则会先吞掉 /api/*
 app.mount("/", NoCacheStaticFiles(directory=str(FRONTEND), html=True), name="static")

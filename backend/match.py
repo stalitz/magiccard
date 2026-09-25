@@ -308,3 +308,132 @@ async def gold_buy(session) -> dict:
         return {"ok": False, "code": r.get("code"),
                 "message": r.get("message") or "读取金卡状态失败"}
     return {"ok": True, "code": r.get("code"), "data": d}
+
+
+# ===================== 写操作（2026-09-26 bisai1.har 实证）=====================
+# 此前 bisai.har 里没有写操作，所以整个模块只读；bisai1.har 补上了，语义如下：
+#   competition act=11  {candy_type, elf_id} → {cat_mood, elfid, force0/1/2}  喂猫（心情 +1）
+#   competition act=4   {catId, id, ids}     → {total_value, race_value, level_score,
+#                                               theme_attr, content, performe_num(-1),
+#                                               cat_star, cat_star_new, skill_use_bit}  打一场
+# HAR 唯一样本：act=4 {catId:4, id:4, ids:'10663|20463|30122|40141'}（id 与 catId 同值）。
+
+
+async def competition_feed(session, elf_id: int, candy_type: int = 1) -> dict:
+    """喂猫（competition act=11）—— 把心情喂到阈值才能做其他任务。
+
+    HAR 实证：act=11 + candy_type=1 + elf_id=<猫 id>，返回 cat_mood 上升
+    （82→83 / 82→82 / 82→82 / 85 一档），并带 force0/1/2（推测为三条属性线，未证实）。
+    """
+    try:
+        r = await session.post(EP_TRAVEL_MATCH, act=11,
+                               elf_id=int(elf_id), candy_type=int(candy_type))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求喂食异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "喂食请求未返回数据"}
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+async def competition_race(session, cat_id: int, equip_ids: list) -> dict:
+    """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
+
+    params 里 HAR 的 id 与 catId 同值，这里照抄；ids 必须取**当前真实装备**
+    （项目铁律：坐标/槽位类参数绝不用固定值）。
+    """
+    ids = "|".join(str(x) for x in equip_ids)
+    try:
+        r = await session.post(EP_TRAVEL_MATCH, act=4,
+                               catId=int(cat_id), id=int(cat_id), ids=ids)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求比赛异常：{e}"}
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "比赛请求未返回数据"}
+    if "theme_attr" in d:
+        save_theme_attr(d.get("theme_attr"))
+    return {"ok": True, "code": r.get("code"), "data": d}
+
+
+# ---------------- 主题适配：最优穿装建议（只读计算）----------------
+# 依据：真机实打两次（2026-09-26）
+#   ① cat4 当前装 → theme=[{4,48},{8,31},{9,11},{12,10}] race=[{1,500},{5,140},{9,234},{10,85}]
+#      total=1054 level_score=60.23   （对 theme 覆盖 9/12，得分低）
+#   ② bisai.har 那次（HAR 记录）→ theme=[{1,51},{5,11},{9,27},{10,11}] race=[{1,872},{2,106},{6,230},{10,185}]
+#      total=1532 level_score=75.04   （对 theme 覆盖 1/10，得分高）
+# 结论：得分与「装备属性命中 theme_attr 的种类/含量」强相关 —— 这就是"最适配比赛需求"。
+# 注意：theme_attr 只有打过才返回，所以取上次实打缓存（last_theme_attr）。
+
+import json as _json
+import itertools as _itertools
+from pathlib import Path as _Path
+
+_THEME_CACHE = _Path("/tmp/mc_match_theme.json")
+_DRESS_TABLES = (
+    "cat_home_dress_head_attr", "cat_home_dress_hand_attr",
+    "cat_home_dress_clothing_attr", "cat_home_dress_other_attr",
+)
+
+
+def last_theme_attr() -> dict:
+    """上一次实打比赛拿到的 theme_attr（打完才有，故取缓存）。"""
+    try:
+        return _json.loads(_THEME_CACHE.read_text(encoding="utf-8")).get("theme_attr") or {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_theme_attr(theme: list) -> None:
+    """act=4 成功后回写主题，供下次比赛前算建议。"""
+    try:
+        _THEME_CACHE.write_text(_json.dumps({"theme_attr": theme or []}, ensure_ascii=False),
+                                encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def best_equip(equip: dict, theme) -> dict:
+    # 接口返回的是 [{"id":4,"value":48}, ...]，函数内部按 {属性id: 要求值} 使用，
+    # 两种形态都收下（2026-09-26 实测 500 就是这里只收 dict 导致的）。
+    if isinstance(theme, list):
+        theme = {a.get("id"): a.get("value", 0) for a in theme if isinstance(a, dict)}
+    if not theme:
+        return {}
+    """穷举「头/手/衣/各 一件」，给出对 theme 覆盖最大的组合（只读，不发请求）。
+
+    评分 = 命中 theme 的属性含量 × 1000 + 全部属性总量（同分时取属性更多的组合）。
+    """
+    opts = []
+    for key in _DRESS_TABLES:
+        lst = equip.get(key) or []
+        opts.append([(it.get("id"), {a.get("id"): a.get("value", 0) for a in (it.get("eq_attr") or [])})
+                     for it in lst])
+    if not all(opts) or len(opts) != 4:
+        return {}
+    best, best_score = None, -1
+    for combo in _itertools.product(*opts):
+        prov, tot = {}, 0
+        for _eid, attrs in combo:
+            for k, v in (attrs or {}).items():
+                prov[k] = prov.get(k, 0) + v
+            tot += sum((attrs or {}).values())
+        cover = sum(prov.get(k, 0) for k in theme)
+        score = cover * 1000 + tot
+        if score > best_score:
+            best_score, best = score, combo
+    if best is None:
+        return {}
+    ids, attrs = [], {}
+    for eid, c in best:
+        ids.append(eid)
+        for k, v in (c or {}).items():
+            attrs[k] = attrs.get(k, 0) + v
+    return {
+        "equip_ids": ids,
+        "cover": sum(attrs.get(k, 0) for k in theme),
+        "attrs": attrs,
+        "theme_cover": {k: attrs.get(k, 0) for k in theme},
+    }
