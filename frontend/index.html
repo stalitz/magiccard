@@ -1269,6 +1269,8 @@
             <button id="match-gold" class="btn sm">金卡限购</button>
             <button id="match-gvg" class="btn sm">刷新公会战</button>
             <button id="match-sanguo" class="btn sm">刷新西游三国</button>
+            <button id="match-claim-all" class="btn sm">一键领奖（全玩法）</button>
+            <button id="match-modes-refresh" class="btn sm">刷新其他玩法</button>
           </div>
 
           <div class="lib-body dg-cols">
@@ -1329,13 +1331,30 @@
               </div>
             </div>
           </div>
+
+          <div class="lib-body dg-cols">
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">出战记录（最近 10 场）</span>
+                  <span class="cnt" id="match-log-cnt"></span></div>
+                <div id="match-log-box"><div class="state-box">读取中…</div></div>
+              </div>
+            </div>
+            <div class="dg-col" style="flex:1">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">其他玩法（竞技场 / 探索 / 工会任务 / 比赛积分）</span>
+                  <span class="cnt" id="match-modes-cnt"></span></div>
+                <div id="match-modes-box"><div class="state-box">读取中…</div></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926c"></script>
+<script src="/app.js?v=20260926d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

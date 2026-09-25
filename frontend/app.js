@@ -3439,6 +3439,90 @@ async function loadMatchSanguo() {
   renderMatchSanguo();
 }
 
+// ===================== 出战记录 + 其他玩法 =====================
+let matchLog = null, matchModes = null;
+
+async function loadMatchLog() {
+  const r = await fetch("/api/match/race-log?limit=10").then((x) => x.json()).catch(() => ({ ok: false }));
+  matchLog = r;
+  renderMatchLog();
+}
+
+function renderMatchLog() {
+  const box = $("match-log-box"), cnt = $("match-log-cnt");
+  if (!box) return;
+  const items = (matchLog && matchLog.items) || [];
+  if (cnt) cnt.textContent = items.length + " 条";
+  if (!items.length) {
+    box.innerHTML = `<div class="state-box">暂无出战记录（打一场后自动记录：猫号 / 穿装 / 得分）</div>`;
+    return;
+  }
+  box.innerHTML = items.map((it) => {
+    const th = (it.theme || []).map((a) => `${a.name || ("属性" + a.id)} ${a.value}%`).join(" · ");
+    return `<div class="state-box" style="margin-bottom:6px">` +
+      matchRow("时间", it.ts) +
+      matchRow("出战猫 / 场次 id", `${it.cat_id} 号 / ${it.race_id}`) +
+      matchRow("穿装", (it.equip_ids || []).join("|")) +
+      matchRow("本场主题", th || "-") +
+      matchRow("总分 / 评级分", `${it.total_value ?? "-"} / ${it.level_score ?? "-"}`) +
+      matchRow("剩余次数 / 奖励", `${it.performe_num ?? "-"} / ${it.content || "-"}`) +
+      `</div>`;
+  }).join("");
+}
+
+async function loadMatchModes() {
+  const [comp, pvp, exp, uni] = await Promise.all([
+    fetch("/api/match/comp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
+    fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
+    fetch("/api/match/explore-extra").then((x) => x.json()).catch(() => ({ ok: false })),
+    fetch("/api/match/union-extra").then((x) => x.json()).catch(() => ({ ok: false })),
+  ]);
+  matchModes = { comp, pvp, exp, uni };
+  renderMatchModes();
+}
+
+function renderMatchModes() {
+  const box = $("match-modes-box"), cnt = $("match-modes-cnt");
+  if (!box) return;
+  const m = matchModes || {};
+  const sc = (m.comp && m.comp.score && m.comp.score.data) || {};
+  const hero = (m.comp && m.comp.hero && m.comp.hero.data) || {};
+  const pv = (m.pvp && m.pvp.state && m.pvp.state.data) || {};
+  const pvStore = (m.pvp && m.pvp.store && m.pvp.store.data) || {};
+  const exp = (m.exp && m.exp.task && m.exp.task.data) || {};
+  const uni = (m.uni && m.uni.task && m.uni.task.data) || {};
+  const enemies = pv.enemy_list || [];
+  if (cnt) cnt.textContent = `积分 ${sc.score ?? "-"} · 对手 ${enemies.length}`;
+  const top3 = enemies.slice(0, 3).map((e) => `${e.name || e.uin}(战力${e.ce})`).join("、") || "-";
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("比赛积分 score / 免费次数", `${sc.score ?? "-"} / ${sc.free_num ?? "-"}`) +
+    matchRow("我的最高分 my_top_score", hero.my_top_score ?? "-") +
+    matchRow("竞技场次数 pvp_num / 免费", `${pv.pvp_num ?? "-"} / ${pv.free_pvp_num ?? "-"}`) +
+    matchRow("当前对手（前 3）", top3) +
+    matchRow("竞技场商店", (pvStore.list || []).length ? `${pvStore.list.length} 项` : "-") +
+    matchRow("工会任务 num / resetnum", `${uni.num ?? "-"} / ${uni.resetnum ?? "-"}`) +
+    matchRow("探索任务", JSON.stringify(exp.task_detail || []).slice(0, 60)) +
+    `</div>`;
+}
+
+async function claimAll() {
+  // 一键领奖：competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=8
+  const r = await fetch("/api/match/claim-all", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }).then((x) => x.json()).catch(() => null);
+  const items = (r && r.items) || [];
+  if (!items.length) { log("[每日比赛] 领奖失败（无返回）", "warn"); return; }
+  for (const it of items) {
+    const d = (it.r && it.r.data) || {};
+    if ((it.r && it.r.ok === false) || (d.code !== undefined && d.code !== 0)) {
+      log("[领奖] " + it.k + " → 无奖励或失败 " + (d.desc || d.code || (it.r && it.r.message) || ""), "");
+    } else {
+      log("[领奖] " + it.k + " → " + (d.content || "成功"), "ok");
+    }
+  }
+  await loadMatchLog();
+}
+
 async function loadMatchGold() {
   const r = await fetch("/api/match/gold").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchGold = r;
@@ -3456,8 +3540,8 @@ function initMatchOnce() {
   bind("match-refresh", (b) => busyBtn(b, "读取中…", "刷新状态")(loadMatchState(true)));
   bind("match-feed", (b) => busyBtn(b, "喂食中…", "一键喂到 80")(feedAllCats()));
   bind("match-race", (b) => busyBtn(b, "出战中…", "打一场（当前装）")(raceOnce()));
-  bind("match-dress", (b) => busyBtn(b, "换装中…", "一键最优穿装")(equipBest()));
-  bind("match-dressrace", (b) => busyBtn(b, "出战中…", "穿装并打一场")(equipThenRace()));
+  bind("match-dress", (b) => busyBtn(b, "计算中…", "最优穿搭建议")(equipBest()));
+  bind("match-dressrace", (b) => busyBtn(b, "出战中…", "按最优装打一场")(equipThenRace()));
   bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
   bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
   bind("match-equip", async (b) => {
@@ -3470,6 +3554,11 @@ function initMatchOnce() {
     restore();
   });
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
+bind("match-claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（全玩法）")(claimAll()));
+bind("match-modes-refresh", async (b) => {
+  const restore = busyBtn(b, "读取中…", "刷新其他玩法");
+  await loadMatchModes(); await loadMatchLog(); restore();
+});
   bind("match-gvg", (b) => busyBtn(b, "读取中…", "刷新公会战")(loadMatchGvg()));
   bind("match-sanguo", async (b) => {
     const restore = busyBtn(b, "读取中…", "刷新西游三国");
@@ -3485,6 +3574,8 @@ function initMatchOnce() {
   loadMatchGold();
   loadMatchGvg();
   loadMatchSanguo();
+  loadMatchModes();
+  loadMatchLog();
   if (!matchPvpTimer) matchPvpTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchPvp(); }, 60000);
   if (!matchUnionTimer) matchUnionTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchUnion(); }, 60000);
   if (!matchGvgTimer) matchGvgTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchGvg(); }, 60000);
