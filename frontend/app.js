@@ -3456,6 +3456,8 @@ function initMatchOnce() {
   bind("match-refresh", (b) => busyBtn(b, "读取中…", "刷新状态")(loadMatchState(true)));
   bind("match-feed", (b) => busyBtn(b, "喂食中…", "一键喂到 80")(feedAllCats()));
   bind("match-race", (b) => busyBtn(b, "出战中…", "打一场（当前装）")(raceOnce()));
+  bind("match-dress", (b) => busyBtn(b, "换装中…", "一键最优穿装")(equipBest()));
+  bind("match-dressrace", (b) => busyBtn(b, "出战中…", "穿装并打一场")(equipThenRace()));
   bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
   bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
   bind("match-equip", async (b) => {
@@ -3500,6 +3502,67 @@ async function feedOne(elfId) {
     body: JSON.stringify({ elf_id: elfId, candy_type: 1 }),
   }).then((x) => x.json()).catch(() => null);
   return r;
+}
+
+async function equipBest() {
+  const lin = await fetch("/api/match/lineup").then((x) => x.json()).catch(() => null);
+  const sugg = (lin && lin.suggest) || {};
+  const ids = sugg.equip_ids || [];
+  if (!ids.length) {
+    log("[每日比赛] 拿不到最优穿装建议（主题表为空）", "warn");
+    return;
+  }
+  // cats 与 eqs 顺序一一对应：按当前穿着的猫顺序，取建议组合
+  const st = matchState || await fetch("/api/match/state").then((x) => x.json()).catch(() => null);
+  const cats = (st && st.cats) || [];
+  const ready = cats.filter((c) => (c.equip || []).filter((x) => x > 0).length === 4);
+  if (!ready.length) {
+    log("[每日比赛] 没有满 4 件装备的猫，无法换装", "warn");
+    return;
+  }
+  const catsIds = ready.map((c) => c.elf_id);
+  const eqs = [];
+  for (const c of ready) {
+    for (const e of ids) if (!eqs.includes(e)) eqs.push(e);
+  }
+  if (eqs.length !== catsIds.length * 4) {
+    log("[每日比赛] 换装参数不对（猫 " + catsIds.length + " 只 / 装备 " + eqs.length + " 件）", "warn");
+    return;
+  }
+  const r = await fetch("/api/match/equip", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cats: catsIds, equip: eqs }),
+  }).then((x) => x.json()).catch(() => null);
+  if (!r || r.ok === false) {
+    log("[每日比赛] 换装失败 " + ((r && (r.message || r.data && r.data.desc)) || "网络异常"), "warn");
+  } else {
+    log("[每日比赛] 已换上最优装 " + eqs.join("|") + "（加权覆盖 " + sugg.cover
+        + "，主题 " + (sugg.theme_src || "-") + "）", "ok");
+  }
+  await loadMatchState(true);
+}
+
+async function equipThenRace() {
+  await equipBest();
+  // 换装后重新取一次真实穿着，再出战（铁律：参数取真实值）
+  const st = await fetch("/api/match/state").then((x) => x.json()).catch(() => null);
+  const cats = (st && st.cats) || [];
+  const cat = cats.find((c) => c.mood >= 80 && (c.equip || []).filter((x) => x > 0).length === 4)
+           || cats.find((c) => (c.equip || []).filter((x) => x > 0).length === 4);
+  if (!cat) { log("[每日比赛] 没有可出战的猫（需要心情达标 + 满 4 件装备）", "warn"); return; }
+  const r = await fetch("/api/match/race", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cat_id: cat.elf_id, equip: cat.equip }),
+  }).then((x) => x.json()).catch(() => null);
+  const d = r && r.data ? r.data : r || {};
+  if (d.code !== 0) {
+    log("[每日比赛] 出战失败 code=" + d.code + " " + (d.desc || d.message || ""), "warn");
+  } else {
+    log("[每日比赛] 出战 " + cat.elf_id + " 号：总分 " + d.total_value
+        + " · 评级分 " + d.level_score + " · 剩余次数 " + d.performe_num
+        + " · 奖励 " + (d.content || "-"), "ok");
+  }
+  await loadMatchState(true);
 }
 
 async function feedAllCats() {
