@@ -3454,6 +3454,8 @@ function initMatchOnce() {
   };
   // 手动按钮：点下立即禁用 + 「处理中」，完成立即刷新（项目铁律）
   bind("match-refresh", (b) => busyBtn(b, "读取中…", "刷新状态")(loadMatchState(true)));
+  bind("match-feed", (b) => busyBtn(b, "喂食中…", "一键喂到 80")(feedAllCats()));
+  bind("match-race", (b) => busyBtn(b, "出战中…", "打一场（当前装）")(raceOnce()));
   bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
   bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
   bind("match-equip", async (b) => {
@@ -3487,6 +3489,58 @@ function initMatchOnce() {
   if (!matchSanguoTimer) matchSanguoTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchSanguo(); }, 60000);
 }
 
+
+
+// ---------- 一键喂食 / 一键出战（2026-09-26 真机实打实证）----------
+// 心情阈值：游戏里心情不够做不了别的（真机：喂一次 cat_mood +1）。
+// 参数：competition act=11 {candy_type:1, elf_id} → 返回 cat_mood；act=4 {catId,id,ids} → 成绩。
+async function feedOne(elfId) {
+  const r = await fetch("/api/match/feed", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ elf_id: elfId, candy_type: 1 }),
+  }).then((x) => x.json()).catch(() => null);
+  return r;
+}
+
+async function feedAllCats() {
+  const target = 80;
+  const st = matchState || await fetch("/api/match/state").then((x) => x.json()).catch(() => null);
+  const cats = (st && st.cats) || [];
+  for (const c of cats) {
+    const id = c.elf_id;
+    if (!id || (c.mood || 0) >= target) continue;
+    for (let i = 0; i < 15; i++) {
+      const r = await feedOne(id);
+      const mood = r && r.data ? r.data.cat_mood : null;
+      if (mood === null) break;
+      log("[每日比赛] 喂猫 id=" + id + " → 心情 " + mood, mood >= target ? "ok" : "warn");
+      if (mood >= target) break;
+    }
+  }
+  await loadMatchState(true);
+}
+
+async function raceOnce() {
+  const st = matchState || await fetch("/api/match/state").then((x) => x.json()).catch(() => null);
+  const cats = (st && st.cats) || [];
+  // 挑「心情够 + 有满 4 件装备」的第一只，参数必须取真实值（铁律：坐标/槽位不用固定值）
+  const cat = cats.find((c) => c.mood >= 80 && (c.equip || []).filter((x) => x > 0).length === 4)
+           || cats.find((c) => (c.equip || []).filter((x) => x > 0).length === 4);
+  if (!cat) { log("[每日比赛] 没有可出战的猫（需要满 4 件装备）", "warn"); return; }
+  const r = await fetch("/api/match/race", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cat_id: cat.elf_id, equip: cat.equip }),
+  }).then((x) => x.json()).catch(() => null);
+  const d = r && r.data ? r.data : r || {};
+  if (d.code !== 0) {
+    log("[每日比赛] 出战失败 code=" + d.code + " " + (d.desc || d.message || ""), "warn");
+  } else {
+    log("[每日比赛] 出战 " + cat.elf_id + " 号：总分 " + d.total_value
+        + " · 评级分 " + d.level_score + " · 剩余次数 " + d.performe_num
+        + " · 奖励 " + (d.content || "-"), "ok");
+  }
+  await loadMatchState(true);
+}
 
 // ---------- 合成路径弹窗（点卡箱任意卡 -> 显示所属套卡的合成路径 + 一键炼卡）----------
 function closeSynth() {
