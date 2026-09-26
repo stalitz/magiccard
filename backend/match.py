@@ -583,6 +583,112 @@ def current_cover(equip: dict, worn: list, theme: dict) -> dict:
     return round(sum(prov.get(k, 0) * (theme.get(k, 0) / 100.0) for k in theme), 1)
 
 
+async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dict:
+    """一键比赛：把今日能打的场次**连续打完**（每次都换最优装），返回逐场明细。
+
+    这是「一键比赛」的后端编排，步骤全部走真实接口、参数均按 HAR/真机实证：
+
+      1. competition act=2   读今日主题 + 本场 id（每场随机，必须打之前现读）
+      2. competition act=6   读衣橱（best_equip 的输入）
+      3. competition act=1   读猫列表 + performe_num（今日剩余次数）
+      4. 循环 competition act=4 上台：
+           · 每轮都重新算最优穿装（主题每场独立随机，不能沿用上轮组合）
+           · 出战猫 = 心情达标 + 满 4 件装备 + 等级最高，没有就退而求「满 4 件装备」
+           · 一次非 code=0 立即停（参数错误不扣次数，但成功返错会白丢次数）
+           · performe_num 归零或到 max_races 上限即收工
+      5. 收工回读 act=1 拿最终状态，供前端刷新
+
+    **会消耗 performe_num**，由前端 confirm 后才调用；来一个 max_races 可限制场次。
+    """
+    try:
+        th = await competition_theme(session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"读主题异常：{e}"}
+    if not th.get("ok") or th.get("race_id") is None:
+        return {"ok": False, "message": f"读本场比赛 id 失败："
+                                        f"{th.get('message') or th.get('code')}"}
+    theme = {a["id"]: a["value"] for a in (th.get("theme") or [])}
+
+    try:
+        st = await match_state(session, want_equip=True)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"读比赛状态异常：{e}"}
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "读比赛状态失败"}
+
+    equip = st.get("equip") or {}
+    cats = st.get("cats") or []
+    left = st.get("performe_num")
+    try:
+        left = int(left) if left is not None else 0
+    except (TypeError, ValueError):
+        left = 0
+    total0 = left
+
+    ready = [c for c in cats
+             if len([x for x in (c.get("equip") or []) if x]) == 4]
+    if not ready:
+        return {"ok": False, "message": "没有满 4 件装备的猫，无法出战（不消耗次数）",
+                "left": total0}
+
+    races, theme_rows = [], (th.get("theme") or [])
+    n = 0
+    while left > 0 and (max_races <= 0 or n < max_races):
+        sug = best_equip(equip, theme) if theme else {}
+        ids = (sug.get("equip_ids") or [])
+        if len(ids) != 4:
+            races.append({"err": "算不出 4 件最优装，停止"})
+            break
+        pool = sorted(ready, key=lambda c: -(c.get("level") or 0))
+        pool = [c for c in pool
+                if (c.get("mood") or 0) >= stop_mood] or pool
+        cat = pool[0]
+        r = await competition_race(session, int(cat["elf_id"]), ids,
+                                   race_id=int(th["race_id"]))
+        if not r.get("ok"):
+            races.append({"err": r.get("message") or "请求异常"})
+            break
+        d = r.get("data") or {}
+        if d.get("code") != 0:
+            races.append({"cat_id": cat.get("elf_id"), "code": d.get("code"),
+                          "err": d.get("desc") or d.get("message") or "失败",
+                          "total_value": d.get("total_value")})
+            break
+        left = d.get("performe_num")
+        try:
+            left = int(left) if left is not None else 0
+        except (TypeError, ValueError):
+            left = 0
+        n += 1
+        races.append({
+            "cat_id": cat.get("elf_id"),
+            "cat_level": cat.get("level"),
+            "equip": ids,
+            "cover": sug.get("cover"),
+            "total_value": d.get("total_value"),
+            "level_score": d.get("level_score"),
+            "content": d.get("content"),
+            "left": left,
+            "theme": theme_rows,
+        })
+        # 每场主题独立随机，下一轮必须按新主题重算（HAR 实证：一天三场三个主题）
+        th_next = await competition_theme(session)
+        if th_next.get("ok"):
+            theme = {a["id"]: a["value"] for a in (th_next.get("theme") or [])}
+            theme_rows = th_next.get("theme") or []
+
+    try:
+        after = await match_state(session)
+    except Exception:  # noqa: BLE001
+        after = {}
+    return {
+        "ok": True, "ran": n, "left_before": total0, "left_after": left,
+        "races": races,
+        "theme": theme_rows,
+        "cats": (after.get("cats") if after.get("cats") else cats),
+    }
+
+
 # ---------------- 换装（2026-09-26 bisai2.har 实证，补齐了此前缺失的一环）----------------
 # union act=23  {cats:'3|4|2', eqs:'id|id|id|id|...'}  → battle_data
 #     · **cats 有 N 项，eqs 就是 N×4 个装备 id，顺序按 cats 平铺**（cat3 拿前 4 个，cat4 接后 4 个…）

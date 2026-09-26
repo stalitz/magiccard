@@ -2729,6 +2729,27 @@ async def match_theme():
         "performe_num": st.get("performe_num"),
     }
 
+@app.post("/api/match/run-all")
+async def match_run_all(req: dict):
+    """一键比赛：连续打完今日剩余场次（**消耗 performe_num**）。
+
+    前端点同一个按钮时先调本接口、再调 /api/match/claim-all 领奖（领奖零消耗），
+    后端不在这里重造领奖逻辑。
+
+    max_races>0 可限制最多打几场。逐场明细在 r.races 里。
+    """
+    if err := _require_login():
+        return err
+    try:
+        max_races = int((req or {}).get("max_races") or 0)
+    except (TypeError, ValueError):
+        max_races = 0
+    try:
+        return await mt.run_match_all(_session, max_races=max_races)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 @app.get("/api/match/lineup")
 async def match_lineup():
     """读当前出战阵容（union act=39，cats 全 0 即只读）。"""
