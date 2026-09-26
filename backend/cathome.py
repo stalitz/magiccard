@@ -20,10 +20,22 @@
 """
 from .constants import EP_TRAVEL_MATCH, EP_TRAVEL_PVP
 from .match import _act, _json_of, _plain_uin
+from .prop_dict import summarize_reward as _reward_text
 
 CANDY_EFFECT = {1: 10, 2: 20, 3: 50}   # 当日实打：小+10 / 中+20；大+50 为用户口述
 MOOD_TARGET = 80                        # 用户要求：玩耍保证心情 80 以上
 GACHA_CANDY_IDX = 2                     # 积分兑换 idx=2 = 大糖果（6 积分）
+
+# 金币福利 · 兑红宝石（bisai3.har 实证）：
+#   请求 card_travel_elf_competition act=21 {id:1} → {"code":0,"content":"92_32_8"}
+#   本次请求前 gold_buy_id2=6，请求后 gold_buy_id2=7（当日实跑确认）。
+# **编号撞车，别按字面推**：act=21 传的 id=1 不是 gold_buy_id 的下标（若按下标，
+# 该涨的该是 gold_buy_id1，但它仍是 0）；红宝石在配置表 catHome_Shoplist 里
+# 的 id 是 9（name="红宝石" price_num="2" price_type="1"），也不是 1。
+# 三者是三套编号，只有「现象」这一条证据链是硬的：传 1 → 计数落 2。
+GOLD_RUBY_ACT_ID = 1        # act=21 的 id 参数（照抄抓包，勿改）
+GOLD_RUBY_SLOT = 2          # 服务端计数字段 gold_buy_id2
+GOLD_RUBY_LIMIT = 7         # 用户口述 + 今日实测到顶（id=2 已是 7）
 
 
 async def home_state(session) -> dict:
@@ -65,6 +77,7 @@ async def home_state(session) -> dict:
                        ("cat_home_dress_hand_attr", "手"),
                        ("cat_home_dress_other_attr", "其他")):
         parts[label] = [{"id": it.get("id"), "forge": it.get("forge"),
+                         "chip": it.get("chip"),          # 锻这件要吃掉的材料数
                          "elv": it.get("elv"), "starlv": it.get("starlv"),
                          "xiyoulv": it.get("xiyoulv"), "ranklv": it.get("pvpRankLv"),
                          "exp": it.get("pvpexp")}
@@ -171,12 +184,69 @@ async def exchange_candy(session, num: int = 1) -> dict:
     return {"ok": True, "content": d.get("content") or "", "score": d.get("score")}
 
 
-# 一键全部里**当前无法自动执行**的玩法：写动作的 act 没在任何抓包里出现过，
+async def gold_buy_ruby(session) -> dict:
+    """金币福利 · 兑换红宝石（act=21 {id:1}）。
+
+    到上限就直接跳过 —— 这个动作每天能兑的次数有限，多点是真的浪费（用户已为此损失 1 次）。
+    动作前后都读回 gold_buy_id2：到顶不算成功也不重试。
+    """
+    slot = GOLD_RUBY_SLOT
+    before = await _act(session, EP_TRAVEL_MATCH, 20)
+    bought = ((before.get("data") or {}).get(f"gold_buy_id{slot}"))
+    if bought is not None and bought >= GOLD_RUBY_LIMIT:
+        return {"ok": True, "skipped": True,
+                "message": f"今日已兑 {bought} 次（上限 {GOLD_RUBY_LIMIT}），跳过"}
+    r = await _act(session, EP_TRAVEL_MATCH, 21, id=GOLD_RUBY_ACT_ID)
+    if not r.get("ok"):
+        return r
+    d = r.get("data") or {}
+    if d.get("code") not in (0, None):
+        return {"ok": False, "code": d.get("code"), "message": d.get("desc") or "兑换被拒"}
+    after = await _act(session, EP_TRAVEL_MATCH, 20)
+    bought2 = ((after.get("data") or {}).get(f"gold_buy_id{slot}"))
+    if bought2 is not None and bought2 <= (bought or 0):
+        return {"ok": False, "message": f"兑换未生效（gold_buy_id{slot} 仍为 {bought2}）"}
+    return {"ok": True, "content": d.get("content") or "", "bought": bought2}
+
+
+def pick_forge_target(parts: dict) -> dict:
+    """挑一件今天最该锻的服装：用户要求「找不花红宝石的锻造」。
+
+    判据（都来自 act=6 的原始字段，不臆造）：
+      - forge=0 表示这件还没锻过（已锻的 forge 普遍 9/19/29/39…）；
+      - chip = 这件锻造要吃掉的材料数；库存来自 cat_home_chip_vt。
+    所以在「未锻过」里挑 chip 最小的那件 —— 最不容易浪费材料/红宝石。
+    """
+    flat = []
+    for label, lst in (parts or {}).items():
+        for it in lst or []:
+            flat.append({"part": label, "id": it.get("id"), "forge": it.get("forge") or 0,
+                         "chip": it.get("chip") or 0})
+    new = [x for x in flat if x["forge"] == 0]
+    pool = new or flat
+    if not pool:
+        return None
+    return min(pool, key=lambda x: (x["chip"], x["id"]))
+
+
+async def forge_one(session, equip_id) -> dict:
+    """衣柜锻造一件（act=29 {equip_id}）。bisai3.har 实证：
+    {equip_id:20622} → {"attr":[...],"code":0,"forge":9}。
+    代价（要多少材料、要不要红宝石）尚未实证 —— 调用前先问用户。
+    """
+    r = await _act(session, EP_TRAVEL_MATCH, 29, equip_id=int(equip_id))
+    if not r.get("ok"):
+        return r
+    d = r.get("data") or {}
+    if d.get("code") not in (0, None):
+        return {"ok": False, "code": d.get("code"), "message": d.get("desc") or "锻造被拒"}
+    return {"ok": True, "forge": d.get("forge"), "attr": d.get("attr")}
+
+
+# 一键全部里**当前仍无法自动执行**的玩法：写动作的 act 仍没在抓包里出现。
 # 服务端对未知 act 一律回 `code=0, system busy`（已用 probe_home_writes.py 验证），
 # 盲探无解 —— 只能在日志里如实跳过，不猜参数、不假装有按钮。
 ALL_SKIPS = [
-    {"what": "金币福利 · 兑红宝石", "why": "购买动作的 act 未定位（缺抓包）"},
-    {"what": "衣柜锻造", "why": "锻造动作的 act 未定位（缺抓包）"},
     {"what": "竞技 · 领段位奖励", "why": "领段位奖的 act 未定位（act=15 只是任务奖励）"},
 ]
 
@@ -354,15 +424,20 @@ async def run_all(session) -> dict:
     steps.append({"act": "feed", "ok": bool(f.get("ok")),
                   "msg": f.get("message") or f"喂猫到 80（共 {n_candy} 颗糖）"})
 
-    # 4) 竞技自动（玩耍已在第 3 步做完，这里不再重复喂）
+    # 4) 金币福利 · 兑红宝石（到上限自动跳过，不会白白浪费次数）
+    g = await gold_buy_ruby(session)
+    steps.append({"act": "gold", "ok": bool(g.get("ok")), "skipped": bool(g.get("skipped")),
+                  "msg": g.get("message") or f"兑红宝石　→ {_reward_text(g.get('content'))}"})
+
+    # 5) 竞技自动（玩耍已在第 3 步做完，这里不再重复喂）
     a = await arena_auto(session, feed=False)
     for s in a.get("steps") or []:
         steps.append({"act": "arena:" + str(s.get("act")), "ok": s.get("ok"), "msg": s.get("msg")})
 
-    # 5) 写动作没定位的玩法：如实跳过（不猜参数、不假装有按钮）
+    # 6) 写动作仍没定位的玩法：如实跳过（不猜参数、不假装有按钮）
     steps.append({"act": "skip-group", "ok": True, "skipped": True,
-                  "msg": "以下 3 项写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
+                  "msg": "以下写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
 
-    return {"ok": True, "steps": steps, "skipped": ALL_SKIPS,
+    return {"ok": True, "steps": steps, "skipped": ALL_SKIPS, "gold": g,
             "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
             "surplus_left": a.get("surplus_left")}

@@ -2390,9 +2390,46 @@ async def home_arena_auto():
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.post("/api/home/gold-buy")
+async def home_gold_buy():
+    """金币福利 · 兑换红宝石（act=21）。到上限自动跳过，不浪费次数。"""
+    if err := _require_login():
+        return err
+    try:
+        return await ch.gold_buy_ruby(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/forge-pick")
+async def home_forge_pick():
+    """衣柜锻造 · 挑一件今天最该锻的（未锻过且材料需求最小的），只算不锻。"""
+    if err := _require_login():
+        return err
+    try:
+        st = await ch.home_state(_session)
+        best = ch.pick_forge_target(st.get("forge", {}).get("parts"))
+        return {"ok": True, "best": best, "stock": st.get("forge", {}).get("chip")}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/forge")
+async def home_forge(equip_id: int = 0):
+    """衣柜锻造一件（act=29 {equip_id}）。会真的消耗材料，先确认再点。"""
+    if err := _require_login():
+        return err
+    if not equip_id:
+        return {"ok": False, "message": "缺少 equip_id"}
+    try:
+        return await ch.forge_one(_session, equip_id)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 @app.post("/api/home/all")
 async def home_all():
-    """一键全部：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 竞技自动，按正确顺序跑一遍。"""
+    """一键全部：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 兑红宝石 → 竞技自动，按正确顺序跑一遍。"""
     if err := _require_login():
         return err
     try:
