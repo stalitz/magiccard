@@ -369,7 +369,8 @@ def load_race_log(limit: int = 20) -> list:
 
 
 async def competition_race(session, cat_id: int, equip_ids: list,
-                           race_id: int | None = None) -> dict:
+                           race_id: int | None = None,
+                           cat_level: int | None = None) -> dict:
     """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
 
     2026-09-26 真机实证（推翻此前「id=猫 id / ids 必须是当前穿着」的错误结论）：
@@ -416,6 +417,7 @@ async def competition_race(session, cat_id: int, equip_ids: list,
     if d.get("code") == 0:
         save_race_log({
             "cat_id": int(cat_id),
+            "cat_level": cat_level,
             "equip_ids": [int(x) for x in equip_ids],
             "race_id": int(race_id),
             "theme": _last_theme_rows,
@@ -652,7 +654,8 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
                 if (c.get("mood") or 0) >= stop_mood] or pool
         cat = pool[0]
         r = await competition_race(session, int(cat["elf_id"]), ids,
-                                   race_id=race_id)
+                                   race_id=race_id,
+                                   cat_level=int(cat.get("level") or 0))
         if not r.get("ok"):
             races.append({"err": r.get("message") or "请求异常"})
             break

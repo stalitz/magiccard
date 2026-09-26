@@ -2352,7 +2352,8 @@ async def match_race(req: dict):
     race_id = req.get("race_id")
     try:
         return await mt.competition_race(_session, int(cat_id), [int(x) for x in equip],
-                                         int(race_id) if race_id is not None else None)
+                                         int(race_id) if race_id is not None else None,
+                                         cat_level=int(req.get("cat_level") or 0) or None)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 

@@ -3385,7 +3385,7 @@ function renderMatchState() {
           · 心情 ${c.mood ?? "-"} · 运动 ${c.motion ?? "-"} · 表演 ${c.perform ?? "-"}
           <br><span style="color:var(--muted);font-size:12px">
             技能 ${(c.skills || []).map((s) => `#${s.cat_skill_id}·L${s.cat_skill_level}`).join("、") || "-"}
-            · 装备 ${(c.equip || []).filter((x) => x).join("/") || "-"}
+            · 装备(equip_arr) ${(c.equip || []).filter((x) => x).join("/") || "-"}
           </span></div></div>`).join("")
     : `<div class="empty-tip">暂无猫咪数据${d.bound ? "" : "（该号未开通比赛模块）"}</div>`;
 }
@@ -3433,7 +3433,8 @@ function renderMatchLog() {
     const th = (it.theme || []).map((a) => `${a.name || ("属性" + a.id)} ${a.value}%`).join(" · ");
     return `<div class="state-box" style="margin-bottom:6px">` +
       matchRow("时间", it.ts) +
-      matchRow("出战猫 / 场次 id", `${it.cat_id} 号 / ${it.race_id}`) +
+      matchRow("出战猫 / 场次 id",
+        `#${it.cat_id} 号${it.cat_level ? `（${it.cat_level} 级）` : ""} / ${it.race_id}`) +
       matchRow("穿装", (it.equip_ids || []).join("|")) +
       matchRow("本场主题", th || "-") +
       matchRow("总分 / 评级分", `${it.total_value ?? "-"} / ${it.level_score ?? "-"}`) +
@@ -3517,9 +3518,10 @@ const MODE_RELOAD = {
 
 const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "modes"];
 const MATCH_SUB_LOAD = {
-  // 猫卡片的「竞技常驻装」列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
+  // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
   home: () => { loadHomeState(); loadMatchState(); },
-  race: () => { loadMatchTheme(); loadMatchState(true); },
+  // 出战记录（#match-log-box）就在本面板，必须一起拉，否则永远停在「读取中…」
+  race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
   pvp: () => { loadMatchPvp(); },
   union: () => { loadMatchUnion(); loadMatchGold(); },
   gvg: () => { loadMatchGvg(); loadMatchSanguo(); },
@@ -4254,13 +4256,13 @@ async function raceOnce() {
   if (!cat) { mlog("[每日比赛] 没有可出战的猫（需要满 4 件装备）", "warn"); return; }
   const r = await fetch("/api/match/race", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cat_id: cat.elf_id, equip: cat.equip }),
+    body: JSON.stringify({ cat_id: cat.elf_id, equip: cat.equip, cat_level: cat.level }),
   }).then((x) => x.json()).catch(() => null);
   const d = r && r.data ? r.data : r || {};
   if (d.code !== 0) {
     mlog("[每日比赛] 出战失败 code=" + d.code + " " + (d.desc || d.message || ""), "warn");
   } else {
-    mlog("[每日比赛] 出战 " + cat.elf_id + " 号：总分 " + d.total_value
+    mlog("[每日比赛] 出战 " + cat.elf_id + " 号（" + cat.level + " 级）：总分 " + d.total_value
         + " · 评级分 " + d.level_score + " · 剩余次数 " + d.performe_num
         + " · 奖励 " + (d.content || "-"), "ok");
   }
