@@ -428,7 +428,11 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
          不是当前一张 40 没有就是缺」—— 缺口按 `face40_gap()` 的**总量**算。
       （此前写死 26117 属 theme 1810，炼的却是别的套，等于白烧礼物卡。）
 
-    候选排序：缺口张数多的优先 → 队列顺序（多套并行时不让第一套独吞）。
+    候选排序（用户 2026-09-26「要优先补最缺的那张」）：
+      ① 这张还差得多的优先（单卡缺口）
+      ② 同一张缺口相同时，**整套还差得多的那套**优先（多套并行时不让第一套独吞）
+      ③ 再相同，则**炼完全套用得更多的那张**优先（`f40` 需求量）
+      ④ 最后才按队列顺序、卡 id —— 保证结果稳定不抖
     """
     if not queue:
         return None
@@ -437,28 +441,30 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
     stock = stock or Counter()
     pending = pending or Counter()
 
-    cands = []                                    # (缺口张数, 队列序, cid, 该套)
+    cands = []                       # (单卡缺口, -整套缺口, -f40需求, 队列序, cid, tid)
     for order, tid in enumerate(queue):
         g = face40_gap(plans[tid], stock, pending)
         for cid, n in g["gap"].items():
             if cid not in keep or n <= 0:
                 continue
-            cands.append((int(n), order, int(cid), tid))
+            need_c = int(plans[tid].f40.get(cid, 0) or 0)
+            cands.append((int(n), -int(g["need_total"]), -need_c, order, int(cid), tid))
     if not cands:
         return None
-    cands.sort(key=lambda x: (-x[0], x[1], x[2]))
-    n, order, cid, tid = cands[0]
+    cands.sort(key=lambda x: (-x[0], x[1], x[2], x[3], x[4]))
+    n, _neg_need_total, neg_need_c, order, cid, tid = cands[0]
     plan = plans[tid]
     c = plan.cards.get(cid)
     face = int(c[3] or 0) if c else 0
     g = face40_gap(plan, stock, pending)
     return {"dst": cid, "name": plan.cname(cid), "face": face, "times": n,
-            "tid": tid, "theme": plan.name,
+            "tid": tid, "theme": plan.name, "f40_need": -neg_need_c,
             "need_total": g["need_total"], "have": g["have"],
             "gap_total": sum(g["gap"].values()),
             "gap": dict(sorted(g["gap"].items())),
             "target": f'{plan.cname(cid)}（{plan.name} {face}面，还差 {n} 张；'
-                      f'本套 40 面卡已有 {g["have"]} 张、总共还差 {g["need_total"]} 张）'}
+                      f'本套 40 面卡已有 {g["have"]} 张、总共还差 {g["need_total"]} 张；'
+                      f'炼完全套需用 {max(1, -neg_need_c)} 张）'}
 
 
 # ---------------------------------------------------------------------
@@ -519,8 +525,8 @@ class AutoRefine:
         # 这一项**不受 gift_drain 开关限制**——没勾收礼变卡，也该把箱里的卡用掉。
         self.box_gift_change = True
         self.box_gift_last: dict | None = None   # 最近一次结果（status 透传）
-        self._box_gift_fail = 0                  # 连续「一张都没变成功」的次数
-        self._box_gift_cooldown = 0.0            # 连败后的静默期（失败也烧源卡，别硬试）
+        # ★ 2026-09-26 去掉了「连败 N 次 → 静默 30 分钟」：用户定调「变卡失败要一直变，
+        #   直到成功或者礼物卡没了」。失败也烧源卡，所以箱里的卡烧完必然收手，不需要静默。
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
         self.steal_blocked: str = ""          # 本轮「能偷却没偷」的原因，供面板显示
         # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
@@ -640,9 +646,11 @@ class AutoRefine:
         if self.box_gift_change or self.gift_drain:
             rd_now = await self._read_state()
 
-        # 1.45) 卡箱里已有的礼物套 48 面卡 → 就地变卡（不收礼，见 _drain_box_gift）
+        # 1.45) 卡箱里已有的礼物套 48 面卡 → 就地变卡（不收礼，见 _drain_box_gift）。
+        #      变卡动过卡箱状态，_drain_box_gift 会重读并回传最新 rd，下面第 2 步直接用。
         if self.box_gift_change:
-            await self._drain_box_gift(steps, rd_now[1] if rd_now else None)
+            rd_now = (await self._drain_box_gift(
+                steps, rd_now[1] if rd_now else None, rd_now) or rd_now)
 
         # 1.5) 礼物箱快满 → 收礼 + 变卡成目标卡（可选环节）
         #      变出来的 40 面卡直接进卡箱 → 下面第 2 步重读状态时就当素材了，
@@ -896,7 +904,8 @@ class AutoRefine:
             return None
         return st, stock, slots, pending, need_cnt, need_buy
 
-    async def _drain_box_gift(self, steps: list[dict], stock: Counter | None = None) -> None:
+    async def _drain_box_gift(self, steps: list[dict], stock: Counter | None = None,
+                              rd=None) -> tuple | None:
         """卡箱里已有的礼物套 48 面卡 → 就地变卡，**不收礼**。
 
         与 _gift_drain 相互独立（不受 gift_drain 开关约束）：礼物收进来产出的
@@ -905,47 +914,57 @@ class AutoRefine:
         变卡」整条路可以省成「直接变」，既省一次收礼，也把白占箱位的卡变成素材。
 
         门槛（2026-09-26 真机实测补充）：**变卡失败也消耗源卡**（箱里 8 张，尝试 3 次
-        只成 1 张，箱里当场剩 5 张），所以每 tick 只试一次，且只在 dstid **确实是当前
-        队列用得上的卡**时才动手 —— 变出一张用不上的卡，等于拿 2 张礼物卡换 1 张废卡。
+        只成 1 张，箱里当场剩 5 张），所以只在 dstid **确实是当前队列用得上的卡**时才
+        动手 —— 变出一张用不上的卡，等于拿 2 张礼物卡换 1 张废卡。
 
         目标来源（2026-09-26 用户定调）：**不再写死** `gift_dst`。变卡的意义是「省掉炼
         40 面额这一步」，目标必须是**当前在炼的那套里的 40 面卡、且引擎正缺的那张**
-        —— 所以这里交给 `_pick_change_dst()` 按实时缺口挑（缺哪个变哪个）。
+        —— 所以这里交给 `_pick_change_dst()` 按实时缺口挑（缺哪个变哪个、优先补最缺的）。
+
+        ★ 2026-09-26 用户定调「变卡失败要一直变，直到成功或者礼物卡没了」：失败不再
+          静默 30 分钟，而是换下一张继续（失败也烧源卡，所以箱里的卡烧完必然收手）。
+
+        ★ 变卡完**立刻刷新卡箱状态**（用户同条要求）：变出的 dst 卡进了箱子、源卡消失，
+          不重读的话这一 tick 后面几步会拿旧库存判断「还差素材 → 又去买一张底卡」。
+          `gift.drain_box_gift_cards` 内部每试一张都会重扫卡箱，本函数收尾再读一次主界面
+          校正；返回新的 `rd`（tuple），调用方（tick 第 2 步）拿它当最新状态用，
+          正常情况下净增 0 次额外请求。读失败就沿用调用方给的那份，不打断流程。
         """
-        if self._box_gift_fail >= 2 or time.time() < self._box_gift_cooldown:
-            return
         if stock is None:
             stock = self._stock
         pick = self._pick_change_dst(stock)
         if not pick:
             self.box_gift_last = {"ok": True, "skipped": True, "inbox": 0, "tried": 0,
-                                  "changed": 0, "dst": None,
+                                  "changed": 0, "burned": 0, "dst": None,
                                   "message": "这一套的 40 面卡已够（或没有 40 面候选），"
                                              "本轮不消耗卡箱里的礼物卡"}
-            return
+            return rd
         dst = int(pick["dst"])
         try:
             r = await gf.drain_box_gift_cards(self.s, dstid=dst)
         except Exception as e:  # noqa: BLE001
             self._log("礼物卡变卡", False, f"异常：{e}")
             steps.append({"action": "礼物卡变卡", "ok": False, "detail": str(e)})
-            return
+            return rd
         r["dst"] = dst
         r["target"] = pick.get("target")
         self.box_gift_last = r
-        if r.get("skipped"):
-            self._box_gift_fail = 0            # 箱里没卡 = 正常，不累计
-            return
+        if r.get("skipped") and not int(r.get("tried") or 0):
+            return rd
         changed = int(r.get("changed") or 0)
-        if changed:
-            self._box_gift_fail = 0
-        else:
-            self._box_gift_fail += 1
-            # 失败也烧掉一张源卡，连试不该硬撑 → 静默 30 分钟后再看
-            self._box_gift_cooldown = time.time() + 1800
         ok = changed > 0
+        # 变卡动过卡箱 → 立刻重读，把「源卡没了 / 变出 dst 了」同步给引擎与调用方
+        if changed or r.get("burned") or r.get("tried"):
+            try:
+                rd_new = await self._read_state()
+            except Exception:  # noqa: BLE001
+                rd_new = None
+            if rd_new:
+                rd = rd_new
+                self._stock, self._pending = rd[1], rd[3]
         self._log("礼物卡变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物卡变卡", "ok": ok, "detail": r.get("message") or ""})
+        return rd
 
     async def _gift_drain(self, steps: list[dict]) -> None:
         """礼物箱快满 → 收礼 + 变卡（自动炼卡的可选环节，见 gf.drain_gift_box）。
@@ -1283,9 +1302,7 @@ class AutoRefine:
                              "target": (pick.get("target") if pick else ""),
                              "need40": (pick.get("need_total") if pick else 0),
                              "have40": (pick.get("have") if pick else 0),
-                             "useful": bool(pick),
-                             "cooldown_remain": max(0, int(self._box_gift_cooldown - time.time())),
-                             "last": self.box_gift_last},
+                             "useful": bool(pick), "last": self.box_gift_last},
                 "steal": {"enabled": self.steal_enabled,
                            "preferred": self.preferred_steal_friend,
                            "last_steal": self.last_steal,

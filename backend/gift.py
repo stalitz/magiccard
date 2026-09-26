@@ -469,34 +469,41 @@ async def find_box_gift_cards(session: LoginSession) -> list[dict]:
 
 
 async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
-                               max_try: int = 1) -> dict:
+                               max_try: int = 0) -> dict:
     """卡箱里已有的同礼物套 48 面卡 → 就地变卡，**不走收礼**。
 
     变出的 dstid 卡直接进卡箱，自动炼卡引擎下一 tick 就当素材用
     （等价于「少买一张底卡、少炼一次」）。
 
-    ⚠️ **变卡失败同样消耗源卡**（2026-09-26 真机实测：箱里 8 张，尝试 3 次只成 1 张，
-       箱里直接剩 5 张 = 8-3）。所以：
-         · max_try 默认 **1** —— 一个 tick 只试一次，失败就收手，绝不「换下一张继续」
-           （旧版那样一次最多能烧掉 4 张源卡换 2 张目标卡，纯亏）；
-         · 变出一张立刻停 —— dstid 是单张目标，连变没有意义。
+    ★ 2026-09-26 用户定调「变卡失败要一直变，直到成功或者礼物卡没了」：
+      变卡成功率约 50%、**失败同样消耗源卡**（真机实测：箱里 8 张，尝试 3 次只成 1
+      张，箱里当场剩 5 张），所以失败后**换下一张继续**，不停下来。
+      循环靠「重扫卡箱」实现：每次尝试前重新读一次卡箱拿到最新槽位（失败那张已被
+      服务端烧掉、必须从池里消失），变成「直到成功或箱里礼物卡没了」为止。
+      `max_try=0`（默认）= 不限次数，上限自然由源卡张数收敛；>0 则最多试这么多次。
+      变出一张立即停 —— dstid 是单张目标，连变没有意义。
     """
     # 目标面额硬校验：礼物卡只有 48 面一种形态，变卡只产出 40 面。
     # 传别的面额进去变，即使服务端收了也只是白烧一张源卡（变卡成功率约 50%）。
     v = change_dst_is_face40(dstid)
     if v is False:
         return {"ok": False, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
-                "dst": dstid,
+                "burned": 0, "dst": dstid,
                 "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动卡"}
     pool = await find_box_gift_cards(session)
     inbox = len(pool)
     if not inbox:
         return {"ok": True, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
-                "dst": dstid,
+                "burned": 0, "dst": dstid,
                 "message": "卡箱里没有礼物套的 48 面卡"}
-    tried = changed = 0
+    budget = inbox if max_try <= 0 else min(max_try, inbox)   # 硬上限：源卡有限
+    tried = changed = burned = 0
     last = ""
-    for p in pool[:max_try]:
+    for _ in range(budget):
+        pool = await find_box_gift_cards(session)      # 重扫：失败那张已被烧掉
+        if not pool:
+            break
+        p = pool[0]
         r = await change_card(session, p["id"], dstid, slotid=p["slot"],
                               slottype=p["slottype"])
         tried += 1
@@ -504,10 +511,14 @@ async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANG
             changed += 1
             last = f"#{p['id']} → {dstid} 成功"
             break
+        burned += 1                                    # 失败也烧掉一张源卡
         last = f"#{p['id']} → {dstid} 失败 code={r.get('code')}"
         await asyncio.sleep(0.3)
+    tail = (f"；{last}" if last else "")
+    if not changed and burned:
+        tail += "（失败也烧源卡，已换下一张继续，直到成功或箱里礼物卡没了）"
     return {"ok": changed > 0, "skipped": False, "inbox": inbox, "tried": tried,
-            "changed": changed, "dstid": dstid, "last": last,
+            "changed": changed, "burned": burned, "dstid": dstid, "last": last,
             "message": f"卡箱礼物卡 {inbox} 张：变成功 {changed} 张"
                        + (f"；{last}" if last else "")}
 

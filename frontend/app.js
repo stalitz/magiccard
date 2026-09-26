@@ -2826,6 +2826,11 @@ function renderAuto(st, bx) {
       stat("卡箱礼物卡", bg.enabled ? "优先变卡" : "关闭", "目标自动挑") +
       stat("自动变卡目标", tgt, bg.dst_face ? `${esc(String(bg.dst_face))} 面` : "") +
       stat("上次结果", last ? esc(String((last.last) || last.message || "")) : "还没执行") +
+      (last && (last.tried || last.burned)
+        ? stat("变卡次数", `尝试 ${last.tried || 0} 次`
+            + (last.burned ? `、失败 ${last.burned} 张（失败也烧源卡，失败后会换下一张继续变）` : ""),
+            "")
+        : "") +
       `</div>`);
     const dstEl = $("auto-gift-dst");
     if (dstEl) {
