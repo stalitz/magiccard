@@ -75,9 +75,10 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   // 实点一键全部（今天多数玩法已完成，应全部走「跳过」而不是报错）
   await w.eval("(async()=>{ document.getElementById('home-all').click(); await new Promise(r=>setTimeout(r,20000)); })()");
   console.log("  [一键全部后]", txt("home-arena-st"));
-  const logTxt = [...w.document.querySelectorAll("[data-op-log]")].map((e) => e.textContent).join(" | ");
-  console.log("  [一键全部日志]", logTxt.slice(-500));
-  assert(/一键全部/.test(logTxt), "一键全部写出了执行日志");
+  // 2026-09-26：一键全部属于每日比赛页（猫窝日常子模块），日志改走比赛页右栏[data-mlog]
+  const logTxt = [...w.document.querySelectorAll("[data-mlog]")].map((e) => e.textContent).join(" | ");
+  console.log("  [一键全部日志·比赛页右栏]", logTxt.slice(-500));
+  assert(/一键全部/.test(logTxt), "一键全部写出了执行日志（比赛页右栏）");
   assert(!/读取失败/.test(txt("home-arena-st")), "一键全部后状态块仍然有效：" + txt("home-arena-st"));
   assert(errors.length === 0, "无运行时错误：" + (errors.slice(0, 2).join(" ; ") || "无"));
   process.exit(process.exitCode || 0);

@@ -51,6 +51,25 @@
   .msub-bar .tab:last-child{border-right:0}
   .msub-bar .tab.active{background:#f0f7ff}
   .msub-hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
+  /* 每日比赛页：左内容 + 右「本页全局日志」。日志常驻右栏，切子模块不会被挤走。 */
+  .match-pane{flex-direction:row;align-items:stretch;min-height:0;gap:12px}
+  .match-pane>.lib{flex:1 1 auto;min-width:0}
+  .mlog-col{flex:0 0 272px;display:flex;flex-direction:column;min-height:0;min-width:0}
+  .mlog-col .lpanel{flex:1 1 auto}
+  #match-mlog-box{flex:1 1 auto;font:12px/1.6 ui-monospace,Menlo,monospace;
+    overflow-y:auto;padding:8px 10px;min-height:0}
+  #match-mlog-box .ln{display:flex;gap:6px;padding:3px 0;border-bottom:1px dashed var(--line)}
+  #match-mlog-box .ln:last-child{border-bottom:none}
+  #match-mlog-box .ln .t{color:#5b6b7a;flex:0 0 auto}
+  #match-mlog-box .ln .m{color:#3a4757;word-break:break-all;min-width:0}
+  #match-mlog-box .ln.ok .m{color:#5fd38a}
+  #match-mlog-box .ln.warn .m{color:#ffcf6b}
+  #match-mlog-box .ln.err .m{color:#ff7b7b}
+  @media (max-width:1240px){
+    .match-pane{flex-direction:column;overflow-y:auto}
+    .mlog-col{flex:0 0 auto}
+    #match-mlog-box{max-height:220px}
+  }
   .qr-box{width:200px;height:200px;margin:0 auto 16px;border:1px solid var(--line);
     border-radius:10px;display:flex;align-items:center;justify-content:center;background:#fafbfc}
   .qr-box img{width:180px;height:180px;display:block}
@@ -1283,7 +1302,7 @@
       
 
       </div>
-      <div id="pane-match" class="pane hidden">
+      <div id="pane-match" class="pane match-pane hidden">
         <div class="lib">
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
             <span style="font-weight:600;font-size:13.5px">每日比赛：</span>
@@ -1441,12 +1460,26 @@
             </div>
           </div>
         </div>
+        <!-- 右侧常驻：只记每日比赛页内各玩法的操作与结果（与总览页全局日志互相独立） -->
+        <div class="mlog-col">
+          <div class="lpanel">
+            <div class="lp-head">
+              <span class="t">每日比赛 · 全局日志</span>
+              <span class="cnt" id="mlog-cnt">0 条</span>
+              <span class="spacer"></span>
+              <button class="btn sm ghost" id="mlog-clear">清空</button>
+            </div>
+            <div id="match-mlog-box" class="lst" data-mlog>
+              <div id="match-mlog-empty" class="empty-tip">记录本页各玩法的操作与结果（刷新页面仍在）。</div>
+            </div>
+          </div>
+        </div>
       </div>
 
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926r"></script>
+<script src="/app.js?v=20260926s"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
