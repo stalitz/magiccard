@@ -153,29 +153,86 @@ async def main() -> None:
           str(s.calls[:1]))
     check("status 里带 box_gift 供面板显示", "useful" in bg and "last" in bg)
 
-    print("\n[8] pick_change_target：缺哪个变哪个（40 面优先）")
-    from backend.auto_refine import pick_change_target
+    print("\n[8] pick_change_target：缺哪个变哪个（缺口按总量算，只挑 40 面）")
+    from backend.auto_refine import face40_gap, pick_change_target
     keep = set(eng._keep)
-    empty = pick_change_target(eng.plans, eng.queue, Counter(), Counter(), keep)
-    check("空库存时挑出一张套内 40 面卡",
-          bool(empty) and empty["face"] == 40
-          and empty["dst"] in [c for c in p.ids if p.cards[c][3] == 40], str(empty))
-    full = Counter({c: 1 for c in p.ids})                    # 全套齐了
-    check("一套都齐 → 不挑（本轮不动箱里的礼物卡）",
-          pick_change_target(eng.plans, eng.queue, full, Counter(), keep) is None)
-    miss_one = Counter({c: 1 for c in p.ids if c != 23927})  # 只缺斗巧(40面)
-    got = pick_change_target(eng.plans, eng.queue, miss_one, Counter(), keep)
+    p40 = sorted(c for c in p.ids if p.cards[c][3] == 40)
+    check("1652 七夕情人节整套里确实有多张 40 面卡（不止一张可挑）", len(p40) >= 3,
+          str([(c, p.cname(c)) for c in p40]))
+
+    # 用户 2026-09-26 纠正①：礼物卡只有 48 面一种形态，变卡只产出 40 面 → 候选
+    # 必须是 40 面，**没有「放宽到别的面额」的兜底**。
+    half40 = Counter({c: 1 for c in p.ids if c not in p40})      # 40 面卡一张没有
+    g0 = face40_gap(p, half40, Counter())
+    zero = pick_change_target(eng.plans, eng.queue, half40, Counter(), keep)
+    check("箱里 40 面卡一张没有时 → 仍然按缺口动手（不是「没得挑就不动手」）",
+          zero is not None and zero["face"] == 40, str(zero))
+    for cid in p40:                                              # 40 面卡按需求量给齐
+        half40[cid] += face40_gap(p, Counter(), Counter())["gap"].get(cid, 0)
+    check("40 面卡按整套需求量凑齐 → 不挑（本轮不动箱里的礼物卡）",
+          pick_change_target(eng.plans, eng.queue, half40, Counter(), keep) is None,
+          str(face40_gap(p, half40, Counter())["gap"]))
+    # 部分补齐：三张 40 面卡凑齐两张后，第三张的缺口必须被看见
+    # 从零需求出发（整套要几张 40 面卡），把除斗巧外的都补齐 → 就只剩斗巧的缺口
+    req0 = face40_gap(p, Counter(), Counter())["gap"]
+    have_all_but_qiao = Counter({c: 1 for c in p.ids})
+    for cid, n in req0.items():
+        if cid != 23927:
+            have_all_but_qiao[cid] += n
+    gq = face40_gap(p, have_all_but_qiao, Counter())
+    got = pick_change_target(eng.plans, eng.queue, have_all_but_qiao, Counter(), keep)
+    check("已攒够的 40 面卡不进 gap（只剩斗巧的缺口）",
+          set(gq["gap"]) == {23927}, f'需求={req0} 剩余缺口={gq["gap"]}')
     check("只缺 23927 斗巧 → 就变 23927（缺哪个变哪个）",
           bool(got) and got["dst"] == 23927, str(got))
+
+    # 用户 2026-09-26 纠正②：「缺」= 炼的套卡一共需要多少张 40 的，凑不够就算缺，
+    # 不是「当前一张 40 没有」才算缺。
+    only_one = Counter({c: 1 for c in p.ids})
+    only_one[23926] = only_one[23925] = 0        # 只有 23927 斗巧一张 40 面卡
+    g1 = face40_gap(p, only_one, Counter())
+    check("手里只有 1 张 40 面卡 → 也算有缺口（不是等一张不剩才算缺）",
+          g1["need_total"] > 0 and g1["have"] == 1,
+          f'need={g1["need_total"]} have={g1["have"]} gap={g1["gap"]}')
+    check("缺口 = 各张 40 面卡净需求之和", g1["need_total"] == sum(g1["gap"].values()),
+          f'{g1["need_total"]} vs {sum(g1["gap"].values())}')
+    check("挑的是缺口最大的那张（一张顶最大进度）",
+          only_one[23927] == 1 and max(g1["gap"].items(), key=lambda kv: kv[1])[0]
+          in g1["gap"], str(g1["gap"]))
+    full = Counter({c: 3 for c in p.ids})        # 全套齐
+    g2 = face40_gap(p, full, Counter())
+    check("全套齐 → 缺口为 0", g2["need_total"] == 0, str(g2["gap"]))
+    check("全套齐 → 不挑", pick_change_target(eng.plans, eng.queue,
+                                              full, Counter(), keep) is None)
+
     eng2 = ar.AutoRefine(s, [1652, 1810])
     keep2 = set(eng2._keep)
-    k2 = pick_change_target(eng2.plans, eng2.queue,
-                            Counter({c: 1 for c in eng2.plans[1810].ids}),
-                            Counter(), keep2)
-    check("多套并行时只认在炼那套的卡（1810 全齐、1652 空 → 挑 1652 的 40 面卡）",
-          bool(k2) and k2["tid"] == 1652 and k2["face"] == 40, str(k2))
+    both_empty = pick_change_target(eng2.plans, eng2.queue, Counter(), Counter(), keep2)
+    check("多套并行：候选只来自队列里的套卡，且都是 40 面",
+          bool(both_empty) and both_empty["tid"] in (1652, 1810)
+          and both_empty["face"] == 40
+          and both_empty["dst"] in set(eng2.plans[both_empty["tid"]].ids), str(both_empty))
+    check("多套并行：谁缺口大先补谁（1652 缺 6 张 vs 1810 缺 8 张 → 1810）",
+          bool(both_empty) and both_empty["tid"] == 1810, str(both_empty))
+    only1652 = pick_change_target(eng2.plans, [1652], Counter(), Counter(), keep2)
+    check("队列只留 1652 时，1810 的卡不再算候选",
+          bool(only1652) and only1652["tid"] == 1652
+          and only1652["dst"] in set(eng2.plans[1652].ids), str(only1652))
     check("队列为空 → None（现在没在炼卡，别动箱里的卡）",
           pick_change_target(eng2.plans, [], Counter(), Counter(), keep2) is None)
+
+    print("\n[9] 目标面额硬校验：非 40 面一律不许变（礼物卡只有 48 面一种形态）")
+    n_before = s.transfer_n
+    r = await gf.drain_box_gift_cards(s, dstid=7773)      # 源卡 id 本身当 dst 用
+    check("dst 不是 40 面 → 直接拒绝，连源卡都不碰",
+          r.get("ok") is False and s.transfer_n == n_before, str(r)[:120])
+    n_before = s.transfer_n
+    r2 = await gf.drain_box_gift_cards(s, dstid=99999999)  # 卡库查不到这张卡
+    check("卡库查不到 dst（None）= 放行而不是误拦", s.transfer_n > n_before,
+          str(r2)[:120])
+    r3 = await gf.drain_box_gift_cards(s, dstid=23927)    # 正常 40 面套内卡
+    check("dst 是 40 面 → 正常走流程（源卡被消耗）", r3.get("tried") >= 1,
+          str(r3)[:120])
 
     print(f"\n结果：PASS {len(PASS)} / FAIL {len(FAIL)}")
     if FAIL:

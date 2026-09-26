@@ -46,6 +46,10 @@ const txt = (id) => ((w.document.getElementById(id) || {}).textContent || "").tr
       enabled: true, dst: 23926, dst_name: "求姻缘", dst_face: 40, dst_theme: "七夕情人节",
       target: "求姻缘（七夕情人节 40面，还差 2）", upper: 45, lower: 25, last: null,
     },
+    // 「缺」按整套 40 面卡的总量算（不是一张都没有才算缺）
+    face40: [{ tid: 1652, theme: "七夕情人节", need_total: 5, have: 1,
+               gap: { 23925: 2, 23926: 2, 23927: 1 }, kinds: 3,
+               ids: [23925, 23926, 23927] }],
     log: [],
   };
   try {
@@ -62,6 +66,13 @@ const txt = (id) => ((w.document.getElementById(id) || {}).textContent || "").tr
   assert(/收礼变卡目标/.test(body) && /求姻缘/.test(body), "收礼变卡目标也跟着自动挑");
   assert(txt("auto-gift-dst") === "#23925 种生求子（40面）",
     "启动行同步显示会自动变哪张：" + txt("auto-gift-dst"));
+
+  // 2026-09-26：把「缺」的口径显示出来 —— 整套要几张 40 面、已有几张、还差多少
+  assert(/40 面缺口/.test(body), "面板出现「40 面缺口」格");
+  assert(/七夕情人节 40面 1\/6（还差 5）/.test(body.replace(/\s+/g, " ")),
+    "按整套总量显示缺口（已有 1 / 共需 6、还差 5）："
+    + (body.match(/40 面缺口[^]{0,80}/) || [""])[0]);
+  assert(/礼物卡只变 40 面/.test(body), "注明礼物卡只能变 40 面");
 
   // 引擎没在跑 / 当前不缺套内卡时的兜底文案
   const st2 = JSON.parse(JSON.stringify(st));
