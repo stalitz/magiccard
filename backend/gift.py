@@ -32,6 +32,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 from .mc_api import LoginSession
@@ -64,6 +65,17 @@ DEFAULT_CHANGE_DST = 26117
 # 所以**只认服务端返回的 itemid**，不写死白名单（2026-09-21 踩过：写死 (7773,7774) 把
 # 真实成功的 7775 判成失败，卡住整条收礼→变卡链路）。
 GIFT_ITEM_THEME = 487      # 48 面礼物卡所在套卡主题（仅作说明/校验参考）
+# ── 卡箱里已有的 48 面礼物卡 → 优先就地变卡（用户 2026-09-26 反馈） ──
+# 现状问题：自动炼卡时卡箱里躺着礼物送来的 48 面卡，而现有链路只认
+#   freegift_take 刚收出来那一张 —— 箱里同套的那几张**一张都不用**（白占箱位）。
+# 事实依据：礼物收进来产出的 7773(蚕丝)/7774(五彩线)/7775(金丝线) 与卡箱里
+#   躺着的那几张**本来就是同一套** —— 同属 card_lib theme=487「手工织锦」。
+#   该套里面额 48 的 7771..7776 就是礼物形态；7777+ 是 187/612 面的织锦，
+#   不是礼物送的形态，不参与本逻辑。
+# 变卡（card_user_transfer_card）只认「源卡的 slotid+slottype」，**不要求它是刚收的**
+#   （HAR 实证 srcid 可以是卡箱里的任意卡 id），所以箱里同套的 48 面卡能直接当
+#   srcid 用，整个 freegift_take 步骤可以省掉 —— 少一次收礼就少一次礼物箱消耗。
+GIFT_THEME = 487           # 礼物卡所在套卡（与 GIFT_ITEM_THEME 同一套，此处为判据引用）
 # qzreferrer 固定串（HAR 里 freegift_send/take 都带，照原样回传避免被服务端当成异常来源）。
 _QZ_REFERRER = "https://appimg2.qq.com/card/index.htm?appid=365&page=receive"
 
@@ -376,6 +388,91 @@ async def take_and_change(session: LoginSession, index_id: int,
 DEFAULT_UPPER = 45      # 礼物箱快满阈值（箱上限 50，留几格缓冲）
 DEFAULT_LOWER = 25      # 收到这个件数就停手（约一半）
 
+_face48: set[int] | None = None
+
+
+def _face48_ids() -> set[int]:
+    """礼物套（theme=487「手工织锦」）里面额 48 的卡 id = 礼物卡的形态。
+
+    从卡库算而不是抄死 id：礼物卡与「卡箱里躺着的那几张」本来就是同一批东西，
+    只要 theme 不变，这套定义自动跟着卡库走。
+    """
+    global _face48
+    if _face48 is None:
+        lib = json.loads((Path(__file__).resolve().parent.parent
+                          / "data" / "card_lib.json").read_text(encoding="utf-8"))
+        cards = {int(c[0]): c for c in lib["card_list"]}
+        _face48 = set()
+        for t in lib["theme_card_list"]:
+            if int(t[0]) != GIFT_THEME:
+                continue
+            for cid in (t[11] or []):
+                c = cards.get(int(cid))
+                if c and int(c[3] or 0) == 48:
+                    _face48.add(int(cid))
+    return _face48
+
+
+async def find_box_gift_cards(session: LoginSession) -> list[dict]:
+    """扫卡箱（换卡箱 + 保险箱），找**同礼物套的 48 面卡**及其真实槽位。
+
+    返回 [{"id": int, "slot": int, "slottype": 0|1}, ...]（箱子内的原始顺序）。
+    读不到 / 箱里没有 → 空列表（**调用方据此判断「要不要去礼物箱取」**）。
+    """
+    try:
+        r = await session.post(EP_MAINPAGE, code="", opuin=session.uin)
+    except Exception:  # noqa: BLE001
+        return []
+    if r.get("code") != 0:
+        return []
+    ids = _face48_ids()
+    if not ids:
+        return []
+    from .card_plan import parse_user_cards
+
+    out = []
+    for bname, st in (("changebox", 0), ("storebox", 1)):
+        for slot, cid in (parse_user_cards(r.get("raw") or "").get(bname) or []):
+            if cid in ids:
+                out.append({"id": cid, "slot": slot, "slottype": st})
+    return out
+
+
+async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
+                               max_try: int = 1) -> dict:
+    """卡箱里已有的同礼物套 48 面卡 → 就地变卡，**不走收礼**。
+
+    变出的 dstid 卡直接进卡箱，自动炼卡引擎下一 tick 就当素材用
+    （等价于「少买一张底卡、少炼一次」）。
+
+    ⚠️ **变卡失败同样消耗源卡**（2026-09-26 真机实测：箱里 8 张，尝试 3 次只成 1 张，
+       箱里直接剩 5 张 = 8-3）。所以：
+         · max_try 默认 **1** —— 一个 tick 只试一次，失败就收手，绝不「换下一张继续」
+           （旧版那样一次最多能烧掉 4 张源卡换 2 张目标卡，纯亏）；
+         · 变出一张立刻停 —— dstid 是单张目标，连变没有意义。
+    """
+    pool = await find_box_gift_cards(session)
+    inbox = len(pool)
+    if not inbox:
+        return {"ok": True, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
+                "message": "卡箱里没有礼物套的 48 面卡"}
+    tried = changed = 0
+    last = ""
+    for p in pool[:max_try]:
+        r = await change_card(session, p["id"], dstid, slotid=p["slot"],
+                              slottype=p["slottype"])
+        tried += 1
+        if r.get("ok"):
+            changed += 1
+            last = f"#{p['id']} → {dstid} 成功"
+            break
+        last = f"#{p['id']} → {dstid} 失败 code={r.get('code')}"
+        await asyncio.sleep(0.3)
+    return {"ok": changed > 0, "skipped": False, "inbox": inbox, "tried": tried,
+            "changed": changed, "dstid": dstid, "last": last,
+            "message": f"卡箱礼物卡 {inbox} 张：变成功 {changed} 张"
+                       + (f"；{last}" if last else "")}
+
 
 async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
                          upper: int = DEFAULT_UPPER, lower: int = DEFAULT_LOWER,
@@ -384,7 +481,18 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
 
     设计成自动炼卡的一个前置环节：由调用方在「缺素材、准备买卡」之前调用。
     变卡约 50% 成功 → 失败的记下来继续，不阻塞；收礼失败（多半该条已失效）同样跳过。
+
+    ★ 2026-09-26 用户定调「卡箱里有礼物送的 48 面卡时，可以优先变卡，不用先从礼物里
+      取了变，卡箱没有再取」：所以本函数在动礼物箱**之前**，先检查卡箱里是否已经有
+      同套（theme=487）的 48 面礼物卡 —— 有就就地变掉，本轮不收礼；箱里一张都没有
+      （或全变失败）才走下面的收礼链路。
     """
+    # ① 卡箱优先：不收礼，直接用箱里已有的同套 48 面卡变
+    box = await drain_box_gift_cards(session, dstid)
+    if box.get("inbox") and box.get("changed"):
+        return {"ok": True, "skipped": False, "box": box["inbox"], "upper": upper,
+                "took": 0, "changed": box["changed"], "from_box": True,
+                "message": box.get("message") or ""}
     inb = await gift_inbox(session)
     if not inb.get("ok"):
         return {"ok": False, "message": inb.get("message") or "读礼物箱失败"}

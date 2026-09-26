@@ -1185,6 +1185,24 @@ async def gift_inbox_api():
         return {"ok": False, "message": f"查询异常：{e}"}
 
 
+@app.get("/api/gift/box_cards")
+async def gift_box_cards_api():
+    """只读：列出卡箱/保险箱里**同礼物套（theme=487）的 48 面卡**。
+
+    就是「卡箱优先变卡」那一步的取源（2026-09-26 用户反馈：以前箱里躺着礼物送的
+    48 面卡一张都没被用）。非零 count 即说明变卡时可以直接拿它们当 srcid，
+    不必先 freegift_take 收礼。无副作用。
+    """
+    if err := _require_login():
+        return err
+    try:
+        cards = await gf.find_box_gift_cards(_session)
+        return {"code": 0, "count": len(cards), "cards": cards,
+                "theme": gf.GIFT_THEME, "face": sorted(gf._face48_ids())}
+    except Exception as e:  # noqa: BLE001
+        return {"code": -1, "message": f"查询异常：{e}"}
+
+
 @app.post("/api/gift/take")
 async def gift_take_api(body: dict):
     """收一条礼物（freegift_take）→ 得到礼物卡 7773/7774。会真实消耗该条。
@@ -1198,6 +1216,24 @@ async def gift_take_api(body: dict):
                                  int(body.get("action") or 2))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"收礼异常：{e}"}
+
+
+@app.post("/api/gift/box_change")
+async def gift_box_change_api(body: dict | None = None):
+    """用**卡箱里已有的**礼物套 48 面卡就地变卡（不收礼）。会消耗 1 张源卡。
+
+    这就是自动炼卡里「卡箱优先变卡」那一步的手动入口（2026-09-26 用户反馈：以前
+    箱里躺着礼物送的 48 面卡一张都没被用，变卡只认 freegift_take 收出来的那张）。
+    body: {"dstid": 目标卡}  默认 26117（40 面涡旋仪）。变卡约 50% 成功。
+    """
+    if err := _require_login():
+        return err
+    b = body or {}
+    try:
+        return await gf.drain_box_gift_cards(
+            _session, int(b.get("dstid") or gf.DEFAULT_CHANGE_DST))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"变卡异常：{e}"}
 
 
 @app.post("/api/gift/take_change")

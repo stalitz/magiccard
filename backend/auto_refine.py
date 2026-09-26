@@ -394,6 +394,15 @@ class AutoRefine:
         self.gift_upper = gf.DEFAULT_UPPER   # 箱件数 ≥ 此值开始收+变
         self.gift_lower = gf.DEFAULT_LOWER   # 降到 ≤ 此值停手
         self.gift_last: dict | None = None   # 最近一次本环节的结果（status 透传）
+        # 卡箱里已有的礼物套 48 面卡 → 优先就地变卡（不必先收礼）。
+        # 用户 2026-09-26 反馈「现在你完全不用卡箱里的 48 面额卡」：以前箱里躺着
+        # 礼物送的 48 面卡，变卡链路却只认 freegift_take 刚收出来的那张。
+        # 二者本来就同一套（theme=487 手工织锦），箱里的卡同样能当 srcid。
+        # 这一项**不受 gift_drain 开关限制**——没勾收礼变卡，也该把箱里的卡用掉。
+        self.box_gift_change = True
+        self.box_gift_last: dict | None = None   # 最近一次结果（status 透传）
+        self._box_gift_fail = 0                  # 连续「一张都没变成功」的次数
+        self._box_gift_cooldown = 0.0            # 连败后的静默期（失败也烧源卡，别硬试）
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
         self.steal_blocked: str = ""          # 本轮「能偷却没偷」的原因，供面板显示
         # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
@@ -426,6 +435,21 @@ class AutoRefine:
     def net_plan(self, stock: Counter, pending: Counter, tid: int | None = None):
         p = self.plans[tid or self.tids[0]]
         return p.net_plan(stock, pending)
+
+    def _dst_useful(self, dst: int) -> bool:
+        """`dstid` 是不是当前队列**用得上的卡**（套内卡或配方链上任意一层）。
+
+        卡箱礼物卡自动变卡的门槛：变卡约 50% 成功、失败也烧掉一张源卡，若变出来的
+        卡不是这一套要的，那就是拿礼物卡换废卡（2026-09-26 真机实测）。
+        队列为空 → 返回 False（现在没在炼卡，先不动箱里的礼物卡）。
+        """
+        if not self.queue:
+            return False
+        for tid in self.queue:
+            p = self.plans[tid]
+            if dst in p.ids or dst in p.depth:
+                return True
+        return False
 
     # ---------- 日志 ----------
     def _log(self, action: str, ok: bool, detail: str) -> None:
@@ -490,6 +514,10 @@ class AutoRefine:
                         detail += f"｜原始响应 {self.last_pai_raw[:220]}"
                     steps.append({"action": "翻牌", "ok": dr.get("ok"), "detail": detail})
                     self._log("翻牌", bool(dr.get("ok")), detail)
+
+        # 1.45) 卡箱里已有的礼物套 48 面卡 → 就地变卡（不收礼，见 _drain_box_gift）
+        if self.box_gift_change:
+            await self._drain_box_gift(steps)
 
         # 1.5) 礼物箱快满 → 收礼 + 变卡成目标卡（可选环节）
         #      变出来的 40 面卡直接进卡箱 → 下面第 2 步重读状态时就当素材了，
@@ -742,6 +770,43 @@ class AutoRefine:
                for m, n in need_cnt.items()):
             return None
         return st, stock, slots, pending, need_cnt, need_buy
+
+    async def _drain_box_gift(self, steps: list[dict]) -> None:
+        """卡箱里已有的礼物套 48 面卡 → 就地变卡，**不收礼**。
+
+        与 _gift_drain 相互独立（不受 gift_drain 开关约束）：礼物收进来产出的
+        48 面卡和箱里躺着的那几张**本来就是同一套**（card_lib theme=487 手工织锦），
+        变卡只认源卡的 slotid+slottype，箱里的卡同样能当 srcid —— 于是「收礼 →
+        变卡」整条路可以省成「直接变」，既省一次收礼，也把白占箱位的卡变成素材。
+
+        门槛（2026-09-26 真机实测补充）：**变卡失败也消耗源卡**（箱里 8 张，尝试 3 次
+        只成 1 张，箱里当场剩 5 张），所以每 tick 只试一次，且只在 dstid **确实是当前
+        队列用得上的卡**时才动手 —— 变出一张用不上的卡，等于拿 2 张礼物卡换 1 张废卡。
+        """
+        if self._box_gift_fail >= 2 or time.time() < self._box_gift_cooldown:
+            return
+        if not self._dst_useful(int(self.gift_dst)):
+            return
+        try:
+            r = await gf.drain_box_gift_cards(self.s, dstid=int(self.gift_dst))
+        except Exception as e:  # noqa: BLE001
+            self._log("礼物卡变卡", False, f"异常：{e}")
+            steps.append({"action": "礼物卡变卡", "ok": False, "detail": str(e)})
+            return
+        self.box_gift_last = r
+        if r.get("skipped"):
+            self._box_gift_fail = 0            # 箱里没卡 = 正常，不累计
+            return
+        changed = int(r.get("changed") or 0)
+        if changed:
+            self._box_gift_fail = 0
+        else:
+            self._box_gift_fail += 1
+            # 失败也烧掉一张源卡，连试不该硬撑 → 静默 30 分钟后再看
+            self._box_gift_cooldown = time.time() + 1800
+        ok = changed > 0
+        self._log("礼物卡变卡", ok, r.get("message") or "")
+        steps.append({"action": "礼物卡变卡", "ok": ok, "detail": r.get("message") or ""})
 
     async def _gift_drain(self, steps: list[dict]) -> None:
         """礼物箱快满 → 收礼 + 变卡（自动炼卡的可选环节，见 gf.drain_gift_box）。
@@ -1045,6 +1110,10 @@ class AutoRefine:
                 "gift": {"enabled": self.gift_drain, "dst": self.gift_dst,
                          "upper": self.gift_upper, "lower": self.gift_lower,
                          "last": self.gift_last},
+                "box_gift": {"enabled": self.box_gift_change, "dst": self.gift_dst,
+                             "useful": self._dst_useful(int(self.gift_dst)),
+                             "cooldown_remain": max(0, int(self._box_gift_cooldown - time.time())),
+                             "last": self.box_gift_last},
                 "steal": {"enabled": self.steal_enabled,
                            "preferred": self.preferred_steal_friend,
                            "last_steal": self.last_steal,
