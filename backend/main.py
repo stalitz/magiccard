@@ -2314,6 +2314,32 @@ async def match_explore_extra():
             "rank": await mt.explore_rank(_session)}
 
 
+# mode-props 的取数映射（mode:来源 -> 协程），由 main 注入 match.mode_props
+_MODE_PROP_FETCH: dict = {
+    "comp:score": mt.comp_score, "comp:hero": mt.comp_hero,
+    "pvp:state": mt.pvp_state, "pvp:store": mt.pvp_store,
+    "union:task": mt.union_task, "union:chip": mt.union_chip,
+    "union:shop": mt.union_shop, "union:enemies": mt.union_enemies,
+    "explore:team": mt.explore_team, "explore:task": mt.explore_task,
+    "explore:shop": mt.explore_shop, "explore:rank": mt.explore_rank,
+    "sanguo:task": mt.sanguo_task, "sanguo:levels": mt.sanguo_list,
+    "sanguo:lineup": mt.sanguo_lineup,
+}
+
+
+@app.get("/api/match/mode-props")
+async def match_mode_props(mode: str = "", levelid: int = 0):
+    """某玩法的状态属性表（分组 + 中文名 + 原始值），前端每种玩法一个子块单独展示。
+
+    mode = comp | pvp | union | explore | sanguo。只读，不发起任何写操作。
+    """
+    if err := _require_login():
+        return err
+    if mode not in ("comp", "pvp", "union", "explore", "sanguo"):
+        return {"ok": False, "message": "未知玩法 " + str(mode)}
+    return await mt.mode_props(_session, mode, _MODE_PROP_FETCH, int(levelid))
+
+
 @app.get("/api/match/sanguo-extra")
 async def match_sanguo_extra(levelid: int = 0):
     """西游三国：任务（act=7）+ 关卡（act=9）+ 阵容（act=16）。只读。"""

@@ -16,6 +16,7 @@ HAR 中实证到的端点与参数：
 字段语义一律以 HAR 里的原始 key 为准；含义不确定的**原样透出**，不做中文硬译
 （避免把推测写成常量，见项目 MEMORY.md 铁律）。
 """
+import json
 from typing import Optional
 
 from .constants import (
@@ -830,3 +831,165 @@ async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0
                       eqs="|".join(str(int(x)) for x in eqs) + "|",
                       cats="|".join(str(int(c)) for c in cats) + "|")
 
+
+# ---------------------------------------------------------------------------
+# 各玩法「状态属性」字段表（2026-09-26）
+# 每个玩法子块单独取自己玩法的字段：来源接口 -> 分组 -> (中文名, 原 key)
+# 未在此列出的 key 会归进「其他原始字段」，不会丢服务端返回的字段。
+# ---------------------------------------------------------------------------
+MODE_PROP_SOURCES: dict = {
+    "comp": ["score", "hero"],
+    "pvp": ["state", "store"],
+    "union": ["task", "chip", "shop", "enemies"],
+    "explore": ["team", "task", "shop", "rank"],
+    "sanguo": ["task", "levels", "lineup"],
+}
+
+# 少数来源的 data 结构特殊（不是「扁平字段表」），单独抽字段
+MODE_PROP_EXTRACT: dict = {
+    "union:enemies": lambda d: {"对手串": d.get("list"), "对手数": len((d.get("list") or "").split(",")) if d.get("list") else 0},
+    "explore:team": lambda d: {"队伍数": len(d.get("teamlist") or []), "队伍": d.get("teamlist")},
+    # 关卡/商店这类接口的 data 还套一层 {code,desc,data:[...]}，取出来才好看懂
+    "sanguo:levels": lambda d: {"关卡表": d.get("data")},
+}
+
+# 这些来源要带参数（levelid / level），fetch 调用时单独处理
+MODE_PROP_ARGS: dict = {
+    "union:enemies": ("level", 8),
+    "sanguo:lineup": ("levelid", 0),
+}
+
+MODE_PROP_GROUPS: dict = {
+    "comp": [
+        ("积分与次数", [("score", "积分"), ("free_num", "免费次数"), ("free_times", "今日剩余次数"),
+                        ("signleTimes", "单场报名次数"), ("multiTimes", "多人报名次数"),
+                        ("magic_diamond", "魔钻")]),
+        ("排行与荣誉", [("my_top_score", "我的最高分"), ("my_rankbits", "我的排名位"),
+                        ("my_top_eq_attr", "我的顶级装备属性"), ("zan_bit", "点赞位"),
+                        ("day_ts", "榜单日期 ts")]),
+    ],
+    "pvp": [
+        ("次数", [("pvp_num", "挑战次数"), ("free_pvp_num", "免费次数"), ("flush_num", "刷新次数"),
+                  ("revenge_num", "复仇次数"), ("surplus", "剩余次数")]),
+        ("战绩与奖励", [("score", "积分"), ("daily_task", "日常任务"), ("season_task", "赛季任务"),
+                        ("rank_gift_bit", "段位礼包位"), ("season_rank_gift", "赛季礼包"),
+                        ("record_red", "记录红点"), ("zan", "点赞数")]),
+        ("阵容与主题", [("battle_arr", "出战配置"), ("max_lv", "最高等级"), ("week_theme", "本周主题")]),
+    ],
+    "union": [
+        ("任务", [("num", "任务次数"), ("resetnum", "重置次数"), ("bits", "任务位"),
+                  ("data", "任务数据")]),
+        ("工会商店", [("bit", "商店位"), ("bit2", "商店位2"), ("data", "商品列表")]),
+        ("关卡对手", [("对手串", "对手串"), ("对手数", "对手数")]),
+    ],
+    "explore": [
+        ("任务", [("task_bits", "任务位"), ("task_detail", "任务明细")]),
+        ("探索队伍", [("队伍数", "队伍数"), ("队伍", "队伍")]),
+        ("商店与排行", [("data", "商店列表")]),
+    ],
+    "sanguo": [
+        ("任务", [("task_bits", "任务位"), ("task_detail", "任务明细")]),
+        ("关卡", [("关卡表", "关卡表"), ("bit", "关卡位")]),
+        ("阵容", [("elf_list", "猫咪阵容")]),
+    ],
+}
+
+# 分组里出现的非原始 key（抽取器造出来的），不参与「其他字段」比对
+_EXTRA_KEYS = {"对手串", "对手数", "队伍数", "队伍", "关卡表", "商品列表", "关卡数"}
+
+
+def _fmt_v(v) -> str:
+    """把服务端值压成一行展示文本。"""
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, str):
+        return v if len(v) <= 90 else v[:90] + "…"
+    try:
+        s = json.dumps(v, ensure_ascii=False)
+        return f"{len(v)} 项 · {s[:110]}" + ("…" if len(s) > 110 else "")
+    except Exception:
+        s = repr(v)
+        return s if len(s) <= 110 else s[:110] + "…"
+
+
+def _merge_src(mode: str, src_name: str, data) -> dict:
+    """把一个来源的 data 摊平成 {原始key: 值}（跳过 code/desc 之类噪声）。
+
+    data 可能是 dict（扁平字段表）也可能是 list（如三国关卡 56 项），
+    list 一律以「来源名」作 key 保留，避免服务端字段被丢弃。
+    """
+    key = f"{mode}:{src_name}"
+    if key in MODE_PROP_EXTRACT:
+        try:
+            return MODE_PROP_EXTRACT[key](data or {})
+        except Exception:
+            return {}
+    if isinstance(data, list):
+        return {src_name: data}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        if k in ("code", "desc", "need_callback", "ok"):
+            continue
+        out[k] = v
+    return out
+
+
+async def mode_props(session, mode: str, fetch: dict, levelid: int = 0) -> dict:
+    """某玩法的状态属性表（分组 + 中文名 + 原始值），供前端子块单独展示。
+
+    **不额外发写操作**：只读各玩法已有的 act（comp 9/16、pvp 1/17、union 15/30/27、
+    explore 11/15/26/28、sanguo 7/9/16），语义与 `-extra` 端点完全一致。
+    fetch 由 main.py 注入（{f"{mode}:{src}": 协程}），避免这里依赖具体函数名。
+    """
+    if mode not in MODE_PROP_SOURCES:
+        return {"ok": False, "message": f"未知玩法 {mode}"}
+    merged: dict = {}
+    for s in MODE_PROP_SOURCES[mode]:
+        fn = (fetch or {}).get(f"{mode}:{s}")
+        if not fn:
+            continue
+        try:
+            # s 是短名，带玩法前缀才能对上 ARGS / EXTRACT 的键
+            sk = f"{mode}:{s}"
+            if sk in MODE_PROP_ARGS:
+                _arg, default = MODE_PROP_ARGS[sk]
+                data = (await fn(session, levelid or default) or {}).get("data")
+            else:
+                data = (await fn(session) or {}).get("data")
+        except Exception as e:
+            return {"ok": False, "message": f"{s} 读取失败：{type(e).__name__}: {e}"}
+        merged.update(_merge_src(mode, s, data))
+
+    groups, seen = [], set()
+    for gname, rows in MODE_PROP_GROUPS.get(mode, []):
+        out = []
+        for raw_key, label in rows:
+            if raw_key not in merged:   # _EXTRA_KEYS 只在「其他字段」里排除，别挡住分组展示
+                continue
+            txt = _fmt_v(merged[raw_key])
+            if txt == "":
+                continue
+            out.append({"k": label, "key": raw_key, "v": txt})
+            seen.add(raw_key)
+        if out:
+            groups.append({"name": gname, "rows": out})
+
+    rest = []
+    for k, v in merged.items():
+        if k in seen or k in _EXTRA_KEYS:
+            continue
+        txt = _fmt_v(v)
+        if txt == "":
+            continue
+        rest.append({"k": k, "key": k, "v": txt})
+    if rest:
+        groups.append({"name": "其他原始字段", "rows": rest})
+
+    total = sum(len(g["rows"]) for g in groups)
+    return {"ok": True, "mode": mode, "groups": groups, "total": total}
