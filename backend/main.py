@@ -36,6 +36,7 @@ from . import gift as gf
 from . import travel_elf_auto as te
 from . import dig_auto as dg
 from . import match as mt
+from . import cathome as ch
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_XIYOU, EP_WORLD_SANGUO)
@@ -2312,6 +2313,81 @@ async def match_explore_extra():
             "task": await mt.explore_task(_session),
             "shop": await mt.explore_shop(_session),
             "rank": await mt.explore_rank(_session)}
+
+
+# ---- 主界面「每日玩法」（backend/cathome.py，2026-09-26 bisai2.har + 实打实证）----
+
+@app.get("/api/home/state")
+async def home_state():
+    """主界面每日玩法状态：点赞 bit / 扭蛋免费 / 积分 / 猫心情 / 竞技场剩余 / 金币福利。只读。"""
+    if err := _require_login():
+        return err
+    try:
+        return await ch.home_state(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/like")
+async def home_like(req: dict = None):
+    """点赞。body {target: "match"|"arena"}。"""
+    if err := _require_login():
+        return err
+    target = ((req or {}).get("target") or "").strip()
+    try:
+        return await ch.like(_session, target)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/gacha-free")
+async def home_gacha_free():
+    """扭蛋机免费抽一次（act=17 {id:1}，每天 1 次，后端二次校验 free_times）。"""
+    if err := _require_login():
+        return err
+    try:
+        return await ch.gacha_free(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/exchange-candy")
+async def home_exchange_candy(req: dict = None):
+    """积分兑换大糖果（act=18 {idx:2, num}，6 积分/颗）。body {num:1}。"""
+    if err := _require_login():
+        return err
+    num = int(((req or {}).get("num")) or 1)
+    try:
+        return await ch.exchange_candy(_session, num)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/feed")
+async def home_feed(req: dict = None):
+    """喂糖。body {mode:"all"} 全部喂到 80；或 {elf_id, candy_type} 手动喂一颗。"""
+    if err := _require_login():
+        return err
+    body = req or {}
+    try:
+        if body.get("mode") == "all":
+            return await ch.feed_smart(_session)
+        if body.get("elf_id") is None or body.get("candy_type") is None:
+            return {"ok": False, "message": "缺少 elf_id / candy_type"}
+        return await ch.feed_one(_session, int(body["elf_id"]), int(body["candy_type"]))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/home/arena-auto")
+async def home_arena_auto():
+    """竞技比赛自动：挑低战力打（≤4）+ 免费刷对手 + 领任务奖励。消耗挑战次数。"""
+    if err := _require_login():
+        return err
+    try:
+        return await ch.arena_auto(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
 
 
 # mode-props 的取数映射（mode:来源 -> 协程），由 main 注入 match.mode_props
