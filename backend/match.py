@@ -632,8 +632,16 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
                 "left": total0}
 
     races, theme_rows = [], (th.get("theme") or [])
+    race_id = int(th["race_id"])
     n = 0
     while left > 0 and (max_races <= 0 or n < max_races):
+        # 2026-09-26 修：每场都必须重读 act=2 拿**本场**的 race_id。
+        # 此前沿用首轮 id，第 2 场起 race_id 过期 → act=4 回 code=-1 → 提前收工。
+        th_next = await competition_theme(session)
+        if th_next.get("ok") and th_next.get("race_id") is not None:
+            race_id = int(th_next["race_id"])
+            theme = {a["id"]: a["value"] for a in (th_next.get("theme") or [])}
+            theme_rows = th_next.get("theme") or []
         sug = best_equip(equip, theme) if theme else {}
         ids = (sug.get("equip_ids") or [])
         if len(ids) != 4:
@@ -644,7 +652,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
                 if (c.get("mood") or 0) >= stop_mood] or pool
         cat = pool[0]
         r = await competition_race(session, int(cat["elf_id"]), ids,
-                                   race_id=int(th["race_id"]))
+                                   race_id=race_id)
         if not r.get("ok"):
             races.append({"err": r.get("message") or "请求异常"})
             break
@@ -671,11 +679,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
             "left": left,
             "theme": theme_rows,
         })
-        # 每场主题独立随机，下一轮必须按新主题重算（HAR 实证：一天三场三个主题）
-        th_next = await competition_theme(session)
-        if th_next.get("ok"):
-            theme = {a["id"]: a["value"] for a in (th_next.get("theme") or [])}
-            theme_rows = th_next.get("theme") or []
+        # 下一轮的主题/race_id 已在循环开头重读，这里不再重复拉
 
     try:
         after = await match_state(session)

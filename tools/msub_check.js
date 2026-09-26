@@ -81,6 +81,10 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(inSub("claim-all", "home"), "#claim-all 归位到「猫窝日常」主界面");
   assert(!w.document.querySelector("#match-claim-all"),
     "出战面板不再挂 match-claim-all（已改名 claim-all 并移走）");
+  // 猫卡片挂的是 act=1 的 equip_arr（竞技常驻装），每日比赛每次上台重新穿装不读它
+  // → 属于竞技，归「猫窝日常」；出战面板只留每日比赛自己的东西
+  assert(inSub("match-cats", "home"), "#match-cats 归位到「猫窝日常」（竞技常驻装列表）");
+  assert(!inSub("match-cats", "race"), "#match-cats 不再留在「出战（比赛）」里");
 
   console.log("== 首次进入：只加载「猫窝日常」 ==");
   calls.length = 0;

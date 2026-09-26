@@ -3517,7 +3517,8 @@ const MODE_RELOAD = {
 
 const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "modes"];
 const MATCH_SUB_LOAD = {
-  home: () => { loadHomeState(); },
+  // 猫卡片的「竞技常驻装」列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
+  home: () => { loadHomeState(); loadMatchState(); },
   race: () => { loadMatchTheme(); loadMatchState(true); },
   pvp: () => { loadMatchPvp(); },
   union: () => { loadMatchUnion(); loadMatchGold(); },
