@@ -14,8 +14,14 @@
 - 金币福利（act=20 读 gold_buy_id1..6）：商品表 = catHome_GoldShoplist，
   id=2 = 红宝石×8（10000 金币）。**购买动作的 act 尚未定位**（act=19/act=20 带 id 均
   只回 busy/状态，未实际扣金币）→ 这里只展示状态，按钮等抓包。
-- 竞技场：pvp act=1 的 surplus=免费挑战剩余、**2026-09-27 实测该上限就是 2（不是固定 4）**、
-  flush_num=已用免费刷新（实跑回显「刷新剩 3 次」，即每日 4 次）、free_pvp_num 与 surplus 同值；
+- 竞技场次数口径（2026-09-27 全天实测，别再把四个字段混用）：
+  `surplus` = **当前还能打的免费场次**（动态的：打一场掉 1，打到 0 后 act=8 直接回
+  `system busy`(-3) —— 用两个不同对手连打都 busy，确认是真没次数，不是参数问题）；
+  `free_pvp_num` = 每日免费次数**总量 4**（不随消耗变化，全天恒为 4）；
+  `pvp_num` = 付费挑战次数（恒 0）；`flush_num` = 已用免费刷新（跑之前 0、跑完 1）；
+  `battle_arr=[3,4,2]` 语义至今未定位 → **只记录不解读**，别拿它当剩余次数用。
+  教训：上一版把「开局 surplus=2」写成「每日上限就是 2」是错的 —— 那天是**开跑前就已经
+  用掉 2 次**，surplus 只是剩余量，不是日上限。
   enemy_list 里带**自己**的条目（uin 相同），其 ce 就是自己当前战力；
   挑战 = act=8 {type:'fight', euin}；领奖 = act=15 {id:1..4}（daily_task 位）。
 """
@@ -121,7 +127,9 @@ async def home_state(session) -> dict:
         "gacha": {"free_used": d16.get("free_times"), "score": d16.get("score"),
                   "free_num": d16.get("free_num")},
         "cats": cats,
-        "pvp": {"surplus": dp1.get("surplus"), "flush_num": dp1.get("flush_num"),
+        "pvp": {"surplus": dp1.get("surplus"), "free_pvp_num": dp1.get("free_pvp_num"),
+                "pvp_num": dp1.get("pvp_num"),
+                "flush_num": dp1.get("flush_num"),
                 "my_ce": my_ce, "score": dp1.get("score"),
                 "enemies": [{"uin": e.get("uin"), "name": e.get("name"),
                              "ce": e.get("ce"), "winnum": e.get("winnum")}
@@ -371,6 +379,12 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
     flush_left = max_flush - int(dp.get("flush_num") or 0)
     my_ce = next((e.get("ce") for e in dp.get("enemy_list") or []
                   if str(e.get("uin")) == uin), None)
+    # 开跑前的原始配额整份留底 —— 以后查「今天到底打了几次/还剩几次」看这一份，
+    # 别再靠 surplus 一个字段猜（surplus 是剩余量，不是日上限）
+    quota_before = {"surplus": dp.get("surplus"), "free_pvp_num": dp.get("free_pvp_num"),
+                    "pvp_num": dp.get("pvp_num"), "flush_num": dp.get("flush_num"),
+                    "battle_arr": dp.get("battle_arr"), "my_ce": my_ce,
+                    "score": dp.get("score")}
 
     def targets(lst, my):
         if my is None:
@@ -380,6 +394,7 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
 
     enemies = dp.get("enemy_list") or []
     wins, fights = 0, 0
+    hard_cap = max(surplus, 0) + 5   # 防跑飞：正常打满就停，多出的 5 次是给异常场景兜底
     while surplus > 0:
         cand = sorted(targets(enemies, my_ce), key=lambda e: -e["ce"])
         if not cand:
@@ -404,7 +419,6 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
             steps.append({"act": "fight", "ok": False, "foe": foe.get("name"),
                           "msg": d.get("desc") or r.get("message") or "挑战失败"})
             break
-        surplus -= 1
         fights += 1
         ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
         win = ba.get("iswin")
@@ -413,6 +427,19 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
                       "ce": foe.get("ce"), "win": win,
                       "score": ba.get("pvp_score"), "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）"})
         enemies = [e for e in enemies if str(e.get("uin")) != str(foe["uin"])]
+        # 剩余次数**以服务端为准**：每打一场重读 act=1 的 surplus，服务端说还有就继续打。
+        # 原来只在本地 `surplus -= 1`，一旦本地与服务端不同步就会漏打（或多打）。
+        # hard_cap 只在服务端异常（一直说有次数）时兜底，正常走不到。
+        re_st = await _act(session, EP_TRAVEL_PVP, 1)
+        live = int((re_st.get("data") or {}).get("surplus") or 0)
+        if live > 0:
+            surplus = live
+            hard_cap -= 1
+            if hard_cap <= 0:
+                steps.append({"act": "limit", "ok": True, "msg": "场次异常，已达安全上限"})
+                break
+        else:
+            surplus = 0
 
     # 只有真正打了才领任务奖励（HAR 实证：都是打完连着领 4 个）；一次没打就别空领
     claims = []
@@ -426,9 +453,18 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
     else:
         steps.append({"act": "claim", "ok": False, "msg": "今天没打挑战，跳过领奖"})
 
+    # 打完再读一次原始配额，和用户/游戏里的显示对照
+    tail = await _act(session, EP_TRAVEL_PVP, 1)
+    td = tail.get("data") or {}
+    quota_after = {"surplus": td.get("surplus"), "free_pvp_num": td.get("free_pvp_num"),
+                   "pvp_num": td.get("pvp_num"), "flush_num": td.get("flush_num"),
+                   "battle_arr": td.get("battle_arr"), "score": td.get("score")}
+    fights_today = (quota_after.get("free_pvp_num") or 0) - (quota_before.get("free_pvp_num") or 0) or None
     out = {"ok": True, "steps": steps, "fights": fights, "wins": wins,
            "claims": claims, "surplus_left": surplus,
-           "surplus_before": surplus + fights}   # +fights = 本次开打前的剩余次数
+           "surplus_before": quota_before.get("surplus"),
+           "quota_before": quota_before, "quota_after": quota_after,
+           "fights_today": fights_today}   # 今日总免费场次 = free_pvp_num 差值（口径未定时可为 None）
     _save_run("arena_auto", out)
     return out
 
@@ -480,6 +516,7 @@ async def run_all(session) -> dict:
 
     out = {"ok": True, "steps": steps, "skipped": ALL_SKIPS, "gold": g,
            "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
-           "surplus_left": a.get("surplus_left")}
+           "surplus_left": a.get("surplus_left"),
+           "fights_today": a.get("fights_today"), "quota_before": a.get("quota_before")}
     _save_run("run_all", out)
     return out

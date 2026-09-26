@@ -4038,8 +4038,9 @@ async function loadHomeState() {
     `（目标 80）心情不足会自动喂`;
   const pv = d.pvp || {};
   $("home-arena-st").textContent =
-    `剩余挑战 ${pv.surplus ?? "-"} · 已刷对手 ${pv.flush_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
-    (pv.surplus === 0 ? "（今天打完了）" : "");
+    `剩余 ${pv.surplus ?? "-"} / 每日免费 ${pv.free_pvp_num ?? "-"}` +
+    ` · 已刷对手 ${pv.flush_num ?? "-"} · 付费 ${pv.pvp_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
+    (pv.surplus === 0 ? "（免费场次已用完）" : (pv.surplus > 0 ? "（还能打）" : ""));
   // 金币福利：act=21 兑红宝石后计数落在 gold_buy_id2（编号与 act 参数不一致，见 cathome.py 注释）
   const gi = (d.gold && d.gold.items) || [];
   const ruby = gi.find((g) => g.id === 2) || {};
