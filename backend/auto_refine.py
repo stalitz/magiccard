@@ -339,7 +339,9 @@ class ThemePlan:
         else:
             runs, buy = self.net_plan(stock, pending or Counter())
             ok = True
-        order = sorted(runs, key=lambda c: self.depth.get(c, 0))
+        # 与 _refine_all 的 real 排产同口径：深度**降序 = 先炼高面额**，
+        # 否则面板列的顺序和引擎实际先提交的不一致（看着像在囤 40 面卡）
+        order = sorted(runs, key=lambda c: -self.depth.get(c, 0))
         secs = sum(runs[c] * int(self.comp[c][6]) for c in runs)
         return {
             "tid": self.tid, "name": self.name, "star": self.star,
@@ -838,11 +840,19 @@ class AutoRefine:
         # 轮转：从 _rr 开始，保证每套都有机会拿到炉位，不被第一套独吞
         order = self.queue[self._rr % len(self.queue):] + self.queue[:self._rr % len(self.queue)]
         self._rr += 1
-        # **按炉次交错**展开：每套依次出一个炉次（各自深度升序），轮流取。
+        # **按炉次交错**展开：每套依次出一个炉次（各自深度**降序**），轮流取。
         # 不能「一套把自己的炉次全提交完再轮到下一套」——那第一套会把空炉位全吃光，
         # 多套并行就退化成单套串行了（2026-09-17 离线验证抓到）。
+        #
+        # ★ 深度降序（高面额优先）是 2026-09-26 用户定调的主线：
+        #   「能炼更高面额的就炼更高面额的」「我已经囤了 40 面的，明明可以直接炼 80 的，
+        #     这样才能更快的炼 130，你却又去炼 40 的」。炉位是稀缺资源，40 面卡
+        #   （depth=1）排在 130 面卡（depth=3）前面时，**能直接开工的高面额卡会被素材
+        #   卡占住炉位而排队** —— 表现出来就是「主线是 1810，结果一直在炼 40 面」。
+        #   素材不够的 target 会被 _prepare_turn 挡掉（缺的是还得炼出来的成品卡 →
+        #   return None），所以降序不会死循环：高面额等不到素材就让位给下一张。
         buckets = {tid: sorted(plans_net.get(tid, ({}, {}))[0],
-                               key=lambda c: self.plans[tid].depth.get(c, 0))
+                               key=lambda c: -self.plans[tid].depth.get(c, 0))
                    for tid in order}
         seq: list[tuple[int, int]] = []
         while any(buckets.values()):
