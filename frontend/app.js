@@ -297,7 +297,7 @@ function switchPane(pane) {
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
-  if (pane === "overview") { ovLoadProps(); initLotteryOnce(); }
+  if (pane === "overview") { ovLoadProps(); initLotteryOnce(); initHomeOnce(); loadHomeState(); }
   if (pane === "lib") initLibOnce();
   if (pane === "cardbox") initCardBoxOnce();
   if (pane === "auto") initAutoOnce();
@@ -4854,4 +4854,151 @@ async function spPoll() {
     if (anyRunning && !spTimer) spTimer = setInterval(spPoll, 3000);
     if (!anyRunning && spTimer) { clearInterval(spTimer); spTimer = null; }
   } catch {}
+}
+
+// ---------- 总览「每日玩法」（猫窝）：点赞 / 扭蛋机 / 喂糖 / 竞技自动 ----------
+// 2026-09-26 实证：点赞状态 = comp act=9 / pvp act=14 的 zan_bit；
+// 扭蛋免费 = comp act=16 free_times；糖果增量 1:+10 2:+20 3:+50（当日实打）。
+let homeInited = false;
+const HOME_ITEM_NAME = {
+  "92_33": "大糖果", "92_34": "中糖果", "92_35": "小糖果", "92_32": "红宝石",
+  "92_9": "三叶草", "92_38": "经验药水(小)", "92_37": "经验药水(中)",
+  "92_10": "扭蛋币", "44": "点赞礼", "48": "面值卡", "117": "卡包",
+};
+
+function homeRewardText(content) {
+  if (!content) return "";
+  return String(content).split(",").map((seg) => {
+    const p = seg.split("_");
+    if (p.length === 3) {
+      const base = p[1] === "0" ? p[0] : `${p[0]}_${p[1]}`;
+      return (HOME_ITEM_NAME[base] || HOME_ITEM_NAME[p[0]] || seg) + (p[0] === "48" ? `（${p[1]}面额）` : "") + `×${p[2]}`;
+    }
+    return seg;
+  }).join("、");
+}
+
+async function loadHomeState() {
+  const st = $("home-like-st");
+  if (!st) return;
+  let d;
+  try {
+    d = await fetch("/api/home/state").then((x) => x.json());
+  } catch (e) { st.textContent = "读取失败：" + e; return; }
+  if (!d || d.ok === false) { st.textContent = "读取失败：" + (d && d.message || "?"); return; }
+  const mark = (v) => (v === 1 ? "已点 ✓" : "未点 ✗");
+  $("home-like-st").textContent =
+    `每日比赛榜 ${mark(d.likes.match)} · 竞技比赛榜 ${mark(d.likes.arena)}`;
+  $("home-gacha-st").textContent =
+    `免费抽 ${d.gacha.free_used ? "已用" : "可用"} · 积分 ${d.gacha.score ?? "-"}`;
+  $("home-cat-st").textContent =
+    (d.cats || []).map((c) => `${c.elf_id}:${c.mood ?? "?"}`).join(" · ") +
+    `（目标 80）心情不足会自动喂`;
+  const pv = d.pvp || {};
+  $("home-arena-st").textContent =
+    `剩余挑战 ${pv.surplus ?? "-"} · 已刷对手 ${pv.flush_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
+    (pv.surplus === 0 ? "（今天打完了）" : "");
+  $("home-gold-st").textContent =
+    `红宝石（10000 金币×8）已兑换 ${d.gold.ruby_bought ?? 0} 次`;
+  // 扭蛋免费已用 → 禁用按钮
+  const gb = $("home-gacha");
+  if (gb) { gb.disabled = !!d.gacha.free_used; gb.textContent = d.gacha.free_used ? "今天已免费抽" : "免费抽一次"; }
+}
+
+async function homePost(url, body) {
+  const r = await fetch(url, { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}) }).then((x) => x.json()).catch(() => null);
+  return r;
+}
+
+function initHomeOnce() {
+  if (homeInited) return;
+  homeInited = true;
+  const bindH = (id, fn) => { const b = $(id); if (b) b.onclick = () => fn(b); };
+
+  bindH("home-like", async (b) => {
+    const done = busyBtn(b, "点赞中…", "一键点赞");
+    try {
+      let d = await loadHomeStateOnce();
+      const targets = [];
+      if (d && d.likes) {
+        if (d.likes.match !== 1) targets.push(["match", "每日比赛榜"]);
+        if (d.likes.arena !== 1) targets.push(["arena", "竞技比赛榜"]);
+      }
+      if (!targets.length) { log("[点赞] 两个榜今天都点过了", "warn"); return; }
+      for (const [t, name] of targets) {
+        const r = await homePost("/api/home/like", { target: t });
+        if (r && r.ok) log(`[点赞] ${name} → ${homeRewardText(r.content) || "成功"}`, "ok");
+        else log(`[点赞] ${name} 失败：${(r && r.message) || "?"}`, "err");
+      }
+    } finally { await loadHomeState(); done(); }
+  });
+
+  bindH("home-gacha", async (b) => {
+    const done = busyBtn(b, "抽取中…", "免费抽一次");
+    try {
+      const r = await homePost("/api/home/gacha-free");
+      if (r && r.ok) log(`[扭蛋机] 免费抽 → ${homeRewardText(r.content) || "成功"}`, "ok");
+      else log(`[扭蛋机] ${(r && r.message) || "抽取失败"}`, "warn");
+    } finally { await loadHomeState(); done(); }
+  });
+
+  bindH("home-candy", async (b) => {
+    const done = busyBtn(b, "兑换中…", "兑换大糖果（6 积分）");
+    try {
+      const r = await homePost("/api/home/exchange-candy", { num: 1 });
+      if (r && r.ok) log(`[扭蛋机] 兑换 → ${homeRewardText(r.content) || "大糖果×1"}（积分余 ${r.score ?? "?"}）`, "ok");
+      else log(`[扭蛋机] 兑换失败：${(r && r.message) || "?"}`, "err");
+    } finally { await loadHomeState(); done(); }
+  });
+
+  bindH("home-feed", async (b) => {
+    const done = busyBtn(b, "喂糖中…", "一键喂到 80");
+    try {
+      const r = await homePost("/api/home/feed", { mode: "all" });
+      for (const stp of (r && r.steps) || []) {
+        if (stp.msg === "无需喂") continue;
+        const cn = { 1: "小", 2: "中", 3: "大" }[stp.candy] || stp.candy;
+        log(`[玩耍] 猫${stp.elf_id} ${cn}糖果 → 心情 ${stp.mood}`,
+            stp.ok ? "ok" : "err");
+      }
+      if (r && r.ok === false) log(`[玩耍] ${(r.message) || "喂糖中断"}`, "warn");
+      else if (r && !(r.steps || []).length) log("[玩耍] 全部猫心情达标，无需喂", "warn");
+    } finally { await loadHomeState(); done(); }
+  });
+
+  bindH("home-arena", async (b) => {
+    let st = {};
+    try { st = await fetch("/api/home/state").then((x) => x.json()); } catch (e) {}
+    const surplus = st && st.pvp ? st.pvp.surplus : "?";
+    if (!confirm(`将先把 4 只猫喂到心情 80，再自动挑战战力低于自己的对手（剩余 ${surplus} 次），没有就免费刷对手（4 次/日），打完自动领任务奖励。\n消耗今天的竞技挑战次数，继续？`)) return;
+    const done = busyBtn(b, "竞技中…", "自动竞技（低战力挑战 + 领奖）");
+    try {
+      const r = await homePost("/api/home/arena-auto");
+      for (const stp of (r && r.steps) || []) {
+        if (stp.act === "feed") {
+          const m = /喂了 (\d+) 颗/.exec(stp.msg || "");
+          log(m && +m[1] === 0 ? "[玩耍] 4 只猫心情已达标，跳过喂糖（竞技前自动）"
+                               : `[玩耍] ${stp.msg}（竞技前自动）`, stp.ok ? "" : "warn");
+        } else if (stp.act === "fight" && stp.ok) {
+          log(`[竞技] ${stp.msg} → ${stp.win === 1 ? "胜利" : "失败"}${stp.score != null ? ` +${stp.score}分` : ""}`, stp.win === 1 ? "ok" : "");
+        } else if (stp.act === "flush") {
+          log(`[竞技] ${stp.msg}`, stp.ok ? "" : "warn");
+        } else if (stp.act === "claim") {
+          log(`[竞技] ${stp.msg}`, "ok");
+        } else if (stp.ok === false) {
+          log(`[竞技] ${stp.msg || "失败"}`, "err");
+        }
+      }
+      for (const c of (r && r.claims) || []) log(`[竞技] 领奖 id${c.id} → ${homeRewardText(c.content)}`, "ok");
+      if (r && r.ok) log(`[竞技] 本轮 ${r.fights} 战 ${r.wins} 胜，剩余挑战 ${r.surplus_left}`, "ok");
+    } finally { await loadHomeState(); done(); }
+  });
+}
+
+// 读取一次状态但不触发渲染副作用（供点赞前判断用）
+async function loadHomeStateOnce() {
+  try { return await fetch("/api/home/state").then((x) => x.json()); }
+  catch (e) { return null; }
 }
