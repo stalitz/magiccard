@@ -2652,7 +2652,9 @@ async function autoStart() {
   const steal = $("auto-steal").checked ? 1 : 0;
   const sf = ($("auto-steal-friend").value || "").trim();
   const gd = $("auto-gift-drain").checked ? 1 : 0;
-  const gdst = parseInt($("auto-gift-dst").value, 10) || 26117;
+  // 变卡目标改成自动（用户 2026-09-26 定调「不要指定，缺哪个变哪个」）：
+  // 传 0 = 让后端按「在炼套卡里缺的那张 40 面卡」挑，写死某个卡会变出用不上的废卡。
+  const gdst = 0;
   const gup = parseInt($("auto-gift-upper").value, 10) || 45;
   const glow = parseInt($("auto-gift-lower").value, 10) || 25;
   const b = $("auto-start");
@@ -2816,10 +2818,28 @@ function renderAuto(st, bx) {
   const bg = (st && st.box_gift) || null;
   if (bg) {
     const last = bg.last;
+    // 目标不再手填：自动挑「在炼套卡里缺的那张 40 面卡」，这里把挑中的目标显示出来
+    const tgt = bg.target
+      ? esc(String(bg.target))
+      : (bg.dst ? `#${esc(String(bg.dst))} ${esc(bg.dst_name || "")}` : "暂无（本轮不缺套内卡）");
     head.push(`<div class="state-box" style="margin-top:10px">` +
-      stat("卡箱礼物卡", bg.enabled ? "优先变卡" : "关闭", `变卡目标 #${esc(String(bg.dst || ""))}`) +
+      stat("卡箱礼物卡", bg.enabled ? "优先变卡" : "关闭", "目标自动挑") +
+      stat("自动变卡目标", tgt, bg.dst_face ? `${esc(String(bg.dst_face))} 面` : "") +
       stat("上次结果", last ? esc(String((last.last) || last.message || "")) : "还没执行") +
       `</div>`);
+    const dstEl = $("auto-gift-dst");
+    if (dstEl) {
+      dstEl.textContent = bg.target
+        ? `#${esc(String(bg.dst || ""))} ${esc(bg.dst_name || "")}（${esc(String(bg.dst_face || ""))}面）`
+        : "暂无（本轮不缺套内卡）";
+    }
+    const gft = (st && st.gift) || null;
+    if (gft) {
+      head[head.length - 1] += stat("收礼变卡目标",
+        gft.target ? esc(String(gft.target))
+          : (gft.dst_name ? `${esc(gft.dst_name)}（${esc(gft.dst_theme || "")}）` : "暂无（本轮不缺套内卡）"),
+        gft.enabled ? "" : "未勾选");
+    }
   }
   body.innerHTML = head.join("");
   renderAutoLog(st);

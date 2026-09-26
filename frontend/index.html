@@ -828,8 +828,7 @@
                    title="优先去这家偷（如 983688972）；留空 = 从好友列表最后一名往回找有空炉的">
             <span class="sep"></span>
             <label class="check" title="勾上后：每轮在「缺素材、准备买卡」之前先看礼物箱。箱件数达到上限就收礼+变卡，变出来的卡直接当素材 —— 于是本来要「买 10 面卡 + 自己炼」的那一步可以省掉，同时防止礼物箱满溢丢礼物。"><input type="checkbox" id="auto-gift-drain"> 收礼变卡</label>
-            <span style="font-size:12px;color:var(--muted)">目标<input id="auto-gift-dst" class="num-in" type="number" value="26117" style="width:80px"
-                   title="变卡产出的目标卡 id（默认 26117 = 40 面卡）"></span>
+            <span style="font-size:12px;color:var(--muted)" title="变卡目标自动跟着「在炼的套卡」走：从该套的套内卡里挑缺的那张 40 面卡（缺哪个变哪个），变出来直接当素材炼更大的面额。指定别的卡等于白烧源卡，所以这里不手填。">目标 <span id="auto-gift-dst" style="color:var(--txt)">自动（缺什么变什么）</span></span>
             <span style="font-size:12px;color:var(--muted)">满<input id="auto-gift-upper" class="num-in" type="number" value="45" style="width:46px">收
                   <input id="auto-gift-lower" class="num-in" type="number" value="25" style="width:46px">止</span>
             <span class="sep"></span>
@@ -1416,7 +1415,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926m"></script>
+<script src="/app.js?v=20260926n"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
