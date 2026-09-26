@@ -2840,6 +2840,17 @@ function renderAuto(st, bx) {
           : (gft.dst_name ? `${esc(gft.dst_name)}（${esc(gft.dst_theme || "")}）` : "暂无（本轮不缺套内卡）"),
         gft.enabled ? "" : "未勾选");
     }
+    // 每套「40 面卡缺口」：这套从头炼到尾要几张 40 面，手上已有几张、还差多少。
+    // 只变 40 面（礼物卡只有 48 面一种形态，变卡只产出 40 面），凑不齐整套就一直变。
+    const gaps = (st && st.face40) || [];
+    if (gaps.length) {
+      const txt = gaps.map((g) => {
+        const left = g.need_total || 0;
+        return `${esc(String(g.theme))} 40面 ${esc(String(g.have))}/${esc(String(g.have + left))}`
+          + (left ? `（还差 ${esc(String(left))}）` : "（已够）");
+      }).join(" · ");
+      head[head.length - 1] += stat("40 面缺口", txt, "礼物卡只变 40 面");
+    }
   }
   body.innerHTML = head.join("");
   renderAutoLog(st);
