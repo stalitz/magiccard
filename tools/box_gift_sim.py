@@ -35,39 +35,58 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 # ---------------------------------------------------------------- 假 session
 class SimSession:
-    """mainpage 的卡池可替换；变卡结果按 fail_seq 逐次返回成败。"""
+    """mainpage 的卡池可替换；变卡结果按 ok_seq 逐次返回成败。
+
+    ok_seq[i]=True → 第 i+1 次变卡**成功**（result=0）；缺省项 = 失败。
+    变卡成败**都**烧掉源卡（真机实测），所以每次 qzone 都会把源卡从卡池里摘掉，
+    这样代码里「每试一张就重扫卡箱」的行为能被真实还原。
+    """
 
     def __init__(self, cards: list[tuple[int, int, int]],
-                 fail_seq: list[bool] | None = None):
+                 ok_seq: list[bool] | None = None):
         self.uin = "1"
-        self.fail_seq = list(fail_seq or [])
+        self.ok_seq = list(ok_seq or [])
         self.calls: list[tuple] = []
         self.transfer_n = 0
+        self.pending: list[int] = []          # 炉内在炼（写进 raw 的 stovebox）
         self.set_cards(cards)
 
-    def set_cards(self, cards: list[tuple[int, int, int]]) -> None:
+    def set_cards(self, cards: list[tuple[int, int, int]], pending=None) -> None:
+        """pending 缺省时**保留**当前炉内卡（变卡只动箱子，不该把炉里的抹掉）。"""
         self.cards = list(cards)
+        if pending is not None:
+            self.pending = list(pending)
         ch = [c for c in cards if c[2] == 0]
         st = [c for c in cards if c[2] == 1]
 
-        def box(name, items):
+        def box(name, items, mx=18):
             body = "".join(f'<card slot="{s}" id="{i}"/>'
                            for i, s, _ in sorted(items, key=lambda x: x[1]))
-            return f'<{name} cur="{len(items)}" max="18" used="{len(items)}">{body}</{name}>'
+            return f'<{name} cur="{len(items)}" max="{mx}" used="{len(items)}">{body}</{name}>'
 
         self.raw = ("<qqhome><user randchance=\"0\"/>"
-                    + box("changebox", ch) + box("storebox", st) + "</qqhome>")
+                    + box("changebox", ch) + box("storebox", st)
+                    # box() 的 items 顺序是 (id, slot, slottype)
+                    + box("stovebox", [(i, 0, 0) for i in self.pending], 7)
+                    + "</qqhome>")
+
+    def remove_card(self, src: int, slot: int | None = None) -> None:
+        """源卡必定消失（**变卡失败也一样烧**）。"""
+        if slot is None:
+            slot = self._slot_of(src)
+        self.set_cards([c for c in self.cards if not (c[0] == src and c[1] == slot)])
+
+    def add_card(self, cid: int) -> None:
+        """变卡成功 → 目标卡落箱，占一个新槽位。"""
+        nxt = max((c[1] for c in self.cards), default=0) + 1
+        where = 0 if any(c[2] == 0 for c in self.cards) else 1
+        self.set_cards(self.cards + [(cid, nxt, where)])
 
     def apply_result(self, src: int, dst: int, ok: bool, slot: int | None = None) -> None:
         """变卡一次后的真实库存变化：源卡**必定**消失（失败也烧），成功才得 dst。"""
-        if slot is None:
-            slot = self._slot_of(src)
-        rest = [c for c in self.cards if not (c[0] == src and c[1] == slot)]
-        self.set_cards(rest)
+        self.remove_card(src, slot)
         if ok:
-            nxt = max((c[1] for c in self.cards), default=0) + 1
-            where = 0 if any(c[2] == 0 for c in self.cards) else 1
-            self.set_cards(self.cards + [(dst, nxt, where)])
+            self.add_card(dst)
 
     def _slot_of(self, cid: int) -> int:
         for c in self.cards:
@@ -85,9 +104,15 @@ class SimSession:
                            kw.get("slotid"), kw.get("slottype")))
         self.transfer_n += 1
         n = self.transfer_n
-        if n <= len(self.fail_seq) and self.fail_seq[n - 1]:
-            return {"code": 0, "raw": '<qqhome code="0" result="0"/>', "message": ""}
-        return {"code": 0, "raw": '<qqhome code="0" result="1"/>', "message": ""}
+        ok = n <= len(self.ok_seq) and self.ok_seq[n - 1]
+        self.remove_card(kw.get("srcid"), kw.get("slotid"))   # 成败都烧源卡
+        if ok:
+            self.add_card(kw.get("dstid"))
+        # 服务端约定：result="1" = 变卡成功，result="0" = 失败
+        return {"code": 0,
+                "raw": '<qqhome code="0" result="1"/>' if ok
+                       else '<qqhome code="0" result="0"/>',
+                "message": ""}
 
 
 # ------------------------------------------------------------- 真机只读快照
@@ -120,48 +145,44 @@ async def live_state() -> tuple[Counter, Counter, list]:
 
 
 async def sim_ticks(eng, session: SimSession, ticks: int = 6, tag: str = "") -> list[dict]:
-    """模拟 tick 里的「1.45) 卡箱礼物卡就地变卡」这一步，返回时间线。"""
+    """模拟 tick 里的「1.45) 卡箱礼物卡就地变卡」这一步，返回时间线。
+
+    一次 `_drain_box_gift` 会**一直变到成功或箱里的礼物卡没了**（用户 2026-09-26
+    定调），所以一个 tick 里可能发起多次变卡请求 —— 时间线如实记 `tried` 次数。
+    """
     tl: list[dict] = []
     for i in range(1, ticks + 1):
-        if eng._box_gift_fail >= 2 or time.time() < eng._box_gift_cooldown:
-            tl.append({"tick": i, "act": "静默", "detail": "连败≥2 或冷却中，本轮不动卡"})
-            continue
         pick = eng._pick_change_dst(eng._stock)
+        g0 = face40_gap(eng.plans[pick["tid"]], eng._stock, eng._pending) if pick else None
         if not pick:
-            tl.append({"tick": i, "act": "停手",
-                       "detail": "40 面卡已够（或无 40 面候选），不消耗卡箱礼物卡"})
+            tl.append({"tick": i, "act": "停手", "detail": "40 面卡已够（或无 40 面候选），"
+                                                            "不消耗卡箱礼物卡"})
             break
         dst = int(pick["dst"])
         box_before = len(await gf.find_box_gift_cards(session))
-        await eng._drain_box_gift([], eng._stock)      # 真实代码路径（返回值挂 box_gift_last）
+        n_req0 = session.transfer_n
+        have_before = g0["have"]
+        rd_back = await eng._drain_box_gift([], eng._stock)   # 真实代码路径
         r = eng.box_gift_last or {}
-        src = slot = None
-        if session.calls:
-            src, _dst, slot, _st = session.calls[-1]
-        n_req = session.transfer_n
+        tried = session.transfer_n - n_req0                    # 本 tick 的变卡请求数
         changed = int(r.get("changed") or 0)
-        if src is not None:
-            session.apply_result(src, dst, bool(changed), slot)
-            eng._stock[src] -= 1                        # 源卡必定消失
-            if changed:
-                eng._stock[dst] += 1
-        skipped = bool(r.get("skipped"))
-        failed = (not skipped) and changed == 0
-        act = "变卡" if not skipped else "空手"        # 箱里没源卡 → 本轮不消耗
-        tl.append({"tick": i, "act": act, "src": src, "dst": dst,
-                   "box_before": box_before, "tried_this_tick": n_req,
-                   "failed": failed, "changed": changed,
-                   "skipped": skipped,
-                   "r": {k: r.get(k) for k in ("skipped", "changed", "inbox", "message")},
-                   "name": pick["name"], "ok": bool(changed),
-                   "gap_after": face40_gap(eng.plans[pick["tid"]], eng._stock,
-                                           eng._pending)["need_total"],
-                   "have_after": face40_gap(eng.plans[pick["tid"]], eng._stock,
-                                            eng._pending)["have"],
-                   "fail_cnt": eng._box_gift_fail,
-                   "cooldown_left": int(eng._box_gift_cooldown - time.time()),
-                   "detail": (r.get("message") or "")[:60]})
+        burned = int(r.get("burned") or 0)
+        calls = session.calls[n_req0:]
+        skipped = bool(r.get("skipped")) and not tried
+        act = "变卡" if tried else "空手"                      # 箱里没源卡 → 本轮不消耗
+        g1 = face40_gap(eng.plans[pick["tid"]], eng._stock, eng._pending)
+        tl.append({"tick": i, "act": act, "src": (calls[-1][0] if calls else None),
+                   "dst": dst, "box_before": box_before,
+                   "box_after": len(await gf.find_box_gift_cards(session)),
+                   "tried_this_tick": tried, "changed": changed, "burned": burned,
+                   "skipped": skipped, "ok": bool(changed), "failed": bool(burned),
+                   "rd_back": rd_back is not None,
+                   "name": pick["name"],
+                   "have_after": g1["have"], "gap_after": g1["need_total"],
+                   "have_delta": g1["have"] - have_before,
+                   "detail": (r.get("message") or "")[:70]})
     for row in tl:
+        row.pop("rd_back", None)
         if tag:
             row["tag"] = tag
     return tl
@@ -171,10 +192,10 @@ def show(tl: list[dict]) -> None:
     for r in tl:
         if r["act"] == "变卡":
             print(f'    tick{r["tick"]}: #{r["src"]} → {r["dst"]} {r["name"]}'
-                  f' {"成功" if r["ok"] else ("跳过" if r["r"].get("skipped") else "失败(烧源卡)")}'
-                  f'｜箱里源卡 {r["box_before"]}、本轮尝试 {r["tried_this_tick"]} 次'
-                  f'｜40面存量 {r["have_after"]} / 还差 {r["gap_after"]}'
-                  f'｜连败 {r["fail_cnt"]}')
+                  f' {"成功" if r["ok"] else "失败(烧源卡)"}'
+                  f'｜尝试 {r["tried_this_tick"]} 次、烧 {r["burned"]} 张源卡'
+                  f'｜箱里源卡 {r["box_before"]}→{r["box_after"]}'
+                  f'｜40面存量 {r["have_after"]} / 还差 {r["gap_after"]}')
         else:
             print(f'    tick{r["tick"]}: {r["act"]} —— {r["detail"]}')
 
@@ -205,8 +226,8 @@ async def main() -> None:
 
     gift_n = sum(v for k, v in stock.items() if k in gf._face48_ids())
     print(f"\n[2] 模拟 A：变卡次次成功（箱里源卡 {gift_n} 张）")
-    session = SimSession([])
-    session.set_cards(_box_of(stock, pending))
+    session = SimSession([], ok_seq=[True] * 99)
+    session.set_cards(_box_of(stock, pending), pending)
     eng = AutoRefine(session, [tid])
     eng._stock, eng._pending = Counter(stock), Counter(pending)
     eng.box_gift_change = True
@@ -221,10 +242,9 @@ async def main() -> None:
           all(int(plan.cards[r["dst"]][3] or 0) == 40 for r in did_a))
     check("change_dst_is_face40 校验对目标放行",
           all(gf.change_dst_is_face40(r["dst"]) is True for r in did_a))
-    reqs = [r["tried_this_tick"] for r in did_a]
-    check("每个 tick 最多只发 1 次变卡请求（max_try=1，失败也不连烧源卡）",
-          all(b - a <= 1 for a, b in zip([0] + reqs, reqs)),
-          f"每轮累计请求数 {list(zip([r['tick'] for r in did_a], reqs))}")
+    check("变卡请求次数 = 变成功的张数（全成功路径，一张不多试）",
+          session.transfer_n == len(ok_a),
+          f"请求 {session.transfer_n} 次 / 成功 {len(ok_a)} 张")
     check("变卡请求次数 ≤ 源卡张数（绝不会烧超过手里有的卡）",
           session.transfer_n <= gift_n,
           f"请求 {session.transfer_n} 次 / 源卡 {gift_n} 张")
@@ -232,38 +252,51 @@ async def main() -> None:
           ok_a and ok_a[-1]["have_after"] > g["have"],
           f'{g["have"]} → {ok_a[-1]["have_after"] if ok_a else "-"}')
     check("源卡烧光后自动收手（后面几轮一次请求都不再发）",
-          tl_a[-1]["act"] == "空手" and tl_a[-1]["tried_this_tick"] == session.transfer_n,
+          tl_a[-1]["act"] == "空手" and sum(r["tried_this_tick"] for r in tl_a) == gift_n,
           f'末轮={tl_a[-1]["act"]}，累计请求 {session.transfer_n} 次')
-    check("全成功路径不进冷却（fail 计数为 0）",
-          all(r.get("cooldown_left", 0) <= 0 for r in tl_a))
-    check("全成功路径下 fail 计数始终 0（不进静默）",
-          all(r.get("fail_cnt", 0) == 0 for r in tl_a))
+    check("变卡完立刻刷新卡箱状态（同一 tick 内 40 面存量就已经涨上来了）",
+          bool(ok_a) and ok_a[-1]["have_delta"] == 1
+          and all(r["have_delta"] in (0, 1) for r in did_a),
+          f'每轮 40 面存量增量 {[r["have_delta"] for r in did_a]}')
+    # 变卡后引擎库存里的 dst 必须来自「重读卡箱」，不是本地估算
+    check("引擎 _stock 里能读到刚变出来的那张 dst（靠变卡后重读，不是记账）",
+          any(eng._stock.get(r["dst"], 0) >= 1 for r in ok_a),
+          f'box_gift_last={ (eng.box_gift_last or {}).get("message") }')
 
-    print(f"\n[3] 模拟 B：变卡失败（真机实测失败也烧源卡，成功率约 50%）")
-    print("    （fail_seq=[失败,成功]：第 1 轮故意失败，第 2 轮该轮空）")
-    session2 = SimSession([], fail_seq=[True, False])
-    session2.set_cards(_box_of(stock, pending))
+    print(f"\n[3] 模拟 B：第 1 次变卡失败 → 换下一张继续（用户定调：一直变到成功或礼物卡没了）")
+    session2 = SimSession([], ok_seq=[False] + [True] * 99)   # 第 1 次失败，之后都成功
+    session2.set_cards(_box_of(stock, pending), pending)
     eng2 = AutoRefine(session2, [tid])
     eng2._stock, eng2._pending = Counter(stock), Counter(pending)
     eng2.box_gift_change = True
-    tl_b = await sim_ticks(eng2, session2, ticks=5, tag="fail")
+    tl_b = await sim_ticks(eng2, session2, ticks=4, tag="fail")
     show(tl_b)
-    burned = [r for r in tl_b if r.get("failed")]
-    check("失败也烧掉一张源卡（40 面存量没有上升）",
-          burned and burned[-1]["have_after"] == g["have"],
-          f'失败后存量 {burned[-1]["have_after"] if burned else "-"}（起点 {g["have"]}）')
-    check("失败**一次**就进 30 分钟静默（真代码在失败分支直接置冷却）",
-          burned and burned[-1]["cooldown_left"] > 1700,
-          f'冷却剩 {burned[-1]["cooldown_left"] if burned else 0} 秒')
-    check("静默期内一个 tick 都不动卡",
-          all(r["act"] == "静默" for r in tl_b[1:]),
+    first = tl_b[0]
+    check("失败后**换下一张继续**（本 tick 请求数 > 1，而不是一次就收手）",
+          first["tried_this_tick"] >= 2 and first["changed"] == 1,
+          f'尝试 {first["tried_this_tick"]} 次、成功 {first["changed"]} 张')
+    check("失败那张的源卡确实被烧掉（箱里源卡减少 = 失败 + 成功各烧一张）",
+          first["burned"] == 1
+          and first["box_after"] == first["box_before"] - first["burned"] - first["changed"],
+          f'burned={first["burned"]}，箱里源卡 {first["box_before"]}→{first["box_after"]}')
+    check("失败不会触发静默/冷却（后面几个 tick 照常继续变卡）",
+          sum(1 for r in tl_b if r["act"] == "变卡") >= 2,
           str([r["act"] for r in tl_b]))
-    eng2._box_gift_cooldown = 0.0                     # 冷却到期，看看会不会自愈
-    eng2._box_gift_fail = 0
-    tl_b2 = await sim_ticks(eng2, session2, ticks=2)
-    check("冷却结束后自动恢复（不是一次性死锁）",
-          any(r["act"] in ("变卡", "空手") for r in tl_b2),
-          str([(r["act"], r.get("dst")) for r in tl_b2]))
+
+    print("    （ok_seq 全失败：把箱里的礼物卡全烧光就该收手）")
+    session2b = SimSession([], ok_seq=[False] * 99)
+    session2b.set_cards(_box_of(stock, pending), pending)
+    eng2b = AutoRefine(session2b, [tid])
+    eng2b._stock, eng2b._pending = Counter(stock), Counter(pending)
+    eng2b.box_gift_change = True
+    tl_b2 = await sim_ticks(eng2b, session2b, ticks=3, tag="allfail")
+    show(tl_b2)
+    check("一直失败 → 烧完箱里最后一张礼物卡才收手（不会无限循环）",
+          tl_b2[-1]["box_after"] == 0 or tl_b2[-1]["act"] == "空手",
+          f'末轮箱里源卡 {tl_b2[-1]["box_after"]}，尝试 {tl_b2[-1]["tried_this_tick"]} 次')
+    check("全程失败也不进静默冷却（源卡没了自然停，下一 tick 重扫即恢复）",
+          sum(r["tried_this_tick"] for r in tl_b2) <= gift_n,
+          f'累计尝试 {sum(r["tried_this_tick"] for r in tl_b2)} 次 / 源卡 {gift_n} 张')
 
     print(f"\n[4] 模拟 C：箱里一张礼物卡都没有 → 不该动、也不该记失败")
     session3 = SimSession([])
@@ -274,17 +307,16 @@ async def main() -> None:
     eng3.box_gift_change = True
     await eng3._drain_box_gift([], eng3._stock)
     r3 = eng3.box_gift_last or {}
-    check("返回 skipped（不消耗、不记失败）", r3.get("skipped") is True,
+    check("返回 skipped（一张源卡都不碰）", r3.get("skipped") is True,
           r3.get("message", ""))
-    check("fail 计数不因此累加（箱里没卡是常态）", eng3._box_gift_fail == 0)
     check("没有发起任何变卡请求", session3.transfer_n == 0, f'transfer_n={session3.transfer_n}')
 
     print(f"\n[5] 模拟 D：这一套 40 面卡已够 → 完全静默（正常收手，不是坏了）")
     full = Counter(stock)
     for c in inner40:
         full[c] = max(full.get(c, 0), int(plan.f40.get(c, 0) or 0))
-    session4 = SimSession([], fail_seq=[])
-    session4.set_cards([(c, s, t) for c, n in full.items() for s, t in [(1, 0)]])
+    session4 = SimSession([], ok_seq=[])
+    session4.set_cards([(c, s, t) for c, n in full.items() for s, t in [(1, 0)]], pending)
     eng4 = AutoRefine(session4, [tid])
     eng4._stock, eng4._pending = Counter(full), Counter(pending)
     eng4.box_gift_change = True

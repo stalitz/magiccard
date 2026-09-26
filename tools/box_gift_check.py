@@ -5,7 +5,10 @@
   2. find_box_gift_cards 能读出**卡箱里**那几张（含真实槽位/箱子）
   3. drain_box_gift_cards 用箱里的卡当 srcid 变卡，变出一张即收手、绝不去收礼
   4. drain_gift_box 在箱里有卡且变成功时，本轮不碰礼物箱（from_box=True, took=0）
-无网络、无副作用：全部用假 session。
+  5. 2026-09-26 新定调「变卡失败要一直变，直到成功或者礼物卡没了」：失败换下一张
+     继续，箱里的卡烧完/变出一张才收手
+无网络、无副作用：全部用假 session（假 session 会像真机一样，变卡成功或失败都
+消耗源卡，于是「重扫卡箱」能真实反映箱里的卡在减少）。
 """
 import asyncio
 import sys
@@ -24,7 +27,8 @@ def check(name: str, cond: bool, extra: str = "") -> None:
     print(("  ✓ " if cond else "  ✗ ") + name + (f"  {extra}" if extra else ""))
 
 
-# mainpage 样本：换卡箱里有 7773(slot 3)、保险箱里有 7774(slot 2) 与 5000(slot 1)
+# 换卡箱里有 7773(slot 3)、保险箱里有 7774(slot 2)（两张都是礼物套 48 面卡）；
+# 5000(slot 5) 与 7786(slot 1) 是干扰卡（非礼物形态，永远留在箱里）
 RAW = """<qqhome>
 <hello time="1780000000"/>
 <user randchance="3" gold_fen="10"/>
@@ -35,30 +39,55 @@ RAW = """<qqhome>
 
 
 class FakeSession:
-    """只提供 gift 层用到的两个入口：post(mainpage) 与 qzone(transfer)。"""
+    """只提供 gift 层用到的两个入口：post(mainpage) 与 qzone(transfer)。
 
-    def __init__(self, raw: str = RAW, transfer_ok: bool = True, fail_times: int = 0):
+    卡箱是**活的**：变卡（成功或失败）都会把源卡从箱里拿走 —— 与真机一致
+    （真机实测失败同样消耗源卡）。这样 `drain_box_gift_cards` 内部每试一张就重扫
+    一次卡箱的行为才测得出「直到成功或礼物卡没了」。
+    """
+
+    def __init__(self, raw: str = RAW, transfer_ok: bool = True, fail_times: int = 0,
+                 cards: list[tuple] | None = None):
         self.uin = "123456"          # gift.find_box_gift_cards 会读 session.uin
         self.raw = raw
         self.transfer_ok = transfer_ok
         self.fail_times = fail_times
+        self.cards = list(cards if cards is not None
+                          else [(7773, 3, 0), (7774, 2, 1)])
         self.calls: list[tuple] = []          # 每次 transfer 的 (srcid, dstid, slot, slottype)
         self.transfer_n = 0
         self.mainpage_n = 0
 
+    def _raw(self) -> str:
+        ch = "".join(f'<card slot="{s}" id="{i}"/>' for i, s, t in self.cards if t == 0)
+        ch += '<card slot="5" id="5000"/>'          # 干扰卡，永远在
+        st = "".join(f'<card slot="{s}" id="{i}"/>' for i, s, t in self.cards if t == 1)
+        st += '<card slot="1" id="7786"/>'          # 干扰卡，永远在
+        return ('<qqhome><hello time="1780000000"/><user randchance="3" gold_fen="10"/>'
+                f'<changebox cur="6" max="18" used="2">{ch}</changebox>'
+                f'<storebox cur="4" max="10" used="2">{st}</storebox>'
+                '<stovebox cur="7" max="7"><card slot="1" id="0" slottype="0"/></stovebox>'
+                '</qqhome>')
+
     async def post(self, ep, **kw):
         if "mainpage" in ep or "MAINPAGE" in ep:
             self.mainpage_n += 1
-            return {"code": 0, "raw": self.raw}
+            return {"code": 0, "raw": self._raw()}
         return {"code": -1, "raw": ""}
 
     async def qzone(self, method, ep, **kw):
         self.calls.append((kw.get("srcid"), kw.get("dstid"),
                            kw.get("slotid"), kw.get("slottype")))
         self.transfer_n += 1
-        if self.transfer_n <= self.fail_times:
-            return {"code": 0, "raw": '<qqhome code="0" result="0"/>', "message": ""}
-        return {"code": 0, "raw": '<qqhome code="0" result="1"/>', "message": ""}
+        fail = self.transfer_n > self.fail_times    # 前 fail_times 次是「成功」
+        # 变卡成败**都**消耗源卡 → 从箱里拿掉
+        sid, sl, slt = kw.get("srcid"), kw.get("slotid"), kw.get("slottype", 0)
+        self.cards = [c for c in self.cards
+                      if not (c[0] == sid and c[1] == sl and c[2] == slt)]
+        return {"code": 0,
+                "raw": '<qqhome code="0" result="0"/>' if not fail
+                       else '<qqhome code="0" result="1"/>',
+                "message": ""}
 
 
 async def main() -> None:
@@ -76,8 +105,8 @@ async def main() -> None:
           found == {(7773, 3, 0), (7774, 2, 1)}, str(sorted(found)))
     check("612 面的 7786 不混入（不是礼物形态）",
           all(p["id"] != 7786 for p in pool))
-    empty = await gf.find_box_gift_cards(FakeSession(raw="<qqhome></qqhome>"))
-    check("空响应 → 空列表（调用方据此去收礼）", empty == [])
+    empty = await gf.find_box_gift_cards(FakeSession(cards=[]))
+    check("箱里没礼物卡 → 空列表（调用方据此去收礼）", empty == [])
 
     print("\n[3] drain_box_gift_cards：用箱里的卡变卡，变出一张即收手")
     s = FakeSession()
@@ -90,13 +119,38 @@ async def main() -> None:
           s.calls[0][2:] == (3, 0), str(s.calls[0]))
     check("skipped=False（本轮确实干了活）", r.get("skipped") is False)
 
-    print("\n[4] 变卡失败**不连烧源卡**（真机实测：失败也消耗源卡，8 张→3 次尝试剩 5 张）")
-    s = FakeSession(fail_times=4)
+    print("\n[4] 变卡失败**换下一张继续**（2026-09-26 用户定调：一直变，到成功或礼物卡没了）")
+    s = FakeSession(fail_times=1)                     # 第 1 次失败，第 2 次成功
     r = await gf.drain_box_gift_cards(s, dstid=26117)
-    check("changed=0", r.get("changed") == 0, r.get("message", ""))
-    check("一次只试一张就收手（transfer 次数 = 1）",
-          s.transfer_n == 1, f"实际 {s.transfer_n}")
-    check("inbox 仍如实报 2（调用方据此知道箱里还有卡）", r.get("inbox") == 2)
+    check("失败后继续变下一张 → 最终 changed=1", r.get("changed") == 1,
+          r.get("message", ""))
+    check("确实试了 2 次（失败那张的源卡已被烧掉，换的是箱里的另一张）",
+          s.transfer_n == 2 and r.get("tried") == 2 and r.get("burned") == 1,
+          f"transfer={s.transfer_n} tried={r.get('tried')} burned={r.get('burned')}")
+    check("第二次用的源卡是箱里剩下的那张 7774",
+          s.calls[1][0] == 7774, str(s.calls))
+    check("变成功即收手（不继续连变）", s.transfer_n == 2, f"实际 {s.transfer_n}")
+
+    s = FakeSession(fail_times=99)                    # 永远失败
+    r = await gf.drain_box_gift_cards(s, dstid=26117)
+    check("一直失败 → 箱里的礼物卡烧完才收手（不会无限循环）",
+          r.get("changed") == 0 and s.transfer_n == 2,
+          f"changed={r.get('changed')} transfer={s.transfer_n}")
+    check("失败确实烧掉了 2 张源卡（burned=2，与 transfer 次数一致；失败不额外烧）",
+          r.get("burned") == 2, f"burned={r.get('burned')}")
+    check("inbox 仍如实报 2（调用方据此知道箱里原本有几张）", r.get("inbox") == 2)
+
+    one = FakeSession(fail_times=99, cards=[(7774, 2, 1)])   # 箱里只有 1 张源卡
+    r1 = await gf.drain_box_gift_cards(one, dstid=26117)
+    check("箱里只剩 1 张源卡、且失败 → 试 1 次后池空即收手",
+          r1.get("changed") == 0 and one.transfer_n == 1,
+          f"transfer={one.transfer_n} {r1.get('message','')}")
+
+    print("\n[4b] 收手后不会凭空重试：卡箱里没礼物卡了就跳过")
+    s = FakeSession(cards=[])
+    r = await gf.drain_box_gift_cards(s, dstid=26117)
+    check("箱里没源卡 → skipped，一次都不试",
+          r.get("skipped") is True and s.transfer_n == 0, str(r)[:120])
 
     print("\n[5] drain_gift_box：箱里有卡且变成功 → 本轮不碰礼物箱")
     s = FakeSession()
@@ -106,9 +160,7 @@ async def main() -> None:
     check("changed=1", r.get("changed") == 1)
 
     print("\n[6] 箱里一张 48 面卡都没有 → 才回到礼物箱链路")
-    raw_no_gift = (RAW.replace('<card slot="3" id="7773"/>', "")
-                      .replace('<card slot="2" id="7774"/>', ""))
-    s = FakeSession(raw=raw_no_gift)
+    s = FakeSession(cards=[])
     r = await gf.drain_gift_box(s, dstid=26117, upper=45, lower=25)
     check("没有 from_box 标记", r.get("from_box") is not True)
     check("skipped=True（礼物箱没到阈值时原样跳过）", r.get("skipped") is True)
@@ -212,7 +264,7 @@ async def main() -> None:
           bool(both_empty) and both_empty["tid"] in (1652, 1810)
           and both_empty["face"] == 40
           and both_empty["dst"] in set(eng2.plans[both_empty["tid"]].ids), str(both_empty))
-    check("多套并行：谁缺口大先补谁（1652 缺 6 张 vs 1810 缺 8 张 → 1810）",
+    check("多套并行：谁缺口大先补谁（1652 缺 6 张 vs 1810 缺 18 张 → 1810 的移液器）",
           bool(both_empty) and both_empty["tid"] == 1810, str(both_empty))
     only1652 = pick_change_target(eng2.plans, [1652], Counter(), Counter(), keep2)
     check("队列只留 1652 时，1810 的卡不再算候选",
@@ -230,7 +282,8 @@ async def main() -> None:
     r2 = await gf.drain_box_gift_cards(s, dstid=99999999)  # 卡库查不到这张卡
     check("卡库查不到 dst（None）= 放行而不是误拦", s.transfer_n > n_before,
           str(r2)[:120])
-    r3 = await gf.drain_box_gift_cards(s, dstid=23927)    # 正常 40 面套内卡
+    s3 = FakeSession()                                    # 箱里还有礼物卡的那一组
+    r3 = await gf.drain_box_gift_cards(s3, dstid=23927)   # 正常 40 面套内卡
     check("dst 是 40 面 → 正常走流程（源卡被消耗）", r3.get("tried") >= 1,
           str(r3)[:120])
 
