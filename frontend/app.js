@@ -3483,10 +3483,22 @@ function arrLen(x) {
 }
 
 // 单个玩法子块：标题 + 计数 + 信息行 + 该玩法专属按钮（走 data-act 全局委托）
-function modeCard(title, cnt, rows, acts) {
+function modeCard(title, cnt, rows, acts, mode) {
+  // mode 有值 => 该子块带上「本玩法的状态属性」折叠区 + 只刷本块的刷新按钮。
+  // 展开状态记在 window.__mpOpen，定时刷新重渲染后不会被收起。
+  window.__mpOpen = window.__mpOpen || {};
+  const open = !!(mode && window.__mpOpen[mode]);
+  const pd = mode ? (window.__modeProps || {})[mode] : null;
+  const btnTxt = open ? (pd && pd.ok ? `收起（${pd.total}）` : "收起") : "状态属性";
+  const tip = mode ? `<div class="mp-tip">` +
+    `<button class="btn sm ghost" data-act="mm-props" data-mode="${mode}" data-idle="${btnTxt}">${btnTxt}</button>` +
+    `<button class="btn sm ghost" data-act="mm-reload" data-mode="${mode}" data-idle="刷新本块">刷新本块</button>` +
+    `</div>` : "";
   return `<div class="lst mode-card">` +
     `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
     `<div class="state-box">${rows || "-"}</div>` +
+    tip +
+    (mode ? `<div class="mp-body" id="mp-${mode}"${open ? "" : " hidden"}></div>` : "") +
     (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
     `</div>`;
 }
@@ -3501,15 +3513,6 @@ function arrLen(x) {
   if (Array.isArray(d.data)) return d.data.length;
   if (Array.isArray(o.list)) return o.list.length;
   return "-";
-}
-
-// 单个玩法子块：标题 + 计数 + 信息行 + 该玩法专属按钮（走 data-act 全局委托）
-function modeCard(title, cnt, rows, acts) {
-  return `<div class="lst mode-card">` +
-    `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
-    `<div class="state-box">${rows || "-"}</div>` +
-    (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
-    `</div>`;
 }
 
 async function loadMatchModes() {
@@ -3549,7 +3552,7 @@ function renderMatchModes() {
     matchRow("报名次数 signleTimes / multiTimes", `${sc.signleTimes ?? "-"} / ${sc.multiTimes ?? "-"}`) +
     matchRow("我的最高分 my_top_score", hero.my_top_score ?? "-"),
     `<button class="btn sm ok" data-act="mm-claim" data-only="comp" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`));
+    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`, "comp"));
 
   // 2) 竞技场：次数 / 对手 / 领奖 / 刷对手 / 挑战（消耗）
   cards.push(modeCard("竞技场", `对手 ${enemies.length}`,
@@ -3559,7 +3562,7 @@ function renderMatchModes() {
     `<button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="一键领奖">一键领奖</button>` +
     `<button class="btn sm ghost" data-act="mm-flush" data-idle="刷对手">刷对手</button>` +
     (enemies.length
-      ? `<button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战首位">挑战首位（消耗）</button>` : "")));
+      ? `<button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战首位">挑战首位（消耗）</button>` : ""), "pvp"));
 
   // 3) 工会任务：次数 / 任务位 / 商店
   cards.push(modeCard("工会任务", `num ${uniTask.num ?? "-"}`,
@@ -3567,7 +3570,7 @@ function renderMatchModes() {
     matchRow("任务位 bits", uniTask.bits ?? "-") +
     matchRow("工会商店", arrLen((m.uni || {}).shop)),
     `<button class="btn sm ok" data-act="mm-claim" data-only="union" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`));
+    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`, "union"));
 
   // 4) 世界探索：任务 / 队伍 / 商店
   cards.push(modeCard("世界探索", `任务 ${expDetail.length}`,
@@ -3575,7 +3578,7 @@ function renderMatchModes() {
     matchRow("探索队伍", arrLen((m.exp || {}).team)) +
     matchRow("商店 / 排行", arrLen((m.exp || {}).shop) + " / " + arrLen((m.exp || {}).rank)),
     `<button class="btn sm ok" data-act="mm-claim" data-only="explore" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`));
+    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`, "explore"));
 
   // 5) 西游三国：任务 / 关卡 / 领奖 / 闯关（消耗，cats+eqs 由后端读 act=16 真实阵容拼装）
   cards.push(modeCard("西游三国", `关卡 ${sgLevels.length}`,
@@ -3583,7 +3586,7 @@ function renderMatchModes() {
     matchRow("可打关卡", runs.map((l) => l.id).join("、") || "-") +
     matchRow("当前选中", (window.__sgLevelid || (runs[0] && runs[0].id) || "-")),
     `<button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>` +
-    runs.map((l) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${l.id}" data-idle="闯关 L${l.id}">闯关 L${l.id}（消耗）</button>`).join("")));
+    runs.map((l) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${l.id}" data-idle="闯关 L${l.id}">闯关 L${l.id}（消耗）</button>`).join(""), "sanguo"));
 
   // 6) 公会战：出兵入口（与工会子块同一动作，参数走后端默认 optype=4/uptype=1）
   cards.push(modeCard("公会战", "",
@@ -3595,7 +3598,46 @@ function renderMatchModes() {
   if (cnt) {
     cnt.textContent = `积分 ${sc.score ?? "-"} · 对手 ${enemies.length} · 工会 ${uniTask.num ?? "-"} · 关卡 ${sgLevels.length}`;
   }
+  // 重渲染后把已展开的属性区内容补回去（内容存在 window.__modeProps 缓存里）
+  window.__mpOpen = window.__mpOpen || {};
+  for (const md of Object.keys(window.__mpOpen)) {
+    if (window.__mpOpen[md]) renderModeProps(md);
+  }
 }
+
+// 本玩法状态属性：每个子块单独展示自己玩法的字段（后端 /api/match/mode-props 分组返回）
+async function loadModeProps(mode) {
+  const r = await fetch("/api/match/mode-props?mode=" + encodeURIComponent(mode))
+    .then((x) => x.json()).catch(() => ({ ok: false }));
+  window.__modeProps = window.__modeProps || {};
+  window.__modeProps[mode] = r;
+  renderModeProps(mode);
+  return r;
+}
+
+function renderModeProps(mode) {
+  const box = $("mp-" + mode);
+  if (!box) return;
+  const d = (window.__modeProps || {})[mode];
+  if (!d) { box.innerHTML = `<div class="mp-g">读取中…</div>`; return; }
+  if (!d.ok) { box.innerHTML = `<div class="mp-g" style="color:var(--danger)">${d.message || "读取失败"}</div>`; return; }
+  box.innerHTML = (d.groups || []).map((g) =>
+    `<div class="mp-g"><div class="mp-gt">${g.name}</div>` +
+    (g.rows || []).map((r) =>
+      `<div class="rv"><span class="k">${r.k}</span><span class="v" title="${String(r.v).replace(/"/g, "&quot;")}">${r.v}</span></div>`).join("") +
+    `</div>`).join("") || `<div class="mp-g">该玩法没有可读状态</div>`;
+  const b = document.querySelector(`[data-act="mm-props"][data-mode="${mode}"]`);
+  if (b) b.textContent = d.ok ? `状态属性（${d.total}）` : "状态属性（失败）";
+}
+
+// 只刷新某一个玩法子块（不影响其他块）
+const MODE_RELOAD = {
+  comp: "/api/match/comp-extra",
+  pvp: "/api/match/pvp-extra",
+  union: "/api/match/union-extra",
+  explore: "/api/match/explore-extra",
+  sanguo: "/api/match/sanguo-extra?levelid=" + (window.__sgLevelid || 101),
+};
 
 // 子块一键领奖：only 填空即全量（原「一键领奖（全玩法）」也走这里）
 async function claimGroup(only) {
@@ -3694,6 +3736,31 @@ function bindMatchModeActs() {
           await unionFight(); await loadMatchModes();
         } else if (act === "mm-run-sg") {
           await sanguoRun(parseInt(b.dataset.levelid, 10));
+        } else if (act === "mm-props") {
+          // 注意：busyBtn 的还原文案取 data-idle，改文案必须同步改它，否则会被还原成旧文案
+          const mode = b.dataset.mode;
+          const body = $("mp-" + mode);
+          window.__mpOpen = window.__mpOpen || {};
+          if (window.__mpOpen[mode]) {          // 已展开 => 收起
+            window.__mpOpen[mode] = false;
+            renderMatchModes();
+            return;
+          }
+          if (!window.__modeProps || !window.__modeProps[mode]) await loadModeProps(mode);
+          else renderModeProps(mode);
+          window.__mpOpen[mode] = true;
+          renderMatchModes();
+          log("[每日比赛] " + mode + " 状态属性已展开", "ok");
+        } else if (act === "mm-reload") {
+          const mode = b.dataset.mode;
+          const url = MODE_RELOAD[mode];
+          if (!url) { log("[每日比赛] 该玩法没有独立的刷新接口", "warn"); return; }
+          const r = await fetch(url).then((x) => x.json()).catch(() => null);
+          matchModes[mode] = r || { ok: false };
+          const body = $("mp-" + mode);
+          if (body && !body.hidden) { window.__modeProps = window.__modeProps || {}; window.__modeProps[mode] = null; await loadModeProps(mode); }
+          renderMatchModes();
+          log("[每日比赛] " + mode + " 状态已刷新", (r && r.ok !== false) ? "ok" : "warn");
         }
       } finally {
         restore();
