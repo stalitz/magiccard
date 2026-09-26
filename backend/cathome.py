@@ -14,13 +14,40 @@
 - 金币福利（act=20 读 gold_buy_id1..6）：商品表 = catHome_GoldShoplist，
   id=2 = 红宝石×8（10000 金币）。**购买动作的 act 尚未定位**（act=19/act=20 带 id 均
   只回 busy/状态，未实际扣金币）→ 这里只展示状态，按钮等抓包。
-- 竞技场：pvp act=1 的 surplus=剩余挑战（4/日）、flush_num=已用免费刷新（4/日）；
+- 竞技场：pvp act=1 的 surplus=免费挑战剩余、**2026-09-27 实测该上限就是 2（不是固定 4）**、
+  flush_num=已用免费刷新（实跑回显「刷新剩 3 次」，即每日 4 次）、free_pvp_num 与 surplus 同值；
   enemy_list 里带**自己**的条目（uin 相同），其 ce 就是自己当前战力；
   挑战 = act=8 {type:'fight', euin}；领奖 = act=15 {id:1..4}（daily_task 位）。
 """
 from .constants import EP_TRAVEL_MATCH, EP_TRAVEL_PVP
 from .match import _act, _json_of, _plain_uin
 from .prop_dict import summarize_reward as _reward_text
+
+import time as _time
+import json as _json
+from pathlib import Path as _Path
+
+# 「一键全部 / 竞技自动」的步骤落盘：用户报「某某没成功」时先看这份，
+# 不必再让用户翻浏览器日志。data/ 已在 .gitignore 内。
+_HOME_RUN_LOG = _Path(__file__).resolve().parent.parent / "data" / "home_run.json"
+
+
+def _save_run(tag: str, payload: dict) -> None:
+    """把最近一次自动流程的步骤写进 data/home_run.json（只留最近 20 次）。"""
+    try:
+        hist = []
+        if _HOME_RUN_LOG.exists():
+            loaded = _json.loads(_HOME_RUN_LOG.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                hist = loaded
+        row = dict(payload)
+        row["tag"], row["ts"] = tag, _time.strftime("%F %T")
+        hist.append(row)
+        _HOME_RUN_LOG.write_text(_json.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+    except Exception:  # 落盘失败不影响主流程
+        pass
+
 
 CANDY_EFFECT = {1: 10, 2: 20, 3: 50}   # 当日实打：小+10 / 中+20；大+50 为用户口述
 MOOD_TARGET = 80                        # 用户要求：玩耍保证心情 80 以上
@@ -138,7 +165,17 @@ async def like(session, target: str, only_if_unliked: bool = True) -> dict:
         r = await _act(session, EP_TRAVEL_MATCH, 22,
                        opuin=str(top["uin"]), rank_idx=0)
     else:
-        r = await _act(session, EP_TRAVEL_PVP, 22, rank_idx=0)
+        # ⚠️ 竞技榜点赞**必须带赞对象的 uin**（rank_uin）。只发 rank_idx 服务端回
+        #    `system busy` 且不做任何事（2026-09-27 实踩：一键全部跑完，竞技榜点赞位
+        #    仍是 0，玩家白丢每日 130 三叶草）。可赞对象 = act=14 日榜里
+        #    `zan` 非空的条目（HAR 实证约 10 人），赞完这一批当天就没了。
+        rk = await _act(session, EP_TRAVEL_PVP, 14, rank_id=0)
+        rd = rk.get("data") or {}
+        cand = [x for x in (rd.get("list") or []) if x.get("zan") is not None]
+        if not cand:
+            return {"ok": False, "code": -1, "message": "今日竞技榜没有可点赞的对象（可能已赞过）"}
+        r = await _act(session, EP_TRAVEL_PVP, 22,
+                       rank_uin=str((cand[0] or {}).get("uin")), rank_idx=0)
     if not r.get("ok"):
         return r
     d = r.get("data") or {}
@@ -389,8 +426,11 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
     else:
         steps.append({"act": "claim", "ok": False, "msg": "今天没打挑战，跳过领奖"})
 
-    return {"ok": True, "steps": steps, "fights": fights, "wins": wins,
-            "claims": claims, "surplus_left": surplus}
+    out = {"ok": True, "steps": steps, "fights": fights, "wins": wins,
+           "claims": claims, "surplus_left": surplus,
+           "surplus_before": surplus + fights}   # +fights = 本次开打前的剩余次数
+    _save_run("arena_auto", out)
+    return out
 
 
 async def run_all(session) -> dict:
@@ -438,6 +478,8 @@ async def run_all(session) -> dict:
     steps.append({"act": "skip-group", "ok": True, "skipped": True,
                   "msg": "以下写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
 
-    return {"ok": True, "steps": steps, "skipped": ALL_SKIPS, "gold": g,
-            "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
-            "surplus_left": a.get("surplus_left")}
+    out = {"ok": True, "steps": steps, "skipped": ALL_SKIPS, "gold": g,
+           "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
+           "surplus_left": a.get("surplus_left")}
+    _save_run("run_all", out)
+    return out
