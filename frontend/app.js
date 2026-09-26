@@ -2812,6 +2812,15 @@ function renderAuto(st, bx) {
             : "") + `</div>`);
     }
   }
+  // 卡箱礼物卡：箱里已有的同套(487) 48 面卡就地变卡，不必先从礼物箱收了再变
+  const bg = (st && st.box_gift) || null;
+  if (bg) {
+    const last = bg.last;
+    head.push(`<div class="state-box" style="margin-top:10px">` +
+      stat("卡箱礼物卡", bg.enabled ? "优先变卡" : "关闭", `变卡目标 #${esc(String(bg.dst || ""))}`) +
+      stat("上次结果", last ? esc(String((last.last) || last.message || "")) : "还没执行") +
+      `</div>`);
+  }
   body.innerHTML = head.join("");
   renderAutoLog(st);
 }
