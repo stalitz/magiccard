@@ -287,6 +287,9 @@ class ThemePlan:
         for cid in self.ids:
             d(cid, set())
         self.depth = depth
+        # 这套卡从头炼到尾一共要几张面额 40 的卡（展开到 40 面为止，不扣库存）。
+        # `base_need` 里看不到它们 —— mrp 会把需求继续摊到更低的面额上。
+        self.f40 = face40_demand(self.ids, self.comp, self.depth, price_of)
         self.rounds = 0          # 本套已集齐并上交的次数
         self.done = False        # 达到 rounds 上限
 
@@ -348,19 +351,84 @@ class ThemePlan:
         }
 
 
+def face40_demand(ids: list, comp: dict, depth: dict, face) -> dict[int, int]:
+    """这套卡从头炼到尾**一共要几张面额 40 的卡**（按配方往下展开到 40 面为止）。
+
+    与 `ThemePlan.base_need` 不同：`mrp` 会把需求继续摊到更低的面额上，所以 40 面
+    这一层在 base_need 里是 0；这里刻意停在 40 面 —— 变卡产出就是 40 面，凑的就是它。
+    不扣库存，纯静态。
+    """
+    need = {int(c): 1 for c in ids}
+    out: dict[int, int] = {}
+    for cid in sorted(need, key=lambda c: -depth.get(c, 0)):
+        n = need.pop(cid, 0)
+        if n <= 0:
+            continue
+        if face(cid) == CHANGE_FACE:
+            out[int(cid)] = out.get(int(cid), 0) + n
+            continue
+        c = comp.get(cid)
+        if c:
+            for m in (c[3], c[4], c[5]):
+                if m:
+                    need[int(m)] = need.get(int(m), 0) + n
+    return out
+
+
+def face40_gap(plan: "ThemePlan", stock: Counter | None = None,
+               pending: Counter | None = None) -> dict:
+    """一套卡的「40 面卡缺口」—— **整套从零的总量口径**（不是「一张都没有」才算缺）。
+
+    用户 2026-09-26 定调：「什么是缺你要明白 —— 是炼的套卡一共需要多少张 40 的，
+    只要不够炼完全套的就是缺，不是当前一张 40 没有就是缺。」
+
+    ⚠️ 这里**不能**用 `net_plan()` 的净需求：净需求是「顶层卡算出缺口才向下传导」，
+    只要顶层那一张卡已经攒到了，整套的 40 面需求就凭空消失（实测：全套 9 张各囤 1
+    张、明明还缺斗巧时，net_plan 返回空）。但对「凑一套」来说，顶层有了还得再攒一
+    轮 —— 那几张 40 面卡照样是缺口。
+
+    所以按 `ThemePlan.f40`（从头炼到尾共需几张 40 面，展开到 40 面为止）扣掉现有库存：
+      · gap        —— 按卡 id 细分：这张卡还差几张
+      · need_total —— 还差几张才能凑齐这一套；> 0 就继续变卡
+      · have       —— 这些 40 面卡在库存 + 炉内在炼里各已有几张
+    返回 `{"need_total", "have", "gap", "kinds", "ids"}`。
+    """
+    stock = stock or Counter()
+    pending = pending or Counter()
+
+    def face(cid: int) -> int:
+        c = plan.cards.get(int(cid))
+        return int(c[3] or 0) if c else 0
+
+    inner40 = [int(c) for c in plan.ids if face(c) == CHANGE_FACE]
+    gap: dict[int, int] = {}
+    for cid in inner40:
+        have_c = stock.get(cid, 0) + pending.get(cid, 0)
+        need = int(plan.f40.get(cid, 0) or 0)
+        if need > have_c:
+            gap[cid] = need - have_c
+    return {"need_total": sum(gap.values()),     # 还差几张才能凑齐这一套
+            "have": sum(stock.get(c, 0) + pending.get(c, 0) for c in inner40),
+            "gap": gap,                          # {卡id: 还差几张}
+            "kinds": len(inner40),
+            "ids": inner40}
+
+
 def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
                        pending: Counter | None = None,
                        keep: set | None = None) -> dict | None:
     """（纯计算）按「在炼队列 + 实时库存」挑下一步该变哪张卡 —— 变卡目标**不许写死**。
 
-    用户 2026-09-26 定调：「不要指定某个卡，就变自动炼卡队列里的套卡中 40 面额的卡，
-    缺哪个变哪个 —— 变卡是为了不用炼 40 面额，直接变了炼更大面额的卡。」
-    此前写死 26117（theme 1810「研精覃思」），炼的却是别的套，变出来的卡本套用不上。
+    用户 2026-09-26 两条定调：
+      ① 「礼物卡只能变 40 面额的，变不了其他面额，因为当前的礼物卡只有 48 面」——
+         礼物卡只有 48 面一种形态，变卡**只产出面额 40**，变不出别的面额。所以候选
+         卡必须是面额 CHANGE_FACE(40) 的套内卡，**没有「放宽到别的面额」的兜底**，
+         挑不出来就返回 None（本轮不动箱里的礼物卡）。
+      ② 「什么是缺：是炼的套卡一共需要多少张 40 的，只要不够炼完全套的就是缺，
+         不是当前一张 40 没有就是缺」—— 缺口按 `face40_gap()` 的**总量**算。
+      （此前写死 26117 属 theme 1810，炼的却是别的套，等于白烧礼物卡。）
 
-    挑法（严格 → 兜底，逐级放宽；都不满足返回 None = 本轮不动箱里的礼物卡）：
-      ① 套内卡 ∩ 引擎净需求里**要炼/要买**的卡 ∩ **面额 CHANGE_FACE(40)**
-      ② ①为空时放宽到「套内卡 ∩ 净需求」（那一套里没有 40 面卡可补）
-    同分时：需求张数多的优先，再按队列顺序（多套并行时不让第一套独吞）。
+    候选排序：缺口张数多的优先 → 队列顺序（多套并行时不让第一套独吞）。
     """
     if not queue:
         return None
@@ -368,29 +436,29 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
         keep = {cid for t in queue for cid in plans[t].ids}
     stock = stock or Counter()
     pending = pending or Counter()
-    cards = plans[queue[0]].cards                    # 全局卡表，各套共用
 
-    def face(cid: int) -> int:
-        c = cards.get(int(cid))
-        return int(c[3] or 0) if c else 0
-
-    strict, loose = [], []                           # (需求张数, 队列序, cid)
+    cands = []                                    # (缺口张数, 队列序, cid, 该套)
     for order, tid in enumerate(queue):
-        runs, buy = plans[tid].net_plan(stock, pending)
-        for cid, n in {**runs, **buy}.items():
-            if cid not in keep or not int(n or 0):
-                continue                             # 必须是套内卡，且引擎确实还缺
-            row = (int(n), order, int(cid))
-            (strict if face(cid) == CHANGE_FACE else loose).append(row)
-    cands = sorted(strict or loose, key=lambda x: (-x[0], x[1], x[2]))
+        g = face40_gap(plans[tid], stock, pending)
+        for cid, n in g["gap"].items():
+            if cid not in keep or n <= 0:
+                continue
+            cands.append((int(n), order, int(cid), tid))
     if not cands:
         return None
-    n, order, cid = cands[0]
-    tid = queue[order]
+    cands.sort(key=lambda x: (-x[0], x[1], x[2]))
+    n, order, cid, tid = cands[0]
     plan = plans[tid]
-    return {"dst": cid, "name": plan.cname(cid), "face": face(cid),
-            "times": n, "tid": tid, "theme": plan.name,
-            "target": f'{plan.cname(cid)}（{plan.name} {face(cid)}面，还差 {n}）'}
+    c = plan.cards.get(cid)
+    face = int(c[3] or 0) if c else 0
+    g = face40_gap(plan, stock, pending)
+    return {"dst": cid, "name": plan.cname(cid), "face": face, "times": n,
+            "tid": tid, "theme": plan.name,
+            "need_total": g["need_total"], "have": g["have"],
+            "gap_total": sum(g["gap"].values()),
+            "gap": dict(sorted(g["gap"].items())),
+            "target": f'{plan.cname(cid)}（{plan.name} {face}面，还差 {n} 张；'
+                      f'本套 40 面卡已有 {g["have"]} 张、总共还差 {g["need_total"]} 张）'}
 
 
 # ---------------------------------------------------------------------
@@ -500,21 +568,6 @@ class AutoRefine:
         return pick_change_target(self.plans, self.queue,
                                   self._stock if stock is None else stock,
                                   self._pending, set(self._keep))
-
-    def _dst_useful(self, dst: int) -> bool:
-        """`dstid` 是不是当前队列**用得上的卡**（套内卡或配方链上任意一层）。
-
-        卡箱礼物卡自动变卡的门槛：变卡约 50% 成功、失败也烧掉一张源卡，若变出来的
-        卡不是这一套要的，那就是拿礼物卡换废卡（2026-09-26 真机实测）。
-        队列为空 → 返回 False（现在没在炼卡，先不动箱里的礼物卡）。
-        """
-        if not self.queue:
-            return False
-        for tid in self.queue:
-            p = self.plans[tid]
-            if dst in p.ids or dst in p.depth:
-                return True
-        return False
 
     # ---------- 日志 ----------
     def _log(self, action: str, ok: bool, detail: str) -> None:
@@ -867,7 +920,8 @@ class AutoRefine:
         if not pick:
             self.box_gift_last = {"ok": True, "skipped": True, "inbox": 0, "tried": 0,
                                   "changed": 0, "dst": None,
-                                  "message": "当前没有缺的套内卡（40 面优先），本轮不消耗卡箱里的礼物卡"}
+                                  "message": "这一套的 40 面卡已够（或没有 40 面候选），"
+                                             "本轮不消耗卡箱里的礼物卡"}
             return
         dst = int(pick["dst"])
         try:
@@ -907,7 +961,7 @@ class AutoRefine:
         if not pick:
             self.gift_last = {"ok": True, "skipped": True, "took": 0, "changed": 0,
                               "dst": None,
-                              "message": "当前没有缺的套内卡（40 面优先），收礼变卡跳过"}
+                              "message": "这一套的 40 面卡已够（或没有 40 面候选），收礼变卡跳过"}
             return
         try:
             r = await gf.drain_gift_box(self.s, dstid=int(pick["dst"]),
@@ -1207,12 +1261,18 @@ class AutoRefine:
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,
+                # 每套「40 面卡缺口」：这一套从头炼到尾还要几张 40 面卡（库存已抵扣）
+                "face40": [{"tid": t, "theme": self.plans[t].name,
+                            **face40_gap(self.plans[t], self._stock, self._pending)}
+                           for t in self.queue],
                 "gift": {"enabled": self.gift_drain,
                          "dst": pick["dst"] if pick else None,
                          "dst_name": pick["name"] if pick else "",
                          "dst_face": pick["face"] if pick else 0,
                          "dst_theme": pick["theme"] if pick else "",
                          "target": (pick.get("target") if pick else ""),
+                         "need40": (pick.get("need_total") if pick else 0),
+                         "have40": (pick.get("have") if pick else 0),
                          "upper": self.gift_upper, "lower": self.gift_lower,
                          "last": self.gift_last},
                 "box_gift": {"enabled": self.box_gift_change,
@@ -1221,6 +1281,8 @@ class AutoRefine:
                              "dst_face": pick["face"] if pick else 0,
                              "dst_theme": pick["theme"] if pick else "",
                              "target": (pick.get("target") if pick else ""),
+                             "need40": (pick.get("need_total") if pick else 0),
+                             "have40": (pick.get("have") if pick else 0),
                              "useful": bool(pick),
                              "cooldown_remain": max(0, int(self._box_gift_cooldown - time.time())),
                              "last": self.box_gift_last},

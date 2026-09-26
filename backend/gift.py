@@ -393,6 +393,32 @@ DEFAULT_UPPER = 45      # 礼物箱快满阈值（箱上限 50，留几格缓冲
 DEFAULT_LOWER = 25      # 收到这个件数就停手（约一半）
 
 _face48: set[int] | None = None
+_face_of_cache: dict[int, int] = {}
+
+
+def _card_face(cid: int) -> int:
+    """查一张卡的**面额**（0 = 卡库里查不到）。带缓存，反复调用不重复读卡库。"""
+    if cid in _face_of_cache:
+        return _face_of_cache[cid]
+    lib = json.loads((Path(__file__).resolve().parent.parent
+                      / "data" / "card_lib.json").read_text(encoding="utf-8"))
+    for c in lib["card_list"]:
+        _face_of_cache[int(c[0])] = int(c[3] or 0)
+    return _face_of_cache.get(int(cid), 0)
+
+
+def change_dst_is_face40(dstid: int) -> bool | None:
+    """变卡目标是否**面额 40**。
+
+    用户 2026-09-26 明确：「礼物卡只能变 40 面额的，变不了其他面额，因为当前的
+    礼物卡只有 48 面额」。礼物套（theme=487）里 48 面的卡是唯一形态，变卡只把
+    它变成面额 40 的卡，变不出别的面额。
+
+    返回 True/False，**None = 卡库里查不到这张卡**（无法判定，调用方按放行处理，
+    别因为查不到卡就把正常流程拦住）。
+    """
+    f = _card_face(int(dstid))
+    return None if f == 0 else (f == 40)
 
 
 def _face48_ids() -> set[int]:
@@ -455,6 +481,13 @@ async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANG
            （旧版那样一次最多能烧掉 4 张源卡换 2 张目标卡，纯亏）；
          · 变出一张立刻停 —— dstid 是单张目标，连变没有意义。
     """
+    # 目标面额硬校验：礼物卡只有 48 面一种形态，变卡只产出 40 面。
+    # 传别的面额进去变，即使服务端收了也只是白烧一张源卡（变卡成功率约 50%）。
+    v = change_dst_is_face40(dstid)
+    if v is False:
+        return {"ok": False, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
+                "dst": dstid,
+                "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动卡"}
     pool = await find_box_gift_cards(session)
     inbox = len(pool)
     if not inbox:
@@ -491,7 +524,14 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
       取了变，卡箱没有再取」：所以本函数在动礼物箱**之前**，先检查卡箱里是否已经有
       同套（theme=487）的 48 面礼物卡 —— 有就就地变掉，本轮不收礼；箱里一张都没有
       （或全变失败）才走下面的收礼链路。
+
+    目标必须面额 40（礼物卡只有 48 面一种形态，变卡只产出 40 面），否则直接拒绝，
+    不收礼也不变卡 —— 收了也是白烧礼物卡。
     """
+    v = change_dst_is_face40(dstid)
+    if v is False:
+        return {"ok": False, "skipped": True, "took": 0, "changed": 0, "dst": dstid,
+                "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动手"}
     # ① 卡箱优先：不收礼，直接用箱里已有的同套 48 面卡变
     box = await drain_box_gift_cards(session, dstid)
     if box.get("inbox") and box.get("changed"):

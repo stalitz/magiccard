@@ -1228,7 +1228,7 @@ async def gift_change_target_api(tids: str = ""):
     if err := _require_login():
         return err
     try:
-        from .auto_refine import pick_change_target
+        from .auto_refine import face40_gap, pick_change_target
         ids = [int(x) for x in re.split(r"[,\s]+", (tids or "").strip()) if x.strip().isdigit()]
         if not ids and _auto:
             ids = list(_auto.queue)
@@ -1245,8 +1245,12 @@ async def gift_change_target_api(tids: str = ""):
             stock[c["id"]] += 1
         pending: Counter = Counter(c["id"] for c in st["stove"] if c["id"] > 0)
         pick = pick_change_target(eng.plans, eng.queue, stock, pending, set(eng._keep))
+        gaps = [{"tid": t, "theme": eng.plans[t].name,
+                 **face40_gap(eng.plans[t], stock, pending)} for t in eng.queue]
         return {"code": 0, "ok": bool(pick), "tids": ids, "queue": list(eng.queue),
-                "pick": pick, "message": (pick or {}).get("target", "当前不缺套内卡，本轮不动箱里的礼物卡")}
+                "pick": pick, "face40": gaps,
+                "message": (pick or {}).get("target",
+                                            "这一套的 40 面卡已经够了，本轮不动箱里的礼物卡")}
     except Exception as ex:  # noqa: BLE001
         return {"code": -1, "message": f"计算异常：{ex}"}
 
@@ -1273,7 +1277,7 @@ async def gift_box_change_api(body: dict | None = None):
                                        set(eng._keep)) if eng else None)
             if not pick:
                 return {"ok": False, "skipped": True, "message": (
-                    "当前没有缺的套内卡（40 面优先），不动手" if _auto else
+                    "这一套的 40 面卡已经够了（或没有 40 面候选），不动手" if _auto else
                     "自动炼卡没启动，没有在炼的套卡队列 —— 不知道该变哪张卡；"
                     "先启动自动炼卡，或手动传 dstid")}
             dstid = int(pick["dst"])
