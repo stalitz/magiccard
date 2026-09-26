@@ -2390,6 +2390,17 @@ async def home_arena_auto():
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.post("/api/home/all")
+async def home_all():
+    """一键全部：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 竞技自动，按正确顺序跑一遍。"""
+    if err := _require_login():
+        return err
+    try:
+        return await ch.run_all(_session)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
 # mode-props 的取数映射（mode:来源 -> 协程），由 main 注入 match.mode_props
 _MODE_PROP_FETCH: dict = {
     "comp:score": mt.comp_score, "comp:hero": mt.comp_hero,

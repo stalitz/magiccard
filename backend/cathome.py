@@ -97,8 +97,25 @@ async def home_state(session) -> dict:
     }
 
 
-async def like(session, target: str) -> dict:
-    """点赞。target = match（每日比赛榜，点榜1）| arena（竞技比赛榜）。"""
+async def _zan_bit(session, target: str):
+    """读回某榜今天的点赞状态：1=已点（0=未点）。服务端对重复点赞会回 system busy，
+    所以点赞前后都要读回状态来判定真实结果，不能只信动作接口的返回。"""
+    if target == "match":
+        r = await _act(session, EP_TRAVEL_MATCH, 9, dayindex=0)
+    else:
+        r = await _act(session, EP_TRAVEL_PVP, 14)
+    return ((r.get("data") or {}).get("zan_bit"))
+
+
+async def like(session, target: str, only_if_unliked: bool = True) -> dict:
+    """点赞。target = match（每日比赛榜，点榜1）| arena（竞技比赛榜）。
+
+    only_if_unliked=True（默认）：已经点过就直接跳过，不重复发动作。
+    """
+    if target not in ("match", "arena"):
+        return {"ok": False, "message": f"未知点赞目标 {target}"}
+    if only_if_unliked and await _zan_bit(session, target) in (1, "1"):
+        return {"ok": True, "skipped": True, "message": "今天已点过，跳过"}
     if target == "match":
         hero = await _act(session, EP_TRAVEL_MATCH, 9, dayindex=0)
         d = hero.get("data") or {}
@@ -107,24 +124,28 @@ async def like(session, target: str) -> dict:
             return {"ok": False, "message": "英雄榜为空，无法点赞"}
         r = await _act(session, EP_TRAVEL_MATCH, 22,
                        opuin=str(top["uin"]), rank_idx=0)
-    elif target == "arena":
-        r = await _act(session, EP_TRAVEL_PVP, 22, rank_idx=0)
     else:
-        return {"ok": False, "message": f"未知点赞目标 {target}"}
+        r = await _act(session, EP_TRAVEL_PVP, 22, rank_idx=0)
     if not r.get("ok"):
         return r
     d = r.get("data") or {}
     if d.get("code") not in (0, None):
         return {"ok": False, "code": d.get("code"), "message": d.get("desc") or "点赞被拒"}
-    return {"ok": True, "content": d.get("content") or ""}
+    # 服务端对重复点赞会回 system busy，用「动作 + 读回状态」确认最终结果
+    actually = await _zan_bit(session, target)
+    if actually in (1, "1"):
+        return {"ok": True, "content": d.get("content") or "", "confirmed": True}
+    return {"ok": True, "content": d.get("content") or "",
+            "message": f"动作已发但点赞位未变化（zan_bit={actually}），可能今天的赞已用过"}
 
 
 async def gacha_free(session) -> dict:
-    """扭蛋机免费抽一次（act=17 {id:1}）。先查 act=16 free_times，已用直接拒绝。"""
+    """扭蛋机免费抽一次（act=17 {id:1}）。已用过就跳过（不是失败）。"""
     st = await _act(session, EP_TRAVEL_MATCH, 16)
     used = (st.get("data") or {}).get("free_times")
     if used not in (0, None):
-        return {"ok": False, "message": f"今天的免费扭蛋已用过（free_times={used}）"}
+        return {"ok": True, "skipped": True,
+                "message": f"今天的免费扭蛋已用过（free_times={used}）"}
     r = await _act(session, EP_TRAVEL_MATCH, 17, id=1)
     if not r.get("ok"):
         return r
@@ -148,6 +169,16 @@ async def exchange_candy(session, num: int = 1) -> dict:
     if d.get("code") not in (0, None):
         return {"ok": False, "code": d.get("code"), "message": d.get("desc") or "兑换被拒"}
     return {"ok": True, "content": d.get("content") or "", "score": d.get("score")}
+
+
+# 一键全部里**当前无法自动执行**的玩法：写动作的 act 没在任何抓包里出现过，
+# 服务端对未知 act 一律回 `code=0, system busy`（已用 probe_home_writes.py 验证），
+# 盲探无解 —— 只能在日志里如实跳过，不猜参数、不假装有按钮。
+ALL_SKIPS = [
+    {"what": "金币福利 · 兑红宝石", "why": "购买动作的 act 未定位（缺抓包）"},
+    {"what": "衣柜锻造", "why": "锻造动作的 act 未定位（缺抓包）"},
+    {"what": "竞技 · 领段位奖励", "why": "领段位奖的 act 未定位（act=15 只是任务奖励）"},
+]
 
 
 def _candy_plan(mood: int, target: int = MOOD_TARGET) -> list:
@@ -290,3 +321,48 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
 
     return {"ok": True, "steps": steps, "fights": fights, "wins": wins,
             "claims": claims, "surplus_left": surplus}
+
+
+async def run_all(session) -> dict:
+    """「一键全部」：按正确顺序自动跑完每日玩法 —— 用户要的主入口（2026-09-26）。
+
+    顺序（用户明确要求）：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 → 竞技自动。
+    第 3 步把猫喂饱，第 5 步的 arena_auto 就 feed=False，避免重复喂同一批猫。
+    """
+    steps = []
+
+    # 1) 两个榜各点一次赞（每天各 1 次，已点过自动跳过）
+    for tg, label in (("match", "每日比赛榜"), ("arena", "竞技比赛榜")):
+        r = await like(session, tg)
+        steps.append({"act": "like", "ok": bool(r.get("ok")), "target": tg,
+                      "msg": f"{label} {'已点 ✓' if r.get('ok') else (r.get('message') or '未点')}"})
+
+    # 2) 扭蛋机免费抽一次
+    r = await gacha_free(session)
+    steps.append({"act": "gacha", "ok": bool(r.get("ok")),
+                  "msg": (f"扭蛋：{r['content']}" if r.get("content") else "")
+                         or r.get("message") or "扭蛋"})
+
+    # 3) 喂猫到 80；糖不够就先用积分换大糖果再喂
+    f = await feed_smart(session)
+    if not f.get("ok") and "不足" in (f.get("message") or ""):
+        c = await exchange_candy(session, 1)
+        if c.get("ok"):
+            steps.append({"act": "exchange", "ok": True, "msg": "糖果不足，先用 6 积分换 1 颗大糖果"})
+            f = await feed_smart(session)
+    n_candy = len([s for s in f.get("steps") or [] if s.get("candy")])
+    steps.append({"act": "feed", "ok": bool(f.get("ok")),
+                  "msg": f.get("message") or f"喂猫到 80（共 {n_candy} 颗糖）"})
+
+    # 4) 竞技自动（玩耍已在第 3 步做完，这里不再重复喂）
+    a = await arena_auto(session, feed=False)
+    for s in a.get("steps") or []:
+        steps.append({"act": "arena:" + str(s.get("act")), "ok": s.get("ok"), "msg": s.get("msg")})
+
+    # 5) 写动作没定位的玩法：如实跳过（不猜参数、不假装有按钮）
+    steps.append({"act": "skip-group", "ok": True, "skipped": True,
+                  "msg": "以下 3 项写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
+
+    return {"ok": True, "steps": steps, "skipped": ALL_SKIPS,
+            "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
+            "surplus_left": a.get("surplus_left")}
