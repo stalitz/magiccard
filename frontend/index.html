@@ -46,6 +46,22 @@
   /* 注意：这里必须用 .pane.match-pane 提高特异性 —— .pane 定义在下方（L144），
      单类选择器会被它覆盖回 column，日志栏就掉到下面去了 */
   .pane.match-pane{flex-direction:row;align-items:stretch;min-height:0;gap:12px;padding:12px 14px}
+  /* 比赛页子玩法 tab：猫窝日常是主界面（默认），比赛只是子玩法之一 */
+  .msub{display:none}
+  .msub.on{display:block}
+  .msub-bar{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:0 0 12px}
+  .msub-bar .tab{flex:0 0 auto;padding:8px 16px;font-size:13px;border-bottom:none;
+    border-right:1px solid var(--line);border-radius:0}
+  .msub-bar .tab:last-child{border-right:0}
+  .msub-bar .tab.active{background:#f0f7ff}
+  .msub-hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
+  /* 键值行：分行 + 分隔线，key 灰、value 加粗，不再堆在一起 */
+  .rv{display:flex;align-items:baseline;gap:10px;padding:4px 2px;border-bottom:1px solid var(--line)}
+  .rv:last-child{border-bottom:none}
+  .rv .k{flex:0 0 150px;color:var(--muted);font-size:12px}
+  .rv .v{flex:1 1 auto;font-weight:600;font-size:12.5px;word-break:break-all}
+  /* 状态框里一行一行排，不走多列网格（多列会把键值挤成一团） */
+  #match-state-box, #match-log-box .state-box{display:block}
   .pane.match-pane>.lib{flex:1 1 auto;min-width:0}
   .mlog-col{flex:0 0 272px;display:flex;flex-direction:column;min-height:0;min-width:0}
   .mlog-col .lpanel{flex:1 1 auto}
@@ -1309,8 +1325,67 @@
             <span class="sep"></span>
             <button id="match-equip" class="btn sm">装备详情</button>
             <button id="match-refresh" class="btn sm">刷新状态</button>
+            <span class="sep"></span>
+            <button id="match-pvp" class="btn sm">刷新 PVP 日榜</button>
+            <button id="match-union" class="btn sm">刷新工会</button>
+            <button id="match-gold" class="btn sm">金卡限购</button>
+            <button id="match-gvg" class="btn sm">刷新公会战</button>
+            <button id="match-sanguo" class="btn sm">刷新西游三国</button>
+            <button id="match-modes-refresh" class="btn sm">刷新其他玩法</button>
           </div>
 
+          <div class="msub-bar" id="match-sub-bar">
+            <button class="tab active" data-msub="home">猫窝日常</button>
+            <button class="tab" data-msub="race">出战（比赛）</button>
+            <button class="tab" data-msub="pvp">PVP 日榜</button>
+            <button class="tab" data-msub="union">工会 · 金卡</button>
+            <button class="tab" data-msub="gvg">公会战 · 西游三国</button>
+            <button class="tab" data-msub="modes">各玩法一键</button>
+          </div>
+          <div class="msub-hint">猫窝日常是本页主界面；切到哪个子玩法才拉哪个的接口，停在哪个就刷新哪个。</div>
+
+                    <div id="msub-home" class="msub on">
+          <div class="stat-card" style="flex:0 0 auto">
+            <h3>每日玩法（猫窝）· 一键全部</h3>
+            <div class="mode-grid" id="home-box">
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">点赞</span></div>
+                <div class="state-box"><span id="home-like-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">扭蛋机</span></div>
+                <div class="state-box"><span id="home-gacha-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">猫咪玩耍</span></div>
+                <div class="state-box"><span id="home-cat-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">竞技比赛</span></div>
+                <div class="state-box"><span id="home-arena-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">金币福利</span></div>
+                <div class="state-box"><span id="home-gold-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">衣柜锻造</span></div>
+                <div class="state-box"><span id="home-forge-st" style="grid-column:1/-1">读取中…</span></div>
+              </div>
+            </div>
+            <div class="lib-toolbar" style="padding:8px 12px">
+              <button id="home-all" class="btn sm ok">一键全部（自动跑完）</button>
+              <span id="home-all-st" class="hint"></span>
+            </div>
+            <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 兑红宝石 → 竞技自动</b>
+              （玩耍严格排在竞技之前）；糖果不够会先用积分换大糖果再喂。
+              今天的赞若已点过、免费扭蛋已抽过、红宝石已到上限，会自动跳过（不浪费次数）。<br>
+              衣柜锻造的写接口已定位（<b>act=29</b>，会真消耗材料），不在一键里自动锻 —— 先确认代价再手动锻。
+              <b>领段位奖励</b>的写接口仍未抓到包，一键时跳过并在日志里说明。</div>
+          </div>
+          </div>
+
+          <div id="msub-race" class="msub">
           <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1.15">
               <div class="lst" style="max-height:none">
@@ -1347,6 +1422,79 @@
             </div>
           </div>
         </div>
+          </div>
+
+          <div id="msub-pvp" class="msub">
+            <div class="dg-col" style="flex:1.35">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">PVP 日榜</span>
+                  <span class="cnt" id="match-pvp-cnt"></span></div>
+                <div id="match-pvp-box">
+                  <div class="state-box"><span class="spinner"></span>正在读取 PVP 日榜…</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="msub-union" class="msub">
+            <div class="lib-body dg-cols">
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">工会</span>
+                    <span class="cnt" id="match-union-cnt"></span></div>
+                  <div id="match-union-box"></div>
+                </div>
+              </div>
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">金卡每日限购（act=20）</span>
+                    <span class="cnt" id="match-gold-cnt"></span></div>
+                  <div id="match-gold-box"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="msub-gvg" class="msub">
+            <div class="lib-body dg-cols">
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">公会战（union act=22）</span>
+                    <span class="cnt" id="match-gvg-cnt"></span></div>
+                  <div id="match-gvg-box">
+                    <div class="state-box"><span class="spinner"></span>正在读取公会战…</div>
+                  </div>
+                  <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
+                    <button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>
+                  </div>
+                </div>
+              </div>
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">西游三国（worldsanguo act=1）</span>
+                    <span class="cnt" id="match-sanguo-cnt"></span></div>
+                  <div id="match-sanguo-box">
+                    <div class="state-box"><span class="spinner"></span>正在读取西游三国…</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="msub-modes" class="msub">
+            <div class="lib-body dg-cols">
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">各玩法一键（每块独立操作）</span>
+                    <span class="cnt" id="match-modes-cnt"></span></div>
+                  <div id="match-modes-box" class="mode-grid">
+                    <div class="state-box">读取中…</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
         <!-- 右侧常驻：只记每日比赛页内各玩法的操作与结果（与总览页全局日志互相独立） -->
         <div class="mlog-col">
           <div class="lpanel">
@@ -1366,7 +1514,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926u"></script>
+<script src="/app.js?v=20260926v"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

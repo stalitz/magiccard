@@ -1,10 +1,11 @@
 /**
- * 每日比赛页「一键比赛」冒烟（2026-09-26）
+ * 每日比赛页冒烟（2026-09-26 v2）
  *
- * 验收三件事：
- *  ① 比赛页只剩比赛本身，猫窝/公会战/西游三国/PVP/各玩法一键面板与二级 tab 已清干净
+ * 验收四件事：
+ *  ① 子玩法 tab 恢复：6 个 tab、默认停在「猫窝日常」（主界面）、比赛是子玩法之一
  *  ② 工具栏按钮绑的函数**全都真实存在**（上一版 feedAllCats 等绑了不存在的函数，点了必 ReferenceError）
  *  ③ 一键比赛确实会 confirm 消耗次数、逐场打完、并顺带领奖
+ *  ④ 比赛状态只留比赛相关字段（talent/clover/dzs/season/unionid 不再渲染）
  */
 const fs = require("fs");
 const path = require("path");
@@ -24,12 +25,21 @@ const dom = new JSDOM(html, { runScripts: "outside-only", url: BASE, virtualCons
 const w = dom.window;
 
 const calls = [];
+const HOME_STATE = {
+  ok: true,
+  likes: { match: 1, arena: 0 },
+  gacha: { free_used: 0, score: 120 },
+  cats: [{ elf_id: 3, mood: 85 }],
+  pvp: { surplus: 5, flush_num: 2, my_ce: 360 },
+  gold: { items: [{ id: 2, bought: 1 }, { id: 1, bought: 0 }] },
+  forge: { parts: { head: [{ id: 9, forge: 0, chip: 3 }] } },
+};
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
-  return Promise.resolve({
-    ok: true, status: 200,
-    json: () => Promise.resolve({
+  const payload = url.includes("/api/home/state")
+    ? HOME_STATE
+    : {
       ok: true, code: 0, bound: true,
       cats: [{ elf_id: 3, level: 20, mood: 85, equip: [1, 2, 3, 4] }],
       equip: {
@@ -46,8 +56,8 @@ w.fetch = (u, opt) => {
       items: [{ ok: true, k: "比赛领奖 act=17 id=1", content: "92_32_8" }],
       list: [], total: 0, data: {},
       message: "ok",
-    }),
-  });
+    };
+  return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(payload) });
 };
 let confirmed = 0;
 w.confirm = () => { confirmed += 1; return true; };
@@ -56,14 +66,16 @@ w.alert = () => {};
 const assert = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) process.exitCode = 1; };
 const $ = (id) => w.document.getElementById(id);
 
-// ---------- 1) 结构：只剩比赛本身 ----------
-console.log("\n[1] 比赛页结构");
-assert(!/msub-/.test(html), "没有残留的 msub 子模块容器");
-assert(!/match-sub-bar/.test(html), "二级 tab 栏已移除");
-for (const k of ["msub-home", "msub-pvp", "msub-union", "msub-gvg", "msub-modes"]) {
-  assert(!$("msub-" .replace("msub-", k)), `面板 #${k} 已删除`);
-}
-assert(!!$("match-runall"), "存在「一键比赛」按钮 #match-runall");
+// ---------- 1) 结构：子玩法 tab 恢复，默认猫窝日常 ----------
+console.log("\n[1] 子玩法 tab 结构");
+assert(!!$("match-sub-bar"), "二级 tab 栏 #match-sub-bar 存在");
+const tabs = [...w.document.querySelectorAll("#match-sub-bar .tab")].map((b) => b.getAttribute("data-msub"));
+assert(tabs.join(",") === "home,race,pvp,union,gvg,modes", "6 个子玩法 tab，猫窝日常排第一");
+for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
+assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
+assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
+assert(!!w.document.querySelector('#msub-home #home-all'), "猫窝一键按钮在猫窝面板里");
+assert(!!$("match-runall") && !$("match-runall").closest(".msub"), "一键比赛按钮在全局工具栏（不属于某个子面板）");
 assert(!!$("match-theme-box"), "存在主题卡容器 #match-theme-box");
 assert(!!$("match-log-box"), "存在出战记录容器 #match-log-box");
 assert(!!w.document.querySelector("[data-mlog]"), "右侧比赛日志容器 #match-mlog-box[data-mlog] 存在");
@@ -97,7 +109,7 @@ w.eval(`(async () => {
   document.getElementById("match-runall").click();
 })()`).catch((e) => errors.push(String(e)));
 
-setTimeout(() => {
+setTimeout(async () => {
   assert(confirmed > 0, "一键比赛前弹确认框（会消耗次数）");
   const ra = calls.filter((c) => c.url.includes("/api/match/run-all"));
   assert(ra.length === 1, "调用了一次 /api/match/run-all");
@@ -106,6 +118,19 @@ setTimeout(() => {
   const logs = w.document.querySelector("[data-mlog]").textContent;
   assert(/一键比赛/.test(logs), "比赛日志里有一键比赛记录");
   assert(/打了\s*2\s*场|打了 2 场/.test(logs) || /一键比赛\] 完成/.test(logs), "日志记录了场次与剩余次数");
+  // 猫窝日常确实被默认加载过
+  assert(calls.some((c) => c.url.includes("/api/home/state")), "默认子模块（猫窝日常）自动拉了 /api/home/state");
+  // tab 切换：点「出战（比赛）」→ race 显示、home 隐藏
+  w.eval(`switchMatchSub("race")`);
+  assert($("msub-race").classList.contains("on") && !$("msub-home").classList.contains("on"),
+    "切到「出战（比赛）」后 race 显示、猫窝隐藏");
+  // 比赛状态只留比赛字段
+  w.eval(`renderMatchState()`);
+  const st = $("match-state-box").textContent;
+  assert(/猫咪数量/.test(st) && /performe_num/.test(st), "状态卡有比赛字段（猫咪数量/performe_num）");
+  assert(!/talent_score|clover_num|season_rank|unionid|dzs/.test(st), "状态卡不再渲染 talent/clover/dzs/season/unionid");
+  // 键值行样式：k 与 v 分离（不再堆在一起）
+  assert(!!w.document.querySelector("#match-state-box .rv .k"), "状态行是 .rv 键值分离结构");
   assert(!errors.length, "运行期无 JS 报错" + (errors.length ? "：" + errors.slice(0, 2).join(" | ") : ""));
   w.close();
   process.exit(process.exitCode || 0);
