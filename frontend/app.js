@@ -3273,6 +3273,19 @@ let matchState = null, matchPvp = null, matchUnion = null, matchGold = null;
 let matchGvg = null, matchSanguo = null;
 let matchPvpTimer = null, matchUnionTimer = null, matchGvgTimer = null, matchSanguoTimer = null;
 
+// ---- 每日比赛页的子模块：每个子模块 = 一组相关卡片 + 自己的接口 ----
+// 切到哪个才拉哪个，定时也只刷新当前停留的子模块（避免一次进页面打 8 个接口）。
+const MATCH_SUB_KEYS = ["race", "home", "pvp", "union", "gvg", "modes"];
+const MATCH_SUB_LOAD = {
+  race: () => { loadMatchState(true); },
+  home: () => { loadHomeState(); },
+  pvp: () => { loadMatchPvp(); },
+  union: () => { loadMatchUnion(); loadMatchGold(); },
+  gvg: () => { loadMatchGvg(); loadMatchSanguo(); },
+  modes: () => { loadMatchModes(); loadMatchLog(); },
+};
+let matchSubTimer = null;
+
 function matchFmtTs(ts) {
   if (!ts) return "-";
   try { return new Date(Number(ts) * 1000).toLocaleString("zh-CN", { hour12: false }); }
@@ -3452,6 +3465,7 @@ function renderMatchGold() {
 }
 
 function matchStopPoll() {
+  if (matchSubTimer) { clearInterval(matchSubTimer); matchSubTimer = null; }
   if (matchPvpTimer) { clearInterval(matchPvpTimer); matchPvpTimer = null; }
   if (matchUnionTimer) { clearInterval(matchUnionTimer); matchUnionTimer = null; }
 }
@@ -3832,6 +3846,22 @@ async function loadMatchGold() {
   renderMatchGold();
 }
 
+// 切换每日比赛页的子模块：只显示目标子模块，并立刻拉取它的数据（手动操作即时可见）
+function switchMatchSub(key) {
+  if (MATCH_SUB_KEYS.indexOf(key) < 0) return;
+  window.__matchSub = key;
+  const bar = $("match-sub-bar");
+  if (bar) bar.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.getAttribute("data-msub") === key);
+  });
+  MATCH_SUB_KEYS.forEach((k) => {
+    const el = $("msub-" + k);
+    if (el) el.classList.toggle("on", k === key);
+  });
+  const fn = MATCH_SUB_LOAD[key];
+  if (fn) fn();
+}
+
 function initMatchOnce() {
   if (window.__matchInited) return;
   window.__matchInited = true;
@@ -3857,9 +3887,18 @@ function initMatchOnce() {
     restore();
   });
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
-bind("match-claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（全玩法）")(claimAll()));
+  bind("match-claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（全玩法）")(claimAll()));
   bindMatchModeActs();
   bindMatchModeActs();
+  // 子模块 tab：全局委托（按钮是页面里的静态元素，不重新生成即可）
+  const subBar = $("match-sub-bar");
+  if (subBar) subBar.onclick = (e) => {
+    const t = e.target && e.target.closest ? e.target.closest(".tab") : null;
+    if (!t) return;
+    const key = t.getAttribute("data-msub");
+    switchMatchSub(key);
+    log("[每日比赛] 子模块：" + (t.textContent || "") + " 已加载", "ok");
+  };
 bind("match-modes-refresh", async (b) => {
   const restore = busyBtn(b, "读取中…", "刷新其他玩法");
   await loadMatchModes(); await loadMatchLog(); restore();
@@ -3872,19 +3911,18 @@ bind("match-modes-refresh", async (b) => {
     renderMatchSanguo();
     restore();
   });
-  // 首次进入即拉一次；之后 60s 兜底轮询（与手动操作解耦）
-  loadMatchState(true);
-  loadMatchPvp();
-  loadMatchUnion();
-  loadMatchGold();
-  loadMatchGvg();
-  loadMatchSanguo();
-  loadMatchModes();
-  loadMatchLog();
-  if (!matchPvpTimer) matchPvpTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchPvp(); }, 60000);
-  if (!matchUnionTimer) matchUnionTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchUnion(); }, 60000);
-  if (!matchGvgTimer) matchGvgTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchGvg(); }, 60000);
-  if (!matchSanguoTimer) matchSanguoTimer = setInterval(() => { if (!$("pane-match").classList.contains("hidden")) loadMatchSanguo(); }, 60000);
+  // 首次进入只拉「出战」这一个子模块；切到别的子模块时再按需拉取
+  switchMatchSub(window.__matchSub || "race");
+  // 60s 兜底轮询只刷新当前停留的子模块（与手动操作解耦）
+  if (!matchSubTimer) matchSubTimer = setInterval(() => {
+    const pane = $("pane-match");
+    if (!pane || pane.classList.contains("hidden")) return;
+    const fn = MATCH_SUB_LOAD[window.__matchSub || "race"];
+    if (fn) fn();
+  }, 60000);
+  // 旧的分模块定时器不再需要（一律由上面的 matchSubTimer 按当前子模块驱动）
+  [matchPvpTimer, matchUnionTimer, matchGvgTimer, matchSanguoTimer].forEach((t) => { if (t) clearInterval(t); });
+  matchPvpTimer = matchUnionTimer = matchGvgTimer = matchSanguoTimer = null;
 }
 
 
