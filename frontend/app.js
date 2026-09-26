@@ -3470,14 +3470,57 @@ function renderMatchLog() {
   }).join("");
 }
 
+// ===================== 各玩法子块（每块各自一键） =====================
+
+// 数组长度：接口各端点字段层级不一（data.list / data.data / ...），统一兜底
+function arrLen(x) {
+  const o = x || {};
+  const d = o.data || {};
+  if (Array.isArray(d.list)) return d.list.length;
+  if (Array.isArray(d.data)) return d.data.length;
+  if (Array.isArray(o.list)) return o.list.length;
+  return "-";
+}
+
+// 单个玩法子块：标题 + 计数 + 信息行 + 该玩法专属按钮（走 data-act 全局委托）
+function modeCard(title, cnt, rows, acts) {
+  return `<div class="lst mode-card">` +
+    `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
+    `<div class="state-box">${rows || "-"}</div>` +
+    (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
+    `</div>`;
+}
+
+// ===================== 各玩法子块（每块各自一键） =====================
+
+// 数组长度：接口各端点字段层级不一（data.list / data.data / ...），统一兜底
+function arrLen(x) {
+  const o = x || {};
+  const d = o.data || {};
+  if (Array.isArray(d.list)) return d.list.length;
+  if (Array.isArray(d.data)) return d.data.length;
+  if (Array.isArray(o.list)) return o.list.length;
+  return "-";
+}
+
+// 单个玩法子块：标题 + 计数 + 信息行 + 该玩法专属按钮（走 data-act 全局委托）
+function modeCard(title, cnt, rows, acts) {
+  return `<div class="lst mode-card">` +
+    `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
+    `<div class="state-box">${rows || "-"}</div>` +
+    (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
+    `</div>`;
+}
+
 async function loadMatchModes() {
-  const [comp, pvp, exp, uni] = await Promise.all([
+  const [comp, pvp, exp, uni, sg] = await Promise.all([
     fetch("/api/match/comp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
     fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
     fetch("/api/match/explore-extra").then((x) => x.json()).catch(() => ({ ok: false })),
     fetch("/api/match/union-extra").then((x) => x.json()).catch(() => ({ ok: false })),
+    fetch("/api/match/sanguo-extra").then((x) => x.json()).catch(() => ({ ok: false })),
   ]);
-  matchModes = { comp, pvp, exp, uni };
+  matchModes = { comp, pvp, exp, uni, sg };
   renderMatchModes();
 }
 
@@ -3485,43 +3528,186 @@ function renderMatchModes() {
   const box = $("match-modes-box"), cnt = $("match-modes-cnt");
   if (!box) return;
   const m = matchModes || {};
-  const sc = (m.comp && m.comp.score && m.comp.score.data) || {};
-  const hero = (m.comp && m.comp.hero && m.comp.hero.data) || {};
-  const pv = (m.pvp && m.pvp.state && m.pvp.state.data) || {};
-  const pvStore = (m.pvp && m.pvp.store && m.pvp.store.data) || {};
-  const exp = (m.exp && m.exp.task && m.exp.task.data) || {};
-  const uni = (m.uni && m.uni.task && m.uni.task.data) || {};
+  const sc = ((m.comp || {}).score || {}).data || {};
+  const hero = ((m.comp || {}).hero || {}).data || {};
+  const pv = ((m.pvp || {}).state || {}).data || {};
   const enemies = pv.enemy_list || [];
-  if (cnt) cnt.textContent = `积分 ${sc.score ?? "-"} · 对手 ${enemies.length}`;
-  const top3 = enemies.slice(0, 3).map((e) => `${e.name || e.uin}(战力${e.ce})`).join("、") || "-";
-  box.innerHTML = `<div class="state-box">` +
-    matchRow("比赛积分 score / 免费次数", `${sc.score ?? "-"} / ${sc.free_num ?? "-"}`) +
-    matchRow("我的最高分 my_top_score", hero.my_top_score ?? "-") +
-    matchRow("竞技场次数 pvp_num / 免费", `${pv.pvp_num ?? "-"} / ${pv.free_pvp_num ?? "-"}`) +
-    matchRow("当前对手（前 3）", top3) +
-    matchRow("竞技场商店", (pvStore.list || []).length ? `${pvStore.list.length} 项` : "-") +
-    matchRow("工会任务 num / resetnum", `${uni.num ?? "-"} / ${uni.resetnum ?? "-"}`) +
-    matchRow("探索任务", JSON.stringify(exp.task_detail || []).slice(0, 60)) +
-    `</div>`;
+  const expTask = ((m.exp || {}).task || {}).data || {};
+  const expDetail = expTask.task_detail || [];
+  const uniTask = ((m.uni || {}).task || {}).data || {};
+  const sgTask = ((m.sg || {}).task || {}).data || {};
+  const sgDetail = sgTask.task_detail || [];
+  const sgLevels = (((m.sg || {}).levels || {}).data || {}).data || [];
+  // 合法关卡 id 从 101 起（1~9 会被 act=16 判成「错误的关卡ID」），给每个候选各一个闯关按钮
+  const runs = sgLevels.filter((l) => l.id >= 101).slice(0, 3);
+  const cards = [];
+
+  // 1) 每日比赛：积分 / 次数 / 最高分
+  cards.push(modeCard("每日比赛", `${sc.score ?? "-"} 分`,
+    matchRow("积分 score / 免费次数", `${sc.score ?? "-"} / ${sc.free_num ?? "-"}`) +
+    matchRow("今日次数 free_times", sc.free_times ?? "-") +
+    matchRow("报名次数 signleTimes / multiTimes", `${sc.signleTimes ?? "-"} / ${sc.multiTimes ?? "-"}`) +
+    matchRow("我的最高分 my_top_score", hero.my_top_score ?? "-"),
+    `<button class="btn sm ok" data-act="mm-claim" data-only="comp" data-idle="一键领奖">一键领奖</button>` +
+    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`));
+
+  // 2) 竞技场：次数 / 对手 / 领奖 / 刷对手 / 挑战（消耗）
+  cards.push(modeCard("竞技场", `对手 ${enemies.length}`,
+    matchRow("挑战次数 / 免费", `${pv.pvp_num ?? "-"} / ${pv.free_pvp_num ?? "-"}`) +
+    matchRow("刷新次数 flush_num", pv.flush_num ?? "-") +
+    matchRow("当前对手（前 3）", enemies.slice(0, 3).map((e) => `${e.name || e.uin}(${e.ce})`).join("、") || "-"),
+    `<button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="一键领奖">一键领奖</button>` +
+    `<button class="btn sm ghost" data-act="mm-flush" data-idle="刷对手">刷对手</button>` +
+    (enemies.length
+      ? `<button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战首位">挑战首位（消耗）</button>` : "")));
+
+  // 3) 工会任务：次数 / 任务位 / 商店
+  cards.push(modeCard("工会任务", `num ${uniTask.num ?? "-"}`,
+    matchRow("任务 num / resetnum", `${uniTask.num ?? "-"} / ${uniTask.resetnum ?? "-"}`) +
+    matchRow("任务位 bits", uniTask.bits ?? "-") +
+    matchRow("工会商店", arrLen((m.uni || {}).shop)),
+    `<button class="btn sm ok" data-act="mm-claim" data-only="union" data-idle="一键领奖">一键领奖</button>` +
+    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`));
+
+  // 4) 世界探索：任务 / 队伍 / 商店
+  cards.push(modeCard("世界探索", `任务 ${expDetail.length}`,
+    matchRow("任务进度", expDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
+    matchRow("探索队伍", arrLen((m.exp || {}).team)) +
+    matchRow("商店 / 排行", arrLen((m.exp || {}).shop) + " / " + arrLen((m.exp || {}).rank)),
+    `<button class="btn sm ok" data-act="mm-claim" data-only="explore" data-idle="一键领奖">一键领奖</button>` +
+    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`));
+
+  // 5) 西游三国：任务 / 关卡 / 领奖 / 闯关（消耗，cats+eqs 由后端读 act=16 真实阵容拼装）
+  cards.push(modeCard("西游三国", `关卡 ${sgLevels.length}`,
+    matchRow("任务进度", sgDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
+    matchRow("可打关卡", runs.map((l) => l.id).join("、") || "-") +
+    matchRow("当前选中", (window.__sgLevelid || (runs[0] && runs[0].id) || "-")),
+    `<button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>` +
+    runs.map((l) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${l.id}" data-idle="闯关 L${l.id}">闯关 L${l.id}（消耗）</button>`).join("")));
+
+  // 6) 公会战：出兵入口（与工会子块同一动作，参数走后端默认 optype=4/uptype=1）
+  cards.push(modeCard("公会战", "",
+    matchRow("出兵", "optype=4 / uptype=1（参数语义未完全证实，点了看返回）") +
+    matchRow("说明", "出兵消耗次数，失败多返回 system busy"),
+    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`));
+
+  box.innerHTML = `<div class="mode-grid">` + cards.join("") + `</div>`;
+  if (cnt) {
+    cnt.textContent = `积分 ${sc.score ?? "-"} · 对手 ${enemies.length} · 工会 ${uniTask.num ?? "-"} · 关卡 ${sgLevels.length}`;
+  }
 }
 
-async function claimAll() {
-  // 一键领奖：competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=8
+// 子块一键领奖：only 填空即全量（原「一键领奖（全玩法）」也走这里）
+async function claimGroup(only) {
   const r = await fetch("/api/match/claim-all", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ only: only || "" }),
   }).then((x) => x.json()).catch(() => null);
   const items = (r && r.items) || [];
-  if (!items.length) { log("[每日比赛] 领奖失败（无返回）", "warn"); return; }
+  if (!items.length) { log("[领奖] 没有可领的项目", "warn"); return false; }
+  let ok = 0;
   for (const it of items) {
     const d = (it.r && it.r.data) || {};
-    if ((it.r && it.r.ok === false) || (d.code !== undefined && d.code !== 0)) {
+    const bad = (it.r && it.r.ok === false) || (d.code !== undefined && d.code !== 0);
+    if (bad) {
       log("[领奖] " + it.k + " → 无奖励或失败 " + (d.desc || d.code || (it.r && it.r.message) || ""), "");
     } else {
+      ok += 1;
       log("[领奖] " + it.k + " → " + (d.content || "成功"), "ok");
     }
   }
-  await loadMatchLog();
+  log("[领奖] 成功 " + ok + " / " + items.length, ok ? "ok" : "");
+  return ok > 0;
 }
+
+async function pvpFight() {
+  const p = matchModes && matchModes.pvp;
+  const st = (p && p.state && p.state.data) || {};
+  const e0 = (st.enemy_list || [])[0];
+  if (!e0) { log("[竞技场] 没有可挑战的对手", "warn"); return; }
+  if (!confirm("挑战「" + (e0.name || e0.uin) + "」会消耗 1 次竞技场次数，确认？")) return;
+  const r = await fetch("/api/match/pvp-fight", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ euin: e0.uin }),
+  }).then((x) => x.json()).catch(() => null);
+  const d = (r && r.data) || {};
+  const bad = (r && r.ok === false) || (d.code !== undefined && d.code !== 0);
+  log("[竞技场] 挑战 " + (e0.name || e0.uin) + " → " +
+    (bad ? (d.desc || d.code || r.message || "失败") : (d.content || "胜利 " + (d.winnum ?? ""))), bad ? "" : "ok");
+  await loadMatchPvp();
+}
+
+async function unionFight() {
+  if (!confirm("公会战出兵会消耗出兵次数，确认？")) return;
+  const r = await fetch("/api/match/union-fight", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }).then((x) => x.json()).catch(() => null);
+  const d = (r && r.data) || {};
+  const bad = (r && r.ok === false) || (d.code !== undefined && d.code !== 0);
+  log("[工会] 出兵 → " + (bad ? (d.desc || d.code || r.message || "失败") : (d.content || "成功")), bad ? "" : "ok");
+  await loadMatchUnion();
+}
+
+async function sanguoRun(levelid) {
+  if (!levelid) { log("[三国] 没选关卡", "warn"); return; }
+  if (!confirm("三国闯关 L" + levelid + " 会消耗闯关次数，确认？")) return;
+  const r = await fetch("/api/match/sanguo-auto", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ levelid: levelid }),
+  }).then((x) => x.json()).catch(() => null);
+  if (!r || r.ok === false) { log("[三国] 闯关失败：" + ((r && r.message) || "网络异常"), "warn"); return; }
+  const d = (r.result && r.result.data) || (r.result || {});
+  const bad = (d.code !== undefined && d.code !== 0);
+  log("[三国] 闯关 L" + levelid + "（" + r.eq_count + " 件装 / " + (r.cats || []).join(",") + "）→ " +
+    (bad ? (d.desc || d.code) : (d.content || "成功")), bad ? "" : "ok");
+  await loadMatchModes();
+}
+
+// data-act 委托（document 级，只绑一次）：新增子块/按钮无需再改 bind 列表
+function bindMatchModeActs() {
+  if (window.__modeActsBound) return;
+  window.__modeActsBound = true;
+  document.addEventListener("click", (ev) => {
+    const b = ev.target && ev.target.closest ? ev.target.closest("[data-act^='mm-']") : null;
+    if (!b) return;
+    const act = b.dataset.act;
+    const restore = busyBtn(b, "处理中…", b.dataset.idle || b.textContent);
+    (async () => {
+      try {
+        if (act === "mm-refresh") {
+          await loadMatchModes(); await loadMatchLog();
+          log("[每日比赛] 各玩法状态已刷新", "ok");
+        } else if (act === "mm-claim") {
+          await claimGroup(b.dataset.only || "");
+          await loadMatchModes(); await loadMatchLog();
+        } else if (act === "mm-flush") {
+          const r = await fetch("/api/match/pvp-flush", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+          }).then((x) => x.json()).catch(() => null);
+          const d = (r && r.data) || {};
+          log("[竞技场] 刷新对手 → " + ((d.code !== undefined && d.code !== 0)
+            ? (d.desc || d.code || (r && r.message) || "失败") : "已刷新"), "");
+          await loadMatchModes(); await loadMatchPvp();
+        } else if (act === "mm-fight-pvp") {
+          await pvpFight(); await loadMatchModes();
+        } else if (act === "mm-fight-union") {
+          await unionFight(); await loadMatchModes();
+        } else if (act === "mm-run-sg") {
+          await sanguoRun(parseInt(b.dataset.levelid, 10));
+        }
+      } finally {
+        restore();
+      }
+    })();
+  });
+}
+
+// 全量一键领奖：与子块「一键领奖」同一端点，only 传空 = 全跑
+async function claimAll() {
+  await claimGroup("");
+  await loadMatchModes();
+}
+
 
 async function loadMatchGold() {
   const r = await fetch("/api/match/gold").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
@@ -3555,6 +3741,8 @@ function initMatchOnce() {
   });
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
 bind("match-claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（全玩法）")(claimAll()));
+  bindMatchModeActs();
+  bindMatchModeActs();
 bind("match-modes-refresh", async (b) => {
   const restore = busyBtn(b, "读取中…", "刷新其他玩法");
   await loadMatchModes(); await loadMatchLog(); restore();

@@ -634,6 +634,14 @@
   .pay-it:hover{background:#f3f8fc}
   .pay-it input[type=checkbox]{margin:0;flex:0 0 auto;width:14px;height:14px}
   .pay-nm{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 每日比赛：各玩法子块（每个玩法一块、每块各自一键） */
+  .mode-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));
+    gap:8px;align-content:start;padding:0}
+  .mode-card{margin:0;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden}
+  .mode-card .lst-head{background:#f6f9fc}
+  .mode-card .state-box{border:none;border-radius:0;line-height:1.5}
+  .mode-card .lib-toolbar{padding:6px 8px;gap:6px}
+  .mode-card .lib-toolbar .btn{font-size:11.5px;padding:2px 8px}
   .pay-meta{flex:0 0 auto;color:var(--muted);font-size:12px;white-space:nowrap;margin-left:10px}
 </style>
 </head>
@@ -1319,6 +1327,9 @@
                 <div id="match-gvg-box">
                   <div class="state-box"><span class="spinner"></span>正在读取公会战…</div>
                 </div>
+                <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
+                  <button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>
+                </div>
               </div>
             </div>
             <div class="dg-col" style="flex:1">
@@ -1340,11 +1351,13 @@
                 <div id="match-log-box"><div class="state-box">读取中…</div></div>
               </div>
             </div>
-            <div class="dg-col" style="flex:1">
+            <div class="dg-col" style="flex:1.25">
               <div class="lst" style="max-height:none">
-                <div class="lst-head"><span class="t">其他玩法（竞技场 / 探索 / 工会任务 / 比赛积分）</span>
+                <div class="lst-head"><span class="t">各玩法一键（每块独立操作）</span>
                   <span class="cnt" id="match-modes-cnt"></span></div>
-                <div id="match-modes-box"><div class="state-box">读取中…</div></div>
+                <div id="match-modes-box" class="mode-grid">
+                  <div class="state-box">读取中…</div>
+                </div>
               </div>
             </div>
           </div>
@@ -1354,7 +1367,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926d"></script>
+<script src="/app.js?v=20260926e"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
