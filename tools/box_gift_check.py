@@ -129,22 +129,53 @@ async def main() -> None:
     eng._read_state = fake_read
     eng._refine_all = fake_refine
 
-    eng.gift_dst = 99999999                  # 用不上的卡 → 不该动箱里的礼物卡
-    await eng.tick()
-    check("dst 用不上时不动手（拿礼物卡换废卡不划算）",
-          not any(x["action"] == "礼物卡变卡" for x in eng.log)
-          and s.transfer_n == 0, f"transfer {s.transfer_n} 次")
-
-    p = eng.plans[1652]
-    eng.gift_dst = next(iter(p.depth))       # 换成这一套真正用得上的卡
+    # 2026-09-26：目标不再写死。gift_dst 填一个本套用不上的卡， Automatic 仍应按
+    # 「缺哪张套内 40 面卡」动手 —— 这正是用户批评的「指定某卡但炼的不是那套」。
+    eng.gift_dst = 99999999
+    eng.log.clear()
     await eng.tick()
     step = [x for x in eng.log if x["action"] == "礼物卡变卡"]
-    check("dst 用得上时 tick 产出去变卡", bool(step),
-          str([x["detail"] for x in eng.log][:4]))
+    check("写死的 gift_dst 已作废：dst=99999999 也不会被拿来变卡",
+          all("99999999" not in x["detail"] for x in step),
+          str([x["detail"] for x in step][:2]))
+    check("tick 仍然动手变卡（目标自动挑）", bool(step),
+          str([x["detail"] for x in step][:2]) or "tick 未产出变卡日志")
+
+    p = eng.plans[1652]
+    bg = eng.status()["box_gift"]
+    check("自动目标属于「在炼的那套」（1652 七夕情人节）",
+          int(bg.get("dst") or 0) in set(p.ids), f"dst={bg.get('dst')}")
+    check("自动目标是 40 面卡", int(bg.get("dst_face") or 0) == 40,
+          f"face={bg.get('dst_face')}，{bg.get('dst_name')}")
+    check("目标不是写死的 26117（属 theme 1810，本套用不上）",
+          int(bg.get("dst") or 0) != 26117, f"dst={bg.get('dst')}")
     check("用的 srcid 是卡箱里那张 7773", bool(s.calls) and s.calls[0][0] == 7773,
           str(s.calls[:1]))
-    bg = eng.status()["box_gift"]
     check("status 里带 box_gift 供面板显示", "useful" in bg and "last" in bg)
+
+    print("\n[8] pick_change_target：缺哪个变哪个（40 面优先）")
+    from backend.auto_refine import pick_change_target
+    keep = set(eng._keep)
+    empty = pick_change_target(eng.plans, eng.queue, Counter(), Counter(), keep)
+    check("空库存时挑出一张套内 40 面卡",
+          bool(empty) and empty["face"] == 40
+          and empty["dst"] in [c for c in p.ids if p.cards[c][3] == 40], str(empty))
+    full = Counter({c: 1 for c in p.ids})                    # 全套齐了
+    check("一套都齐 → 不挑（本轮不动箱里的礼物卡）",
+          pick_change_target(eng.plans, eng.queue, full, Counter(), keep) is None)
+    miss_one = Counter({c: 1 for c in p.ids if c != 23927})  # 只缺斗巧(40面)
+    got = pick_change_target(eng.plans, eng.queue, miss_one, Counter(), keep)
+    check("只缺 23927 斗巧 → 就变 23927（缺哪个变哪个）",
+          bool(got) and got["dst"] == 23927, str(got))
+    eng2 = ar.AutoRefine(s, [1652, 1810])
+    keep2 = set(eng2._keep)
+    k2 = pick_change_target(eng2.plans, eng2.queue,
+                            Counter({c: 1 for c in eng2.plans[1810].ids}),
+                            Counter(), keep2)
+    check("多套并行时只认在炼那套的卡（1810 全齐、1652 空 → 挑 1652 的 40 面卡）",
+          bool(k2) and k2["tid"] == 1652 and k2["face"] == 40, str(k2))
+    check("队列为空 → None（现在没在炼卡，别动箱里的卡）",
+          pick_change_target(eng2.plans, [], Counter(), Counter(), keep2) is None)
 
     print(f"\n结果：PASS {len(PASS)} / FAIL {len(FAIL)}")
     if FAIL:
