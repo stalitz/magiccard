@@ -61,8 +61,22 @@
   .rv .k{flex:0 0 150px;color:var(--muted);font-size:12px}
   .rv .v{flex:1 1 auto;font-weight:600;font-size:12.5px;word-break:break-all}
   /* 状态框里一行一行排，不走多列网格（多列会把键值挤成一团） */
-  #match-state-box, #match-log-box .state-box{display:block}
-  .pane.match-pane>.lib{flex:1 1 auto;min-width:0}
+  #match-state-box, #match-theme-box, #match-log-box .state-box{display:block}
+  .pane.match-pane>.lib{flex:1 1 auto;min-width:0;overflow-y:auto}
+  /* 关键：.lib 是 flex 列，内容高于可视区时子项默认 flex-shrink:1 会被压扁 ——
+     msub-bar 曾被压到 2px 高，tab 只剩半截（用户报「tab 被挡住」）。
+     统一禁止收缩，滚动交给 .lib 自己的 overflow-y。 */
+  .pane.match-pane .lib>*{flex-shrink:0}
+  /* 比赛页分块：块 = 白卡片 + 标题条（此前 .lst/.lst-head 无基础样式，灰底堆字）。
+     只作用于左栏（.lib）内，右栏日志有自己的 lpanel 卡片。 */
+  .match-pane>.lib .lst{background:var(--panel);border-radius:12px;
+    box-shadow:0 2px 10px rgba(20,40,80,.06);padding:0;overflow:hidden;flex:0 0 auto}
+  .match-pane>.lib .lst-head{display:flex;align-items:center;gap:8px;padding:10px 14px;
+    border-bottom:1px solid var(--line);background:#f6f9fc;
+    font-weight:600;font-size:13.5px}
+  .match-pane>.lib .lst-head .cnt{margin-left:auto;font-size:12px;color:var(--muted);font-weight:400}
+  .match-pane>.lib .lst .state-box,.match-pane>.lib .lst>.lib-toolbar{padding:10px 14px}
+  .match-pane>.lib .lst .lst{background:none;box-shadow:none;border-radius:0;padding:6px}
   .mlog-col{flex:0 0 272px;display:flex;flex-direction:column;min-height:0;min-width:0}
   .mlog-col .lpanel{flex:1 1 auto}
   #match-mlog-box{flex:1 1 auto;font:12px/1.6 ui-monospace,Menlo,monospace;
@@ -1323,15 +1337,7 @@
             <button id="match-dress" class="btn sm">最优穿搭建议</button>
             <button id="match-claim-all" class="btn sm">一键领奖</button>
             <span class="sep"></span>
-            <button id="match-equip" class="btn sm">装备详情</button>
             <button id="match-refresh" class="btn sm">刷新状态</button>
-            <span class="sep"></span>
-            <button id="match-pvp" class="btn sm">刷新 PVP 日榜</button>
-            <button id="match-union" class="btn sm">刷新工会</button>
-            <button id="match-gold" class="btn sm">金卡限购</button>
-            <button id="match-gvg" class="btn sm">刷新公会战</button>
-            <button id="match-sanguo" class="btn sm">刷新西游三国</button>
-            <button id="match-modes-refresh" class="btn sm">刷新其他玩法</button>
           </div>
 
           <div class="msub-bar" id="match-sub-bar">
@@ -1386,6 +1392,9 @@
           </div>
 
           <div id="msub-race" class="msub">
+          <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+            <button id="match-equip" class="btn sm">装备详情</button>
+          </div>
           <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1.15">
               <div class="lst" style="max-height:none">
@@ -1425,6 +1434,9 @@
           </div>
 
           <div id="msub-pvp" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-pvp" class="btn sm">刷新 PVP 日榜</button>
+            </div>
             <div class="dg-col" style="flex:1.35">
               <div class="lst" style="max-height:none">
                 <div class="lst-head"><span class="t">PVP 日榜</span>
@@ -1437,6 +1449,10 @@
           </div>
 
           <div id="msub-union" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-union" class="btn sm">刷新工会</button>
+              <button id="match-gold" class="btn sm">金卡限购</button>
+            </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
@@ -1456,6 +1472,10 @@
           </div>
 
           <div id="msub-gvg" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-gvg" class="btn sm">刷新公会战</button>
+              <button id="match-sanguo" class="btn sm">刷新西游三国</button>
+            </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
@@ -1482,6 +1502,9 @@
           </div>
 
           <div id="msub-modes" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-modes-refresh" class="btn sm">刷新其他玩法</button>
+            </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
@@ -1514,7 +1537,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926v"></script>
+<script src="/app.js?v=20260926w"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
