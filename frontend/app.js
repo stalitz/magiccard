@@ -3339,7 +3339,8 @@ async function initChangeForm() {
 // 后端 backend/match.py；未证实语义的字段一律原样透出，不做中文硬译。
 
 let matchState = null, matchTheme = null, matchPvp = null, matchUnion = null,
-    matchGold = null, matchGvg = null, matchSanguo = null, matchModes = null;
+    matchGold = null, matchGvg = null, matchSanguo = null, matchModes = null,
+    matchUnionExtra = null;   // 工会任务/碎片/商店（union act=15/16/30）
 let matchSubTimer = null;
 
 // ---- 每日比赛页的子模块：每个子模块 = 一组相关卡片 + 自己的接口 ----
@@ -3530,8 +3531,8 @@ const MATCH_SUB_LOAD = {
   // 出战记录（#match-log-box）就在本面板，必须一起拉，否则永远停在「读取中…」
   race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
   pvp: () => { loadMatchPvp(); },
-  union: () => { loadMatchUnion(); loadMatchGold(); },
-  gvg: () => { loadMatchGvg(); loadMatchSanguo(); },
+  union: () => { loadMatchUnion(); loadMatchUnionExtra(); loadMatchGold(); },
+  gvg: () => { loadMatchGvg(); loadMatchUnionExtra(); loadMatchSanguo(); },
   modes: () => { loadMatchModes(); loadMatchLog(); },
 };
 
@@ -3607,6 +3608,137 @@ function renderMatchUnion() {
     matchRow("会长", d.patriarch_name) +
     matchRow("成员数", Object.keys(d.members || {}).length) +
     `</div>`;
+  renderUnionMembers();
+}
+
+// 成员贡献榜：members 是逗号串，第 2 段＝昵称、第 3 段＝贡献（2026-09-27 实跑证实），
+// 其余段语义未证实 → 只显示这两项 + 编号，不硬译。点「赞」= union act=14。
+function renderUnionMembers() {
+  const box = $("match-union-mem-box"), cnt = $("match-union-mem-cnt");
+  if (!box) return;
+  const d = matchUnion || {};
+  const raw = d.members || {};
+  const rows = Object.keys(raw).map((uin) => {
+    const seg = String(raw[uin] || "").split(",");
+    return { uin, name: seg[2] || uin, contrib: seg[3] || "-",
+             lv: seg[0] || "-", raw: raw[uin] };
+  }).sort((a, b) => (Number(b.contrib) || 0) - (Number(a.contrib) || 0));
+  const total = rows.reduce((s, r) => s + (Number(r.contrib) || 0), 0);
+  if (cnt) cnt.textContent = `${rows.length} 人 · 总贡献 ${total}`;
+  if (!rows.length) { box.innerHTML = `<div class="empty-tip">暂无成员数据</div>`; return; }
+  // 行样式全用行内（项目里没有 .lst-row 这类类，靠样式表会掉格式）
+  box.innerHTML = `<div>` + rows.map((r, i) =>
+    `<div style="display:flex;gap:6px;align-items:center;padding:4px 8px;
+        border-bottom:1px solid var(--line);${i % 2 ? "background:#f8fafc;" : ""}">
+       <span style="min-width:26px;color:var(--muted)">${i + 1}</span>
+       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.name)}</span>
+       <span style="color:var(--muted)">等级${esc(r.lv)}</span>
+       <span style="min-width:58px;text-align:right">贡献 ${esc(r.contrib)}</span>
+       <button class="btn sm" data-zan="${esc(r.uin)}">赞</button>
+     </div>`).join("") + `</div>` +
+    `<div class="empty-tip" style="font-size:12px">贡献＝members 第 4 段（实跑证实），等级为第 1 段（未证实，仅供参考），其余段原样保留未译。</div>`;
+}
+
+// 工会任务 / 碎片 / 商店（union act=15/16/30）
+function renderMatchUnionExtra() {
+  const box = $("match-union-extra-box"), cnt = $("match-union-extra-cnt");
+  if (!box) return;
+  const e = matchUnionExtra || {};
+  if (!e || e.ok === false) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${(e && e.message) || "未加载"}</span></div>`;
+    if (cnt) cnt.textContent = "失败";
+    return;
+  }
+  const t = (e.task || {}).data || {}, ch = (e.chip || {}).data || {},
+        sh = (e.shop || {}).data || {};
+  const items = sh.data || sh || [];
+  if (cnt) cnt.textContent = `任务次数 ${t.num ?? "-"} · 工会资金 ${ch.data ?? "-"}`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("今日已出兵次数 num", t.num ?? "-") +
+    matchRow("任务位 bits / 重置位", `${t.bits ?? "-"} / ${t.resetnum ?? "-"}`) +
+    matchRow("工会资金（act=16 data）", ch.data ?? "-") +
+    matchRow("工会商店（act=30）", (Array.isArray(items) && items.length)
+      ? items.map((x) => `${x.consume}(${x.id})`).join(" · ") : "-") +
+    `</div><div class="empty-tip" style="font-size:12px">出兵次数＝act=15 的 num（出兵前 0、出兵后 1）；今日上限未知，界面不显示上限。</div>`;
+}
+
+// 工会玩法动作：全部走 /api/match/union-*，完成后立刻刷新对应视图（项目铁律）。
+async function unionAct(btn, url, body, label, tip) {
+  const restore = busyBtn(btn, "处理中…", label);
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+    if (tip) mlog(tip, r && r.ok === false ? "err" : "ok");
+    await loadMatchUnion(); await loadMatchUnionExtra();
+    const g = $("match-gvg-fightcnt");
+    if (g) renderGvgFightCnt();
+    return r;
+  } finally {
+    restore();
+  }
+}
+
+async function unionClaim() {
+  return await unionAct($("union-claim"), "/api/match/union-claim", {}, "领奖", "[工会] 工会领奖完成");
+}
+
+async function unionZan() {
+  const d = (matchUnion && matchUnion.members) || {};
+  const uins = Object.keys(d);
+  if (!uins.length) { mlog("[工会] 成员表为空，先点「刷新工会」", "err"); return { ok: false }; }
+  const r = await unionAct($("union-zan"), "/api/match/union-zan", { uins: uins.slice(0, 10) },
+    "点赞", `[工会] 点赞：发给 ${Math.min(10, uins.length)} 人`);
+  return r;
+}
+
+async function unionFight() {
+  if (!confirm("公会战出兵会消耗出兵次数，确认？")) return { ok: false, message: "已取消" };
+  return await unionAct($("union-fight"), "/api/match/union-all",
+    { zan: false, fight: true }, "出兵", "[工会] 公会战出兵完成");
+}
+
+async function unionAll() {
+  if (!confirm("一键工会 = 领奖 + 全员点赞 + 公会战出兵（出兵消耗次数），确认？")) {
+    return { ok: false, message: "已取消" };
+  }
+  const r = await unionAct($("union-all"), "/api/match/union-all",
+    { zan: true, fight: true, zan_all: true }, "一键工会", "[工会] 一键工会完成");
+  if (r && r.ok !== false) {
+    const st = r.steps || [];
+    mlog("[工会] " + st.map((s) => `${s.act}:${s.ok ? "ok" : "✗"}`).join(" → "), "ok");
+    for (const s of st) if (s.ok === false) mlog(`[工会] ${s.act} 未成功：${s.msg}`, "err");
+  }
+  return r;
+}
+
+// 公会战：我方 vs 敌方进度条 + 今日已出兵次数（data/cat_equip 无关，纯展示）
+function renderGvgFightCnt() {
+  const g = $("match-gvg-fightcnt");
+  if (!g) return;
+  const num = (matchUnionExtra && matchUnionExtra.task && matchUnionExtra.task.data || {}).num;
+  g.textContent = num === undefined || num === null ? "" : `今日已出兵 ${num} 次`;
+  g.style.marginLeft = "6px";
+}
+
+function renderMatchGvgProgress(g) {
+  const p = Number(g.progress || 0), e = Number(g.e_progress || 0);
+  const tot = p + e || 1, pct = Math.round(p * 100 / tot);
+  const qt = (g.levelgetbits || "").split(",").filter(Boolean).filter((x) => x !== "0");
+  return `<div style="margin:4px 0 6px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--muted)">
+        <span>我方 ${p.toLocaleString()}</span><span>敌方 ${e.toLocaleString()}</span>
+      </div>
+      <div style="height:8px;border-radius:4px;background:var(--bg-soft,#eee);overflow:hidden;display:flex">
+        <div style="width:${pct}%;background:#4a90d9"></div>
+        <div style="width:${100 - pct}%;background:#d9534f"></div>
+      </div>
+      <div style="font-size:12px;margin-top:2px">进度占比 我方 ${pct}% · 敌方 ${100 - pct}%</div>
+    </div>` +
+    matchRow("关卡领取位 levelgetbits", qt.length ? qt.join(" · ") : "-") +
+    (qt.length ? `<div class="empty-tip" style="font-size:12px">关卡领取位：0 表示还没领，非零表示此关卡已领过奖（未逐级验证，只记录）。</div>` : "");
 }
 
 function renderMatchGvg() {
@@ -3620,6 +3752,7 @@ function renderMatchGvg() {
   const g = d.data || {};
   cnt.textContent = `我方 Lv${g.level ?? "-"} · 敌方 Lv${g.e_levelid ?? "-"}`;
   box.innerHTML = `<div class="state-box">` +
+    renderMatchGvgProgress(g) +
     matchRow("我方等级 level", g.level) +
     matchRow("我方进度 progress", g.progress) +
     matchRow("我方关卡 inlv", g.inlv) +
@@ -3693,7 +3826,16 @@ async function loadMatchUnion() {
   const r = await fetch("/api/match/union").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchUnion = r;
   renderMatchUnion();
+  renderGvgFightCnt();
   if (!r || r.ok === false) mlogFail("工会", r);
+}
+
+async function loadMatchUnionExtra() {
+  const r = await fetch("/api/match/union-extra").then((x) => x.json()).catch(() => ({ ok: false }));
+  matchUnionExtra = r;
+  renderMatchUnionExtra();
+  renderGvgFightCnt();
+  if (r && r.ok === false) mlogFail("工会任务/商店", r);
 }
 
 async function loadMatchGvg() {
@@ -4150,7 +4292,21 @@ function initMatchOnce() {
   // 各子玩法的刷新按钮
   bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
   bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
+  bind("match-union-extra", (b) => busyBtn(b, "读取中…", "刷新工会任务/商店")(loadMatchUnionExtra()));
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
+  // 工会玩法动作（结果走全局日志，操作完立刻刷新工会/公会战视图）
+  bind("union-all", (b) => unionAll());
+  bind("union-claim", (b) => unionClaim());
+  bind("union-zan", (b) => unionZan());
+  bind("union-fight", (b) => unionFight());
+  document.addEventListener("click", async (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest("[data-zan]") : null;
+    if (!btn) return;
+    ev.stopPropagation();
+    const r = await unionAct(btn, "/api/match/union-zan",
+      { uins: [btn.getAttribute("data-zan")] }, "赞", "[工会] 已给该成员点赞");
+    if (r && r.ok === false) mlog(`[工会] 点赞失败：${r.message || "服务端未接受"}`, "err");
+  });
   bind("match-gvg", (b) => busyBtn(b, "读取中…", "刷新公会战")(loadMatchGvg()));
   bind("match-sanguo", async (b) => {
     const restore = busyBtn(b, "读取中…", "刷新西游三国");

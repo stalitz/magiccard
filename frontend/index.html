@@ -1456,7 +1456,14 @@
           <div id="msub-union" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
               <button id="match-union" class="btn sm">刷新工会</button>
+              <button id="match-union-extra" class="btn sm">刷新工会任务/商店</button>
               <button id="match-gold" class="btn sm">金卡限购</button>
+            </div>
+            <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:0 12px 8px">
+              <button id="union-all" class="btn sm ok" data-idle="一键工会">一键工会</button>
+              <button id="union-claim" class="btn sm" data-idle="领奖">领奖</button>
+              <button id="union-zan" class="btn sm" data-idle="全员点赞">全员点赞</button>
+              <button id="union-fight" class="btn sm danger" data-idle="出兵">公会战出兵</button>
             </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
@@ -1465,9 +1472,19 @@
                     <span class="cnt" id="match-union-cnt"></span></div>
                   <div id="match-union-box"></div>
                 </div>
+                <div class="lst" style="max-height:none;margin-top:8px">
+                  <div class="lst-head"><span class="t">工会任务 / 碎片 / 商店（act=15/16/30）</span>
+                    <span class="cnt" id="match-union-extra-cnt"></span></div>
+                  <div id="match-union-extra-box"></div>
+                </div>
               </div>
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">成员贡献榜（act=1 members）</span>
+                    <span class="cnt" id="match-union-mem-cnt"></span></div>
+                  <div id="match-union-mem-box"></div>
+                </div>
+                <div class="lst" style="max-height:none;margin-top:8px">
                   <div class="lst-head"><span class="t">金卡每日限购（act=20）</span>
                     <span class="cnt" id="match-gold-cnt"></span></div>
                   <div id="match-gold-box"></div>
@@ -1491,6 +1508,7 @@
                   </div>
                   <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
                     <button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>
+                    <span class="cnt" id="match-gvg-fightcnt"></span>
                   </div>
                 </div>
               </div>
@@ -1542,7 +1560,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260927e"></script>
+<script src="/app.js?v=20260927f"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

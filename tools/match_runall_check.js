@@ -36,11 +36,41 @@ const HOME_STATE = {
   gold: { items: [{ id: 2, bought: 1 }, { id: 1, bought: 0 }] },
   forge: { parts: { head: [{ id: 9, forge: 0, chip: 3 }] } },
 };
+// 工会 / 公会战（2026-09-27 实跑取到的真实结构，不含推测字段）
+const UNION = {
+  ok: true, code: 0, union_name: "搞起耍", unionid: 10177, lv: 18, exp: 5450260,
+  mem_num: 29, max_num: 29, coin: 4051, chip: 73, union_activity: 3,
+  members: {
+    "1006409757": "4,1790402280,紫旋の梦蝶,6213,96,1_81_1|2_49_1|3_49_1|4_43_1,202680,180,1790402552,3,35",
+    "1016053460": "4,1790236666,xx,8692,85,1_55_1|2_55_1|3_55_1|4_55_2,107260,80,1790236691,3,0",
+  },
+};
+const UNION_EXTRA = {
+  ok: true,
+  task: { ok: true, code: 0, data: { bits: 0, code: 0, data: 11234, desc: "sucess", num: 1, resetnum: 0 } },
+  chip: { ok: true, code: 0, data: { code: 0, data: 11234, desc: "sucess" } },
+  shop: { ok: true, code: 0, data: { bit: 0, bit2: 0, code: 0,
+    data: [{ consume: 16, id: 9, maxnum: 1, type: 1 }, { consume: 80, id: 2, maxnum: 1, type: 1 }] } },
+  enemies: { ok: true, code: 0, data: { code: 0, desc: "sucess",
+    list: "10012_沧海月明_312232798,10015_倚栏听风雨_312196611" } },
+};
+const GVGV = {
+  ok: true, code: 0, data: {
+    code: 0, desc: "sucess", level: 8, inlv: 8, last_lv: 14, e_levelid: 9,
+    e_name: "夜半钟声到客船", e_progress: 595420, enemy_uinon: 21718,
+    progress: 478555, level_rank_bit: 252, level_rank_bit2: 0,
+    levelgetbits: ",10100,20100,30100,40100,50100,60100,70100",
+    season_gift: 0, ts: 1787673667,
+    gift_record: "1260277398,1292723575,448027192",
+  },
+};
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
-  const payload = url.includes("/api/home/state")
-    ? HOME_STATE
+  const payload = url.includes("/api/home/state") ? HOME_STATE
+    : url.includes("/api/match/union-extra") ? UNION_EXTRA
+    : url.includes("/api/match/union") ? UNION
+    : url.includes("/api/match/gvg") ? GVGV
     : {
       ok: true, code: 0, bound: true,
       cats: [{ elf_id: 3, level: 20, mood: 85, equip: [1, 2, 3, 4] }],
@@ -163,6 +193,37 @@ setTimeout(async () => {
   assert(/d\["equip_text"\]\s*=\s*equip_summary/.test(MATCH_SRC)
       && /"equip_text":\s*d\["equip_text"\]/.test(MATCH_SRC),
     "后端出战记录落盘 equip_text（可读穿装进出战记录）");
+  // ---- 工会 / 公会战玩法（用户 2026-09-27：「把社团公会玩法做了」）----
+  assert(/async def run_union\(/.test(MATCH_SRC), "后端有 run_union() 一键工会编排（领奖→点赞→出兵）");
+  assert(/union_run\.json/.test(MATCH_SRC), "工会动作落盘 data/union_run.json（可复查）");
+  assert(/第 2 段＝昵称、第 3 段＝贡献/.test(MATCH_SRC),
+    "成员名册只有实证过的两段被命名，其余段不硬译");
+  assert(/\/api\/match\/union-all/.test(MAIN_SRC) && /\/api\/match\/union-claim/.test(MAIN_SRC)
+      && /\/api\/match\/union-zan/.test(MAIN_SRC), "工会领奖/点赞/一键工会三个路由齐全");
+  // 成员贡献榜：昵称 + 贡献（members 第 2/3 段）
+  // 注意：app.js 里的 let 变量外部 eval 赋不进去，必须走 mock fetch 的真实链路
+  w.eval(`(async () => { await loadMatchUnion(); await loadMatchUnionExtra(); await loadMatchGvg(); })()`);
+  await new Promise((r) => setTimeout(r, 60));
+  const memBox = $("match-union-mem-box").textContent;
+  assert(/紫旋の梦蝶/.test(memBox) && /6213/.test(memBox),
+    "成员贡献榜显示昵称+贡献：" + memBox.slice(0, 50));
+  assert(/总贡献\s*14905/.test($("match-union-mem-cnt").textContent),
+    "成员榜计数显示人数与总贡献：" + $("match-union-mem-cnt").textContent);
+  assert(!!w.document.querySelector("#match-union-mem-box [data-zan]"), "成员行有「赞」按钮");
+  // 工会任务 / 碎片 / 商店三块
+  const ux = $("match-union-extra-box").textContent;
+  assert(/今日已出兵次数/.test(ux) && /\b1\b/.test(ux), "工会任务块显示今日已出兵次数");
+  assert(/工会资金（act=16 data）11234/.test(ux), "工会资金显示真实值 11234");
+  assert(/工会商店（act=30）/.test(ux) && /80/.test(ux), "工会商店列出商品消耗");
+  // 公会战：进度对比条 + 今日已出兵次数
+  const gv = $("match-gvg-box").textContent;
+  assert(/我方 478,?555/.test(gv) && /敌方 595,?420/.test(gv), "公会战显示我方/敌方进度：" + gv.slice(0, 60));
+  assert(/进度占比 我方 4[45]%/.test(gv), "公会战进度占比算对（478555/(478555+595420)≈45%）");
+  assert(/今日已出兵 1 次/.test($("match-gvg-fightcnt").textContent),
+    "公会战区显示今日已出兵次数：" + $("match-gvg-fightcnt").textContent);
+  assert(!/每日上限|上限\s*\d/.test($("match-union-extra-box").textContent),
+    "不臆造出兵每日上限（界面不出现「上限 N」这类数字）");
+
   assert(!errors.length, "运行期无 JS 报错" + (errors.length ? "：" + errors.slice(0, 2).join(" | ") : ""));
   w.close();
   process.exit(process.exitCode || 0);

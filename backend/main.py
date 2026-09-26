@@ -2673,6 +2673,43 @@ async def match_union_fight(req: dict | None = None):
     return await mt.union_fight(_session, req.get("optype", 4), req.get("uptype", 1))
 
 
+@app.post("/api/match/union-claim")
+async def match_union_claim():
+    """工会领奖（union act=17）。零消耗，可重复调用（没有可领奖时会如实失败）。"""
+    if err := _require_login():
+        return err
+    return await mt.union_claim(_session)
+
+
+@app.post("/api/match/union-zan")
+async def match_union_zan(req: dict | None = None):
+    """工会点赞（union act=14 {uins:[...]}）。零消耗，逐个发。"""
+    if err := _require_login():
+        return err
+    req = req or {}
+    uins = req.get("uins") or []
+    if not uins:
+        return {"ok": False, "message": "缺少 uins"}
+    return await mt.union_zan(_session, uins)
+
+
+@app.post("/api/match/union-all")
+async def match_union_all(req: dict | None = None):
+    """「一键工会」：工会领奖(act=17) → 全员点赞(act=14) → 公会战出兵(act=21)。
+
+    出兵会消耗出兵次数（每日上限未证实，只发一次）。步骤落盘 data/union_run.json，
+    以后用户报「工会没成功」直接查这一份。
+    """
+    if err := _require_login():
+        return err
+    req = req or {}
+    return await mt.run_union(_session,
+                              do_zan=bool(req.get("zan", True)),
+                              do_fight=bool(req.get("fight", True)),
+                              zan_all=bool(req.get("zan_all", True)),
+                              feed=bool(req.get("feed", False)))
+
+
 @app.post("/api/match/sanguo-run")
 async def match_sanguo_run(req: dict):
     """三国闯关（sanguo act=11）。**消耗闯关次数**。

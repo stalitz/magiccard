@@ -11,10 +11,15 @@ HAR 中实证到的端点与参数：
   card_msg_board               POST op=1,type=0,ts,endts→ 留言板（好友祝福）
   card_zhongkong_zk            POST id=2,osSystem=windows（中控埋点，与玩法无关）
 
-本模块**只做只读聚合**：不猜 act 语义、不构造任何写操作（HAR 里没有暴露
-「打一场比赛 / 提交成绩」的 act，抓包只有进页面 + 看装备 + 买金卡）。
-字段语义一律以 HAR 里的原始 key 为准；含义不确定的**原样透出**，不做中文硬译
+本模块**以只读聚合为主**：不猜 act 语义、不构造 HAR 里没有暴露的写操作（比赛侧
+只有进页面 + 看装备 + 买金卡，没有「打一场比赛 / 提交成绩」的 act）。
+字段语义一律以抓包里的原始 key 为准；含义不确定的**原样透出**，不做中文硬译
 （避免把推测写成常量，见项目 MEMORY.md 铁律）。
+
+**工会 / 公会战例外**：工会玩法需要真实可执行（2026-09-27 由用户要求「把社团公会
+玩法做了」），所以 `run_union()` 是三步真实写操作 —— 领奖(act=17) → 点赞(act=14) →
+出兵(act=21)。三个 act 全部有实跑证据，参数与返回见各函数 doc；**每日出兵上限至今
+未证实**，因此出兵只发一次、不循环。
 """
 import json
 from typing import Optional
@@ -929,7 +934,11 @@ async def pvp_zan(session, rank_uin: str, rank_idx: int = 0) -> dict:
 # ---------- 工会 / 公会战 ----------
 
 async def union_task(session) -> dict:
-    """工会任务状态（union act=15）。读：num / resetnum / bits。"""
+    """工会任务/出兵次数（union act=15）。读：num / resetnum / bits。
+
+    2026-09-27 实跑：**`num` 是今日已出兵次数** —— 出兵前读 num=0，出兵一次后再读
+    num=1。`resetnum` 恒 0、`bits` 恒 0（个人任务位，未见可领变化）。
+    """
     return await _act(session, EP_TRAVEL_UNION, 15)
 
 
@@ -939,8 +948,19 @@ async def union_chip(session) -> dict:
 
 
 async def union_claim(session) -> dict:
-    """工会领奖（union act=17）。HAR：content=92_32_10,48_1543_1。"""
-    return await _act(session, EP_TRAVEL_UNION, 17)
+    """工会领奖（union act=17）。零消耗。
+
+    2026-09-27 实跑：`content=48_1542_10,48_1543_1`（与 HAR 的 92_32_10,48_1543_1
+    同类，具体 id 每次可能不同）。奖励串按项目铁律统一走 prop_dict，不在别处裸译。
+    """
+    r = await _act(session, EP_TRAVEL_UNION, 17)
+    if r.get("ok"):
+        try:
+            from .prop_dict import summarize_reward
+            r["text"] = summarize_reward(str((r.get("data") or {}).get("content") or ""))
+        except Exception:  # 取不到就留原始串，不阻断领奖
+            pass
+    return r
 
 
 async def union_fight(session, optype: int = 4, uptype: int = 1,
@@ -969,8 +989,133 @@ async def union_shop(session) -> dict:
 
 
 async def union_zan(session, uins: list) -> dict:
-    """工会批量点赞（union act=14 {uins:'逗号分隔'}）。HAR 里调了 17 次，零消耗。"""
+    """工会点赞（union act=14 {uins:'逗号分隔'}）。HAR 里调了 17 次，零消耗。
+
+    2026-09-27 实跑：uins="1006409757" → {"ok":true,"code":0}。
+    **逐个发**（对齐 HAR 的 17 次调用），避免一次传 29 个 uin 被服务端拒绝。
+    """
     return await _act(session, EP_TRAVEL_UNION, 14, uins=",".join(str(int(u)) for u in uins))
+
+
+# ---------- 工会玩法：成员名册 ----------
+
+def parse_union_members(members: dict | None) -> list:
+    """工会成员名册（union act=1 的 members）。
+
+    值形如 `"4,1790402280,紫旋の梦蝶,6213,96,1_81_1|2_49_1|3_49_1|4_43_1,202680,180,1790402552,3,35"`
+    （29 名成员实测）。**只有第 2 段（昵称）与第 3 段（贡献）有实证**：
+      - 第 2 段 = 昵称（成员昵称，形如「紫旋の梦蝶」「吸血鬼」）
+      - 第 3 段 = 贡献（同批数值 6213 / 8692 / 21330，公会贡献量级）
+    其余段（等级/时间戳/装扮串/其他数值）**语义未证实** → 一律原样保留在 raw，
+    不做中文硬译（项目铁律：禁止把推测写成常量）。
+    """
+    out = []
+    for uin, raw in (members or {}).items():
+        segs = str(raw or "").split(",")
+        out.append({"uin": str(uin),
+                    "name": segs[2] if len(segs) > 2 else "",
+                    "contribution": segs[3] if len(segs) > 3 else "",
+                    "raw": raw})
+    out.sort(key=lambda x: -(int(x["contribution"]) if str(x["contribution"]).isdigit() else 0))
+    return out
+
+
+async def union_members(session) -> list:
+    """工会成员名册（act=1 + 解析）。只读。"""
+    r = await union_info(session)
+    if not r.get("ok"):
+        return []
+    return parse_union_members(r.get("members"))
+
+
+# ---------- 工会玩法：一键工会（领奖 → 点赞 → 出兵） ----------
+
+import time as _utime                                    # noqa: E402
+import json as _ujson                                    # noqa: E402
+from pathlib import Path as _upath                       # noqa: E402
+
+_UNION_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "union_run.json"
+
+
+def _save_union_run(payload: dict) -> None:
+    """把最近一次「一键工会 / 工会动作」写进 data/union_run.json（只留最近 20 次）。"""
+    try:
+        hist = []
+        if _UNION_RUN_LOG.exists():
+            loaded = _ujson.loads(_UNION_RUN_LOG.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                hist = loaded
+        row = dict(payload)
+        row["ts"] = _utime.strftime("%F %T")
+        hist.append(row)
+        _UNION_RUN_LOG.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+    except Exception:  # 落盘失败不影响主流程
+        pass
+
+
+async def run_union(session, do_zan: bool = True, do_fight: bool = True,
+                    zan_all: bool = False, feed: bool = False) -> dict:
+    """「一键工会」：工会领奖(act=17) → 工会点赞(act=14) → 公会战出兵(act=21)。
+
+    每一步都以**服务端返回**判定成败（项目铁律：不拿本地推测当结果），
+    失败即停并记录 reason，不继续下一步。
+
+    已知（2026-09-27 实跑）：
+      - 领奖 act=17 返回 ok/code/data；点赞 act=14 逐个发，零消耗；
+      - 出兵 act=21 {optype:4, uptype:1} → {"code":0,"coin":4053,"exp":72580,"lv":0}，
+        工会金币 coin 4051 → 4053；出兵次数不显示在 act=22，只能看 act=15 的
+        `num` 变化（0 → 1），所以**每日上限未知 → 不循环，一次为止**。
+    """
+    steps, fights = [], 0
+    before = await union_info(session)
+    coin0 = before.get("coin")
+    chip0 = before.get("chip")
+
+    # 1) 工会领奖（每日限额：第二次起服务端回 code=-2 system busy = 今天已领过）
+    r = await union_claim(session)
+    ccode = r.get("code")
+    r_ok = bool(r.get("ok")) and ccode in (0, None)
+    msg = r.get("text") or (r.get("data") or {}).get("content") or ""
+    if not r_ok:
+        msg = f"{msg}｜" if msg else ""
+        msg += f"今天已领过（{(r.get('data') or {}).get('desc') or '未领取'}）"
+    steps.append({"act": "claim", "ok": r_ok, "code": ccode,
+                  "msg": msg or (r.get("message") or "领奖无返回")})
+
+    # 2) 工会点赞（逐个发，对齐 HAR 的 17 次调用）
+    if do_zan:
+        mem = await union_members(session)
+        targets = [m["uin"] for m in mem] if zan_all else [m["uin"] for m in mem[:3]]
+        zan_ok = 0
+        for u in targets:
+            z = await union_zan(session, [u])
+            if z.get("ok") and z.get("code") in (0, None):
+                zan_ok += 1
+        steps.append({"act": "zan", "ok": zan_ok > 0, "count": zan_ok,
+                      "total": len(targets),
+                      "msg": f"点赞成功 {zan_ok}/{len(targets)} 人"})
+        if zan_ok == 0:
+            steps[-1]["msg"] = f"点赞全部失败（{len(targets)} 人）：服务端未接受"
+
+    # 3) 公会战出兵（消耗；次数以服务端为准，一次为止）
+    if do_fight:
+        f = await union_fight(session, feed=feed)
+        if f.get("ok") and f.get("code") in (0, None):
+            fights = 1
+            steps.append({"act": "fight", "ok": True,
+                          "msg": f"出兵成功（{_utime.strftime('%T')}）"})
+        else:
+            steps.append({"act": "fight", "ok": False,
+                          "msg": f.get("message") or f.get("desc") or "出兵失败（可能次数已用完）"})
+
+    after = await union_info(session)
+    out = {"ok": True, "steps": steps, "fights": fights,
+           "coin_before": coin0, "coin_after": after.get("coin"),
+           "chip_before": chip0, "chip_after": after.get("chip"),
+           "members": len(after.get("members") or {})}
+    _save_union_run(out)
+    return out
 
 
 # ---------- 世界探索 ----------
