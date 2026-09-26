@@ -127,7 +127,8 @@ setTimeout(async () => {
   // 比赛状态只留比赛字段
   w.eval(`renderMatchState()`);
   const st = $("match-state-box").textContent;
-  assert(/猫咪数量/.test(st) && /performe_num/.test(st), "状态卡有比赛字段（猫咪数量/performe_num）");
+  assert(/猫咪数量/.test(st) && /今日剩余次数/.test(st), "状态卡有比赛字段（猫咪数量/今日剩余次数）");
+  assert(!/每日期望/.test(st), "状态卡不再重复显示 performe_num（旧「每日期望次数」行已删）");
   assert(!/talent_score|clover_num|season_rank|unionid|dzs/.test(st), "状态卡不再渲染 talent/clover/dzs/season/unionid");
   // 键值行样式：k 与 v 分离（不再堆在一起）
   assert(!!w.document.querySelector("#match-state-box .rv .k"), "状态行是 .rv 键值分离结构");

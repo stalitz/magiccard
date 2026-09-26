@@ -3373,7 +3373,6 @@ function renderMatchState() {
     // 只留比赛本身关心的字段；talent/clover/dzs/season/unionid 与比赛玩法无关，不展示
     box.innerHTML =
       matchRow("猫咪数量", n) +
-      matchRow("每日期望次数 performe_num", d.performe_num) +
       matchRow("今日剩余次数", d.performe_num) +
       matchRow("次数重置时间", d.perform_limit_ts ? matchFmtTs(d.perform_limit_ts) : "-");
   }
