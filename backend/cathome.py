@@ -56,6 +56,20 @@ async def home_state(session) -> dict:
     comp20 = await _act(session, EP_TRAVEL_MATCH, 20)
     d20 = comp20.get("data") or {}
 
+    # 衣柜锻造状态：competition act=6 的 cat_home_dress_*_attr（每个部位一件件服装）
+    comp6 = await _act(session, EP_TRAVEL_MATCH, 6)
+    d6 = comp6.get("data") or {}
+    parts = {}
+    for key, label in (("cat_home_dress_head_attr", "头"),
+                       ("cat_home_dress_clothing_attr", "衣"),
+                       ("cat_home_dress_hand_attr", "手"),
+                       ("cat_home_dress_other_attr", "其他")):
+        parts[label] = [{"id": it.get("id"), "forge": it.get("forge"),
+                         "elv": it.get("elv"), "starlv": it.get("starlv"),
+                         "xiyoulv": it.get("xiyoulv"), "ranklv": it.get("pvpRankLv"),
+                         "exp": it.get("pvpexp")}
+                        for it in (d6.get(key) or [])]
+
     return {
         "ok": True,
         "likes": {
@@ -72,7 +86,14 @@ async def home_state(session) -> dict:
                 "enemies": [{"uin": e.get("uin"), "name": e.get("name"),
                              "ce": e.get("ce"), "winnum": e.get("winnum")}
                             for e in dp1.get("enemy_list") or []]},
-        "gold": {"ruby_bought": d20.get("gold_buy_id2"), "raw": d20},
+        # 金币福利：act=20 的 gold_buy_id1..6（各商品今日已兑次数）+ gold_buy_id_tsN（兑换时间戳）
+        "gold": {"items": [{"id": n, "bought": d20.get(f"gold_buy_id{n}"),
+                            "ts": d20.get(f"gold_buy_id_ts{n}")} for n in range(1, 7)]},
+        # 衣柜锻造：act=6 四部位的服装（每件的 forge=已锻造次数）
+        "forge": {"parts": parts, "chip": d6.get("cat_home_chip_vt")},
+        # 竞技段位奖励：pvp act=1 的 rank_gift_bit（空 = 未领）
+        "rank_gift": {"bits": dp1.get("rank_gift_bit"), "my_rankbits": dp1.get("my_rankbits"),
+                      "lv": dp1.get("level_rank_bit")},
     }
 
 

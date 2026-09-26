@@ -40,15 +40,16 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   console.log("== 子块 ==", titles.join(" | "));
 
   const txt = (id) => ((w.document.getElementById(id) || {}).textContent || "").trim();
-  const spans = ["home-like-st", "home-gacha-st", "home-cat-st", "home-arena-st", "home-gold-st"];
+  const spans = ["home-like-st", "home-gacha-st", "home-cat-st", "home-arena-st",
+                 "home-gold-st", "home-forge-st"];
   for (const s of spans) console.log("  " + s + " =", txt(s));
   const spansTxt = spans.map(txt);
 
   console.log("\n断言：");
   assert(!!box, "#home-box 存在");
   assert(chain.includes("pane-overview"), "挂在总览 pane 内");
-  assert(cards.length === 5, `5 个玩法子块（实际 ${cards.length}）`);
-  assert(["点赞", "扭蛋机", "猫咪玩耍", "竞技比赛", "金币福利"].every((t) => titles.some((x) => x.includes(t))),
+  assert(cards.length === 6, `6 个玩法子块（实际 ${cards.length}）`);
+  assert(["点赞", "扭蛋机", "猫咪玩耍", "竞技比赛", "金币福利", "衣柜锻造"].every((t) => titles.some((x) => x.includes(t))),
     "5 个玩法标题齐全：" + titles.join("/"));
   assert(spansTxt.every((t) => t && t !== "读取中…" && !t.includes("读取失败")),
     "5 个状态块都渲染了真实数据");
@@ -56,6 +57,8 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   assert(/积分/.test(txt("home-gacha-st")), "扭蛋块显示积分：" + txt("home-gacha-st"));
   assert(/目标 80/.test(txt("home-cat-st")), "玩耍块显示心情与目标：" + txt("home-cat-st"));
   assert(/剩余挑战|战力/.test(txt("home-arena-st")), "竞技块显示剩余挑战与战力：" + txt("home-arena-st"));
+  assert(/红宝石#2/.test(txt("home-gold-st")), "金币福利块显示 6 个商品兑换次数：" + txt("home-gold-st"));
+  assert(/forge 最小/.test(txt("home-forge-st")), "衣柜块挑出最值得先锻的服装：" + txt("home-forge-st"));
 
   const btns = ["home-like", "home-gacha", "home-candy", "home-feed", "home-arena"];
   assert(btns.every((b) => !!w.document.getElementById(b)), "5 个按钮就位");

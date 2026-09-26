@@ -4898,8 +4898,20 @@ async function loadHomeState() {
   $("home-arena-st").textContent =
     `剩余挑战 ${pv.surplus ?? "-"} · 已刷对手 ${pv.flush_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
     (pv.surplus === 0 ? "（今天打完了）" : "");
-  $("home-gold-st").textContent =
-    `红宝石（10000 金币×8）已兑换 ${d.gold.ruby_bought ?? 0} 次`;
+  const gi = (d.gold && d.gold.items) || [];
+  $("home-gold-st").textContent = gi.length
+    ? gi.map((g) => `红宝石#${g.id}:${g.bought ? g.bought + "次" : "未兑"}`).join(" · ")
+    : "读取失败";
+  // 衣柜锻造：挑已锻造次数最少的一件（同样的锻造收益，次数少 = 提升空间大）
+  const parts = (d.forge && d.forge.parts) || {};
+  const pool = [];
+  for (const [k, arr] of Object.entries(parts)) for (const it of arr) pool.push({ k, ...it });
+  pool.sort((a, b) => (a.forge ?? 0) - (b.forge ?? 0));
+  const best = pool[0];
+  $("home-forge-st").textContent = pool.length
+    ? `共 ${pool.length} 件：头/衣/手/其他 ${Object.values(parts).map((a) => a.length).join("/")}` +
+      (best ? ` · forge 最小：${best.k}部 ${best.id}（forge=${best.forge}）` : "")
+    : "读取失败";
   // 扭蛋免费已用 → 禁用按钮
   const gb = $("home-gacha");
   if (gb) { gb.disabled = !!d.gacha.free_used; gb.textContent = d.gacha.free_used ? "今天已免费抽" : "免费抽一次"; }
