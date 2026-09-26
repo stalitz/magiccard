@@ -340,6 +340,41 @@ async def main() -> None:
           sum(p.net_plan(_C(stock), _C())[1].values())
           > sum(p.net_plan(_C(stock), _C(), credit)[1].values()))
 
+    # ---- [11] 主线再确认：不囤卡 —— 变出来的 40 面卡必须被更高面额卡接盘 ----
+    # 用户 2026-09-26 18:36：「不要囤卡，能炼更高面额的就炼更高面额的…现在已经变成功了
+    # 40 面额的，还要继续炼，就是在囤卡的行为」。这里把「变出来的卡去了哪」钉死。
+    def mats_of(t: int):
+        """某个卡的配方素材（comp[3..5] 是素材 id）。"""
+        return [int(m) for m in p.comp[t][3:6] if m]
+
+    e2, st2 = _eng(stock, gift_n=4)
+    cr2 = e2._face40_credit(p, st2) or _C()
+    rn2, _ = p.net_plan(_C(stock), _C(), cr2)
+    # 每张变出来的 40 面卡，都得有「以它为素材、且这一轮真的要炼」的 ≥80 面卡接盘
+    consumed = {int(k) for k in cr2
+                if any(t in rn2 and int(k) in mats_of(t) and int(p.cards[t][3] or 0) >= 80
+                       for t in rn2)}
+    check("变出来的 40 面卡全部被 ≥80 面卡接盘（走消耗路径，不是躺在箱里囤着）",
+          consumed == set(int(k) for k in cr2),
+          f"credit={ {p.cname(k): v for k, v in cr2.items()} } "
+          f"被接盘={ {p.cname(k) for k in consumed} }")
+    # 「不再炼同款」的精确判据 = credit 顶掉的那部分没有被重复炼：
+    #   有 credit 的卡，runs 的减少量必须**正好等于** credit；没 credit 的卡一个数不变。
+    # （缺口本身还得从底卡炼 —— 那是必经的中间步骤，不是囤卡；囤卡指的是变出来的那几张。）
+    base_runs, _ = p.net_plan(_C(stock), _C())
+    check("credit 顶掉的量没有重复炼（要炼的减少量 == credit，其余 40 面卡不变）",
+          all(base_runs.get(int(k), 0) - rn2.get(int(k), 0) == cr2[int(k)] for k in cr2)
+          and all(rn2.get(int(c), 0) == base_runs.get(int(c), 0)
+                  for c in f40 if int(c) not in cr2),
+          f"credit={ {p.cname(k): v for k, v in cr2.items()} } "
+          f"runs 变化={ {p.cname(k): (base_runs.get(k, 0), rn2.get(k, 0)) for k in set(cr2) | set(f40)} }")
+    # 手上只剩最后 1 张变出来的 40 面卡时仍须放行 —— 否则「套内卡留 1 张」就变成囤卡
+    e2._keep = {int(c): 1 for c in p.ids}
+    lone = next(iter(cr2))
+    check("只剩最后 1 张变出来的 40 面卡时照常放行（不靠『留 1 张』囤着）",
+          e2._spare(int(lone), _C({int(lone): 1}), _C(), 1, set(rn2) | set(cr2)),
+          f"{p.cname(lone)} 手上仅剩 1 张")
+
     print(f"\n结果：PASS {len(PASS)} / FAIL {len(FAIL)}")
     if FAIL:
         for f in FAIL:
