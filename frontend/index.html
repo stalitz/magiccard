@@ -1324,10 +1324,11 @@
               <button id="home-all" class="btn sm ok">一键全部（自动跑完）</button>
               <span id="home-all-st" class="hint"></span>
             </div>
-            <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 竞技自动</b>
+            <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 兑红宝石 → 竞技自动</b>
               （玩耍严格排在竞技之前）；糖果不够会先用积分换大糖果再喂。
-              今天的赞若已点过、免费扭蛋已抽过，会自动跳过。<br>
-              <b>金币兑红宝石 / 衣柜锻造 / 领段位奖励</b>的写接口还没抓到包，一键时跳过并在日志里说明。</div>
+              今天的赞若已点过、免费扭蛋已抽过、红宝石已到上限，会自动跳过（不浪费次数）。<br>
+              衣柜锻造的写接口已定位（<b>act=29</b>，会真消耗材料），不在一键里自动锻 —— 先确认代价再手动锻。
+              <b>领段位奖励</b>的写接口仍未抓到包，一键时跳过并在日志里说明。</div>
           </div>
           <div class="stat-card" style="flex:1.05">
             <h3>每日比赛状态</h3>
@@ -1415,7 +1416,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926k"></script>
+<script src="/app.js?v=20260926l"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

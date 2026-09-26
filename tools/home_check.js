@@ -59,8 +59,8 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   assert(/积分/.test(txt("home-gacha-st")), "扭蛋块显示积分：" + txt("home-gacha-st"));
   assert(/目标 80/.test(txt("home-cat-st")), "玩耍块显示心情与目标：" + txt("home-cat-st"));
   assert(/剩余挑战|战力/.test(txt("home-arena-st")), "竞技块显示剩余挑战与战力：" + txt("home-arena-st"));
-  assert(/红宝石#2/.test(txt("home-gold-st")), "金币福利块显示 6 个商品兑换次数：" + txt("home-gold-st"));
-  assert(/forge 最小/.test(txt("home-forge-st")), "衣柜块挑出最值得先锻的服装：" + txt("home-forge-st"));
+  assert(/红宝石 已兑 7\/7/.test(txt("home-gold-st")), "金币福利块显示红宝石已兑次数与上限：" + txt("home-gold-st"));
+  assert(/建议锻：手部 20072（要材料 1）/.test(txt("home-forge-st")), "衣柜块挑出未锻且最省材料的一件：" + txt("home-forge-st"));
 
   // 用户要的是「一键全部」，不是分开的手动按钮
   const manual = ["home-like", "home-gacha", "home-candy", "home-feed", "home-arena"];

@@ -4898,19 +4898,26 @@ async function loadHomeState() {
   $("home-arena-st").textContent =
     `剩余挑战 ${pv.surplus ?? "-"} · 已刷对手 ${pv.flush_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
     (pv.surplus === 0 ? "（今天打完了）" : "");
+  // 金币福利：act=21 兑红宝石后计数落在 gold_buy_id2（编号与 act 参数不一致，见 cathome.py 注释）
   const gi = (d.gold && d.gold.items) || [];
+  const ruby = gi.find((g) => g.id === 2) || {};
+  const bought = ruby.bought ?? 0;
   $("home-gold-st").textContent = gi.length
-    ? gi.map((g) => `红宝石#${g.id}:${g.bought ? g.bought + "次" : "未兑"}`).join(" · ")
+    ? `红宝石 已兑 ${bought}/7 次（` +
+      (bought >= 7 ? "今日上限，跳过" : "一键时会自动兑") + "）· 其余 " +
+      gi.filter((g) => g.id !== 2).map((g) => (g.bought ? `#${g.id}:${g.bought}次` : "未兑")).join(" ")
     : "读取失败";
-  // 衣柜锻造：挑已锻造次数最少的一件（同样的锻造收益，次数少 = 提升空间大）
+  // 衣柜锻造：挑「还没锻过（forge=0）且要吃材料最少（chip 最小）」的一件，
+  // 与后端 pick_forge_target 同一判据 —— 用户要求「找不花红宝石的锻造」
   const parts = (d.forge && d.forge.parts) || {};
   const pool = [];
   for (const [k, arr] of Object.entries(parts)) for (const it of arr) pool.push({ k, ...it });
-  pool.sort((a, b) => (a.forge ?? 0) - (b.forge ?? 0));
-  const best = pool[0];
+  const fresh = pool.filter((x) => (x.forge ?? 0) === 0);
+  const best = (fresh.length ? fresh : pool)
+    .sort((a, b) => ((a.chip ?? 0) - (b.chip ?? 0)) || ((a.id ?? 0) - (b.id ?? 0)))[0];
   $("home-forge-st").textContent = pool.length
-    ? `共 ${pool.length} 件：头/衣/手/其他 ${Object.values(parts).map((a) => a.length).join("/")}` +
-      (best ? ` · forge 最小：${best.k}部 ${best.id}（forge=${best.forge}）` : "")
+    ? `共 ${pool.length} 件（未锻 ${fresh.length}）` +
+      (best ? ` · 建议锻：${best.k}部 ${best.id}（要材料 ${best.chip ?? 0}）` : "")
     : "读取失败";
 }
 
@@ -4935,6 +4942,8 @@ async function homeRunAll(btn) {
       else if (stp.act === "gacha") log(`[扭蛋机] ${m}`, stp.ok ? "ok" : "warn");
       else if (stp.act === "exchange") log(`[扭蛋机] ${m}`, "ok");
       else if (stp.act === "feed") log(`[玩耍] ${m}（竞技前自动）`, stp.ok ? "" : "warn");
+      else if (stp.act === "gold") log(`[金币福利] ${m || "兑红宝石"}`,
+                                     stp.ok ? (stp.skipped ? "warn" : "ok") : "err");
       else if (String(stp.act).startsWith("arena:")) {
         if (stp.act === "arena:fight" && stp.ok) {
           log(`[竞技] ${stp.msg} → ${stp.win === 1 ? "胜利" : "失败"}${stp.score != null ? ` +${stp.score}分` : ""}`,
