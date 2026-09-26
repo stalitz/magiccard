@@ -52,7 +52,7 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   assert(!chain.includes("pane-overview"), "总览页里没有这个块（练卡总览必须干净）");
   assert(cards.length === 6, `6 个玩法子块（实际 ${cards.length}）`);
   assert(["点赞", "扭蛋机", "猫咪玩耍", "竞技比赛", "金币福利", "衣柜锻造"].every((t) => titles.some((x) => x.includes(t))),
-    "5 个玩法标题齐全：" + titles.join("/"));
+    "6 个状态格标题齐全：" + titles.join("/"));
   assert(spansTxt.every((t) => t && t !== "读取中…" && !t.includes("读取失败")),
     "5 个状态块都渲染了真实数据");
   assert(/每日比赛榜 .*已点 ✓|未点/.test(txt("home-like-st")), "点赞块显示两个榜的点赞状态：" + txt("home-like-st"));
@@ -62,22 +62,23 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
   assert(/红宝石#2/.test(txt("home-gold-st")), "金币福利块显示 6 个商品兑换次数：" + txt("home-gold-st"));
   assert(/forge 最小/.test(txt("home-forge-st")), "衣柜块挑出最值得先锻的服装：" + txt("home-forge-st"));
 
-  const btns = ["home-like", "home-gacha", "home-candy", "home-feed", "home-arena"];
-  assert(btns.every((b) => !!w.document.getElementById(b)), "5 个按钮就位");
+  // 用户要的是「一键全部」，不是分开的手动按钮
+  const manual = ["home-like", "home-gacha", "home-candy", "home-feed", "home-arena"];
+  assert(!manual.some((id) => w.document.getElementById(id)), "分开的手动按钮已全部移除");
+  assert(!!w.document.getElementById("home-all"), "一键全部按钮就位");
+  assert(!!w.document.getElementById("home-all-st"), "一键全部的运行提示位就位");
 
   // 切页与按钮绑定：initHomeOnce 里的 onclick 必须真的挂上
-  const bound = await w.eval("(async()=>{ initHomeOnce(); return ['home-like','home-feed','home-arena'].map(id=>typeof document.getElementById(id).onclick); })()");
-  assert(bound.every((t) => t === "function"), "按钮 onclick 已绑定：" + bound.join(","));
+  const bound = await w.eval("(async()=>{ initHomeOnce(); return typeof document.getElementById('home-all').onclick; })()");
+  assert(bound === "function", "一键全部 onclick 已绑定：" + bound);
 
-  // 今天心情已达标 → 点「一键喂到 80」不该写任何状态；点竞技应先喂猫再打
-  await w.eval("(async()=>{ document.getElementById('home-feed').click(); await new Promise(r=>setTimeout(r,2500)); })()");
-  console.log("  [喂糖后]", txt("home-cat-st"));
-  assert(!/读取失败/.test(txt("home-cat-st")), "喂糖后状态块仍然有效");
-
-  await w.eval("(async()=>{ document.getElementById('home-arena').click(); await new Promise(r=>setTimeout(r,8000)); })()");
+  // 实点一键全部（今天多数玩法已完成，应全部走「跳过」而不是报错）
+  await w.eval("(async()=>{ document.getElementById('home-all').click(); await new Promise(r=>setTimeout(r,20000)); })()");
+  console.log("  [一键全部后]", txt("home-arena-st"));
   const logTxt = [...w.document.querySelectorAll("[data-op-log]")].map((e) => e.textContent).join(" | ");
-  console.log("  [竞技后日志]", logTxt.slice(-500));
-  assert(!/读取失败/.test(txt("home-arena-st")), "竞技后状态块仍然有效：" + txt("home-arena-st"));
+  console.log("  [一键全部日志]", logTxt.slice(-500));
+  assert(/一键全部/.test(logTxt), "一键全部写出了执行日志");
+  assert(!/读取失败/.test(txt("home-arena-st")), "一键全部后状态块仍然有效：" + txt("home-arena-st"));
   assert(errors.length === 0, "无运行时错误：" + (errors.slice(0, 2).join(" ; ") || "无"));
   process.exit(process.exitCode || 0);
 })();

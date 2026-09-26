@@ -4912,9 +4912,6 @@ async function loadHomeState() {
     ? `共 ${pool.length} 件：头/衣/手/其他 ${Object.values(parts).map((a) => a.length).join("/")}` +
       (best ? ` · forge 最小：${best.k}部 ${best.id}（forge=${best.forge}）` : "")
     : "读取失败";
-  // 扭蛋免费已用 → 禁用按钮
-  const gb = $("home-gacha");
-  if (gb) { gb.disabled = !!d.gacha.free_used; gb.textContent = d.gacha.free_used ? "今天已免费抽" : "免费抽一次"; }
 }
 
 async function homePost(url, body) {
@@ -4924,93 +4921,46 @@ async function homePost(url, body) {
   return r;
 }
 
+// 「一键全部」：按固定顺序自动跑完每日玩法（用户要的主入口，不要分开的手动按钮）。
+// 顺序由后端 run_all 保证：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 → 竞技自动。
+async function homeRunAll(btn) {
+  const done = busyBtn(btn, "运行中…", "一键全部（自动跑完）");
+  const note = $("home-all-st");
+  if (note) note.textContent = "正在跑，请稍候…";
+  try {
+    const r = await homePost("/api/home/all");
+    for (const stp of (r && r.steps) || []) {
+      const m = stp.msg || "";
+      if (stp.act === "like") log(`[点赞] ${m}`, stp.ok ? "ok" : "err");
+      else if (stp.act === "gacha") log(`[扭蛋机] ${m}`, stp.ok ? "ok" : "warn");
+      else if (stp.act === "exchange") log(`[扭蛋机] ${m}`, "ok");
+      else if (stp.act === "feed") log(`[玩耍] ${m}（竞技前自动）`, stp.ok ? "" : "warn");
+      else if (String(stp.act).startsWith("arena:")) {
+        if (stp.act === "arena:fight" && stp.ok) {
+          log(`[竞技] ${stp.msg} → ${stp.win === 1 ? "胜利" : "失败"}${stp.score != null ? ` +${stp.score}分` : ""}`,
+              stp.win === 1 ? "ok" : "");
+        } else if (stp.act === "arena:claim" && stp.ok) log(`[竞技] ${m}`, "ok");
+        else if (stp.ok === false) log(`[竞技] ${m}`, stp.act === "arena:claim" ? "warn" : "err");
+      } else if (stp.act === "skip-group") log(`[跳过] ${m}`, "warn");
+    }
+    for (const c of (r && r.claims) || []) log(`[竞技] 领奖 id${c.id} → ${homeRewardText(c.content)}`, "ok");
+    if (!r || r.ok === false) {
+      log(`[一键全部] ${(r && r.message) || "失败"}`, "err");
+      if (note) note.textContent = "有步骤失败，看日志";
+    } else {
+      log(`[一键全部] 完成：${r.fights} 战 ${r.wins} 胜，剩余挑战 ${r.surplus_left}`, "ok");
+      if (note) note.textContent = `完成 · ${r.fights} 战 ${r.wins} 胜`;
+    }
+  } finally {
+    await loadHomeState();
+    done();
+    if (note && !/失败/.test(note.textContent || "")) note.textContent = "";
+  }
+}
+
 function initHomeOnce() {
   if (homeInited) return;
   homeInited = true;
-  const bindH = (id, fn) => { const b = $(id); if (b) b.onclick = () => fn(b); };
-
-  bindH("home-like", async (b) => {
-    const done = busyBtn(b, "点赞中…", "一键点赞");
-    try {
-      let d = await loadHomeStateOnce();
-      const targets = [];
-      if (d && d.likes) {
-        if (d.likes.match !== 1) targets.push(["match", "每日比赛榜"]);
-        if (d.likes.arena !== 1) targets.push(["arena", "竞技比赛榜"]);
-      }
-      if (!targets.length) { log("[点赞] 两个榜今天都点过了", "warn"); return; }
-      for (const [t, name] of targets) {
-        const r = await homePost("/api/home/like", { target: t });
-        if (r && r.ok) log(`[点赞] ${name} → ${homeRewardText(r.content) || "成功"}`, "ok");
-        else log(`[点赞] ${name} 失败：${(r && r.message) || "?"}`, "err");
-      }
-    } finally { await loadHomeState(); done(); }
-  });
-
-  bindH("home-gacha", async (b) => {
-    const done = busyBtn(b, "抽取中…", "免费抽一次");
-    try {
-      const r = await homePost("/api/home/gacha-free");
-      if (r && r.ok) log(`[扭蛋机] 免费抽 → ${homeRewardText(r.content) || "成功"}`, "ok");
-      else log(`[扭蛋机] ${(r && r.message) || "抽取失败"}`, "warn");
-    } finally { await loadHomeState(); done(); }
-  });
-
-  bindH("home-candy", async (b) => {
-    const done = busyBtn(b, "兑换中…", "兑换大糖果（6 积分）");
-    try {
-      const r = await homePost("/api/home/exchange-candy", { num: 1 });
-      if (r && r.ok) log(`[扭蛋机] 兑换 → ${homeRewardText(r.content) || "大糖果×1"}（积分余 ${r.score ?? "?"}）`, "ok");
-      else log(`[扭蛋机] 兑换失败：${(r && r.message) || "?"}`, "err");
-    } finally { await loadHomeState(); done(); }
-  });
-
-  bindH("home-feed", async (b) => {
-    const done = busyBtn(b, "喂糖中…", "一键喂到 80");
-    try {
-      const r = await homePost("/api/home/feed", { mode: "all" });
-      for (const stp of (r && r.steps) || []) {
-        if (stp.msg === "无需喂") continue;
-        const cn = { 1: "小", 2: "中", 3: "大" }[stp.candy] || stp.candy;
-        log(`[玩耍] 猫${stp.elf_id} ${cn}糖果 → 心情 ${stp.mood}`,
-            stp.ok ? "ok" : "err");
-      }
-      if (r && r.ok === false) log(`[玩耍] ${(r.message) || "喂糖中断"}`, "warn");
-      else if (r && !(r.steps || []).length) log("[玩耍] 全部猫心情达标，无需喂", "warn");
-    } finally { await loadHomeState(); done(); }
-  });
-
-  bindH("home-arena", async (b) => {
-    let st = {};
-    try { st = await fetch("/api/home/state").then((x) => x.json()); } catch (e) {}
-    const surplus = st && st.pvp ? st.pvp.surplus : "?";
-    if (!confirm(`将先把 4 只猫喂到心情 80，再自动挑战战力低于自己的对手（剩余 ${surplus} 次），没有就免费刷对手（4 次/日），打完自动领任务奖励。\n消耗今天的竞技挑战次数，继续？`)) return;
-    const done = busyBtn(b, "竞技中…", "自动竞技（低战力挑战 + 领奖）");
-    try {
-      const r = await homePost("/api/home/arena-auto");
-      for (const stp of (r && r.steps) || []) {
-        if (stp.act === "feed") {
-          const m = /喂了 (\d+) 颗/.exec(stp.msg || "");
-          log(m && +m[1] === 0 ? "[玩耍] 4 只猫心情已达标，跳过喂糖（竞技前自动）"
-                               : `[玩耍] ${stp.msg}（竞技前自动）`, stp.ok ? "" : "warn");
-        } else if (stp.act === "fight" && stp.ok) {
-          log(`[竞技] ${stp.msg} → ${stp.win === 1 ? "胜利" : "失败"}${stp.score != null ? ` +${stp.score}分` : ""}`, stp.win === 1 ? "ok" : "");
-        } else if (stp.act === "flush") {
-          log(`[竞技] ${stp.msg}`, stp.ok ? "" : "warn");
-        } else if (stp.act === "claim") {
-          log(`[竞技] ${stp.msg}`, "ok");
-        } else if (stp.ok === false) {
-          log(`[竞技] ${stp.msg || "失败"}`, "err");
-        }
-      }
-      for (const c of (r && r.claims) || []) log(`[竞技] 领奖 id${c.id} → ${homeRewardText(c.content)}`, "ok");
-      if (r && r.ok) log(`[竞技] 本轮 ${r.fights} 战 ${r.wins} 胜，剩余挑战 ${r.surplus_left}`, "ok");
-    } finally { await loadHomeState(); done(); }
-  });
-}
-
-// 读取一次状态但不触发渲染副作用（供点赞前判断用）
-async function loadHomeStateOnce() {
-  try { return await fetch("/api/home/state").then((x) => x.json()); }
-  catch (e) { return null; }
+  const b = $("home-all");
+  if (b) b.onclick = () => homeRunAll(b);
 }
