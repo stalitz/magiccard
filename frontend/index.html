@@ -1330,14 +1330,6 @@
           <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
             <span style="font-weight:600;font-size:13.5px">每日比赛：</span>
             <span id="match-res" style="font-size:12px;color:var(--muted)"></span>
-            <span class="sep"></span>
-            <button id="match-runall" class="btn sm primary">一键比赛（打满今日场次 + 领奖）</button>
-            <button id="match-dressrace" class="btn sm primary">按最优装打一场</button>
-            <button id="match-race" class="btn sm">打一场（当前装）</button>
-            <button id="match-dress" class="btn sm">最优穿搭建议</button>
-            <button id="match-claim-all" class="btn sm">一键领奖</button>
-            <span class="sep"></span>
-            <button id="match-refresh" class="btn sm">刷新状态</button>
           </div>
 
           <div class="msub-bar" id="match-sub-bar">
@@ -1392,8 +1384,15 @@
           </div>
 
           <div id="msub-race" class="msub">
-          <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+          <div class="lib-toolbar" style="gap:8px;padding:8px 12px;flex-wrap:wrap">
+            <button id="match-runall" class="btn sm primary">一键比赛（打满今日场次 + 领奖）</button>
+            <button id="match-dressrace" class="btn sm primary">按最优装打一场</button>
+            <button id="match-race" class="btn sm">打一场（当前装）</button>
+            <button id="match-dress" class="btn sm">最优穿搭建议</button>
+            <button id="match-claim-all" class="btn sm">一键领奖</button>
+            <span class="sep"></span>
             <button id="match-equip" class="btn sm">装备详情</button>
+            <button id="match-refresh" class="btn sm">刷新状态</button>
           </div>
           <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1.15">
@@ -1537,7 +1536,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926w"></script>
+<script src="/app.js?v=20260926x"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

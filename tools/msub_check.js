@@ -45,9 +45,9 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   try { w.eval(appjs); } catch (e) { console.log("注入 app.js 失败:", e.message); process.exit(1); }
 
   console.log("== 子模块结构 ==");
-  const keys = ["race", "home", "pvp", "union", "gvg", "modes"];
+  const keys = ["home", "race", "pvp", "union", "gvg", "modes"];
   keys.forEach((k) => assert(!!panel(k), `#msub-${k} 存在`));
-  assert(onKeys().join(",") === "race", `默认只显示「出战」子模块（当前：${onKeys().join(",") || "空"}）`);
+  assert(onKeys().join(",") === "home", `默认只显示「猫窝日常」主界面（当前：${onKeys().join(",") || "空"}）`);
 
   const tabs = [...(w.document.getElementById("match-sub-bar") || { querySelectorAll: () => [] })
     .querySelectorAll(".tab")].map((b) => b.getAttribute("data-msub"));
@@ -68,12 +68,20 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(inSub("match-gvg-box", "gvg"), "公会战在 msub-gvg 内");
   assert(inSub("match-modes-box", "modes"), "各玩法一键在 msub-modes 内");
 
-  console.log("== 首次进入：只加载「出战」子模块 ==");
+  // 按钮归属（2026-09-26 定调）：顶部工具栏一个按钮都不留，功能按钮全部下沉到所属子模块
+  const topBar = w.document.querySelector("#pane-match > .lib > .lib-toolbar");
+  const topBtns = topBar ? topBar.querySelectorAll("button").length : -1;
+  assert(topBtns === 0, `顶部工具栏不留按钮（当前 ${topBtns} 个）`);
+  ["match-runall", "match-dressrace", "match-race", "match-dress",
+    "match-claim-all", "match-equip", "match-refresh"].forEach((id) =>
+    assert(inSub(id, "race"), `#${id} 归位到「出战（比赛）」子模块`));
+
+  console.log("== 首次进入：只加载「猫窝日常」 ==");
   calls.length = 0;
   try { await w.eval("(async()=>{ switchPane('match'); await new Promise(r=>setTimeout(r,60)); })()"); }
   catch (e) { console.log("  切换页面失败:", e.message); }
   console.log("  本轮请求：", calls.map((c) => c.replace(BASE, "")).join(" , ") || "（无）");
-  assert(calls.some((c) => c.includes("/api/match/state")), "已加载比赛状态（出战子模块）");
+  assert(calls.some((c) => c.includes("/api/home/state")), "已加载猫窝日常状态");
   assert(!calls.some((c) => c.includes("/api/match/pvp")), "没有抢先加载 PVP 日榜");
   assert(!calls.some((c) => c.includes("/api/match/union")), "没有抢先加载工会");
   assert(!calls.some((c) => c.includes("/api/match/sanguo")), "没有抢先加载西游三国");
