@@ -3430,12 +3430,19 @@ function renderMatchLog() {
     return;
   }
   box.innerHTML = items.map((it) => {
-    const th = (it.theme || []).map((a) => `${a.name || ("属性" + a.id)} ${a.value}%`).join(" · ");
+    // 旧记录里的 name 可能是当年补不全时存下的「属性8」脏值 —— 视为没名字，走 attrName() 兜底
+    const th = (it.theme || []).map((a) => {
+      const nm = (a.name && !/^属性\d+$/.test(a.name)) ? a.name : attrName(a.id);
+      return `${nm} ${a.value}%`;
+    }).join(" · ");
+    // 穿装优先用后端生成的可读文本（「头:魔法帽(演奏+266 朗诵+73) ｜ 命中主题：…」），
+    // 旧记录没有该字段时退回原始编号，并注明看不出名字。
+    const dressTxt = it.equip_text || ((it.equip_ids || []).join("|") || "-");
     return `<div class="state-box" style="margin-bottom:6px">` +
       matchRow("时间", it.ts) +
       matchRow("出战猫 / 场次 id",
         `#${it.cat_id} 号${it.cat_level ? `（${it.cat_level} 级）` : ""} / ${it.race_id}`) +
-      matchRow("穿装", (it.equip_ids || []).join("|")) +
+      matchRow("穿装", dressTxt) +
       matchRow("本场主题", th || "-") +
       matchRow("总分 / 评级分", `${it.total_value ?? "-"} / ${it.level_score ?? "-"}`) +
       matchRow("剩余次数 / 奖励", `${it.performe_num ?? "-"} / ${it.content || "-"}`) +
@@ -4195,24 +4202,22 @@ async function equipBest() {
     mlog("[每日比赛] 主题读取失败 " + ((r && r.message) || "网络异常"), "warn");
     return null;
   }
-  const th = (r.theme || []).map((a) => a.name + a.value + "%").join(" ");
+  const th = (r.theme || []).map((a) => `${a.name || ("属性" + a.id)} ${a.value}%`).join(" ");
   mlog("[每日比赛] 今日主题：" + (th || "未知") + "（剩 " + (r.performe_num ?? "?") + " 次）", "ok");
   const sug = r.suggest || {};
   if (!sug.equip_ids || !sug.equip_ids.length) {
     mlog("[每日比赛] 算不出最优穿装（衣橱数据为空）", "warn");
     return r;
   }
-  mlog("[每日比赛] 最优穿装：" + sug.equip_ids.join("|")
+  // 穿装用中文名 + 属性加成 + 命中情况（后端 cat_dress 从官方配置实证，不是猜的）
+  mlog("[每日比赛] 最优穿装：" + (sug.text || sug.equip_ids.join("|"))
       + "（主题加权覆盖 " + sug.cover + "）", "ok");
-  const det = Object.entries(sug.theme_cover || {})
-    .map(([k, v]) => "属性" + k + ":" + v).join(" ");
-  mlog("[每日比赛] 建议组合属性覆盖 " + det, "");
   for (const c of r.cats || []) {
-    if (c.cover != null) {
-      const gap = (sug.cover - c.cover).toFixed(1);
-      mlog("[每日比赛] 猫" + c.elf_id + "(Lv" + c.level + ") 当前覆盖 " + c.cover
-          + "，比最优低 " + gap + (gap > 1 ? " → 建议去游戏「装饰」换装" : ""), "");
-    }
+    if (c.cover == null) continue;
+    const gap = (sug.cover - c.cover).toFixed(1);
+    mlog("[每日比赛] 猫#" + c.elf_id + "（Lv" + c.level + "）现在穿：" + (c.equip_text || "-")
+        + " ｜ 覆盖 " + c.cover + "，比最优低 " + gap
+        + (gap > 1 ? " → 建议按上面的组合上台" : ""), "");
   }
   return r;
 }
@@ -4242,9 +4247,9 @@ async function equipThenRace() {
   if (d.code !== 0) {
     mlog("[每日比赛] 出战失败 code=" + d.code + " " + (d.desc || d.message || ""), "warn");
   } else {
-    mlog("[每日比赛] " + cat.elf_id + " 号猫带最优装 " + ids.join("|") + " 出战：总分 "
-        + d.total_value + " · 评级分 " + d.level_score + " · 剩余次数 " + d.performe_num
-        + " · 奖励 " + (d.content || "-"), "ok");
+    mlog("[每日比赛] " + cat.elf_id + " 号猫带最优装 [" + (d.equip_text || (ids.join("|")))
+        + "] 出战：总分 " + d.total_value + " · 评级分 " + d.level_score
+        + " · 剩余次数 " + d.performe_num + " · 奖励 " + (d.content || "-"), "ok");
   }
   await loadMatchState(true);
 }
@@ -4267,7 +4272,8 @@ async function raceOnce() {
   if (d.code !== 0) {
     mlog("[每日比赛] 出战失败 code=" + d.code + " " + (d.desc || d.message || ""), "warn");
   } else {
-    mlog("[每日比赛] 出战 " + cat.elf_id + " 号（" + cat.level + " 级）：总分 " + d.total_value
+    mlog("[每日比赛] 出战 " + cat.elf_id + " 号（" + cat.level + " 级）穿 ["
+        + (d.equip_text || (cat.equip || []).join("|")) + "]：总分 " + d.total_value
         + " · 评级分 " + d.level_score + " · 剩余次数 " + d.performe_num
         + " · 奖励 " + (d.content || "-"), "ok");
   }
@@ -4278,10 +4284,19 @@ async function raceOnce() {
 // 后端 run_match_all() 负责「连续打到次数用完」，前端这里补上领奖与状态刷新。
 // 会消耗 performe_num，调用前必须 confirm（项目铁律：写操作让用户确认）。
 
+// 属性名（1=唱歌 … 12=灵活）：后端 /api/match/theme 回带 attrs 全表（来自官方配置的实证），
+// 拿不到就退回「属性N」，绝不本地瞎编名字。
+function attrName(k) {
+  const m = matchTheme || {};
+  const t = (m.attrs || {})[String(k)];
+  return t || ("属性" + k);
+}
+
 function raceLine(r) {
   if (!r) return "-";
   if (r.err) return r.err;
-  return `#${r.cat_id} · 总分 ${r.total_value ?? "-"} · 评级 ${r.level_score ?? "-"} · 覆盖 ${r.cover ?? "-"} · 余 ${r.left ?? "-"}`;
+  return `#${r.cat_id} · ${r.equip_text || r.equip?.join?.("|") || ""} · 总分 ${r.total_value ?? "-"}`
+    + ` · 评级 ${r.level_score ?? "-"} · 覆盖 ${r.cover ?? "-"} · 余 ${r.left ?? "-"}`;
 }
 
 async function runAllMatch() {
@@ -4346,21 +4361,26 @@ function renderMatchTheme() {
   const th = d.theme || [];
   box.className = "state-box";
   const themeTxt = th.length
-    ? th.map((a) => `${a.name || ("属性" + a.id)}${a.value}%`).join(" · ")
+    ? th.map((a) => `${a.name || ("属性" + a.id)} ${a.value}%`).join(" · ")
     : "未读取到主题";
   const sug = d.suggest || {};
   const ids = sug.equip_ids || [];
+  // 组合为各属性提供的加成量（属性名已由后端查表得到）
   const det = Object.entries(sug.theme_cover || {})
-    .map(([k, v]) => ("属性" + k + ":" + v)).join("  ");
+    .map(([k, v]) => `${attrName(k)}:${v}`).join("  ");
   const cats = d.cats || [];
   const gap = cats.filter((c) => c.cover != null && sug.cover != null)
     .map((c) => `#${c.elf_id}(Lv${c.level || "-"}) ${c.cover}`).join("　");
+  // 每只猫现在穿的什么（中文名 + 加成 + 是否命中主题）
+  const worn = cats.filter((c) => c.equip_text)
+    .map((c) => `#${c.elf_id}：${c.equip_text}`).join("<br>");
   box.innerHTML =
     matchRow("今日主题", themeTxt) +
-    matchRow("最优穿装", ids.length ? ids.join(" | ") : "-") +
+    matchRow("最优穿装", sug.text || (ids.length ? ids.join(" | ") : "-")) +
     matchRow("加权覆盖", sug.cover != null ? sug.cover : "-") +
     matchRow("组合属性覆盖", det || "-") +
     matchRow("各猫当前覆盖", gap || "-") +
+    matchRow("各猫当前穿装", worn || "-") +
     matchRow("今日剩余次数", d.performe_num != null ? d.performe_num : "-");
   if (cnt) cnt.textContent = th.length ? `${th.length} 项主题` : "空";
 }
@@ -4370,6 +4390,7 @@ async function loadMatchTheme() {
     .then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchTheme = r;
   renderMatchTheme();
+  renderMatchLog();   // 属性名表到了，出战记录里的旧主题（裸编号）一并刷成中文
   if (!r || r.ok === false) mlogFail("今日主题", r);
 }
 

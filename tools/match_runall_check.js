@@ -14,6 +14,8 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const ROOT = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(ROOT, "frontend/index.html"), "utf-8");
 const appjs = fs.readFileSync(path.join(ROOT, "frontend/app.js"), "utf-8");
+const MAIN_SRC = fs.readFileSync(path.join(ROOT, "backend/main.py"), "utf-8");
+const MATCH_SRC = fs.readFileSync(path.join(ROOT, "backend/match.py"), "utf-8");
 const BASE = "http://127.0.0.1:8000";
 
 const errors = [];
@@ -49,7 +51,11 @@ w.fetch = (u, opt) => {
         cat_home_dress_other_attr: [{ id: 40101, eq_attr: [{ id: 12, value: 25 }] }],
       },
       theme: [{ id: 1, value: 40, name: "唱歌" }],
-      suggest: { equip_ids: [10101, 20101, 30101, 40101], cover: 100 },
+      attrs: { 1: "唱歌", 5: "跑动" },      // 后端下发的属性名全表
+      suggest: { equip_ids: [10101, 20101, 30101, 40101], cover: 100,
+                 text: "头:魔法帽(唱歌+30) 手:自拍杆(跑动+20)" },
+                                            // ↑ 上面的 mock 装备 id 不在官方名表里，
+                                            // 但 equip_text 由后端拼，前端只管显示
       performe_num: 2,
       races: [{ cat_id: 3, total_value: 1200, level_score: 70, cover: 100, left: 1 }],
       ran: 2, left_before: 2, left_after: 0,
@@ -138,6 +144,25 @@ setTimeout(async () => {
   assert(!/talent_score|clover_num|season_rank|unionid|dzs/.test(st), "状态卡不再渲染 talent/clover/dzs/season/unionid");
   // 键值行样式：k 与 v 分离（不再堆在一起）
   assert(!!w.document.querySelector("#match-state-box .rv .k"), "状态行是 .rv 键值分离结构");
+
+  // ---- 可读穿装 / 属性名（用户 2026-09-27：「一串数字不知道是啥，属性5是啥」）----
+  // 属性名只能来自后端 /api/match/theme 的 attrs 表，前端不许自己编
+  const themeCall = calls.find((c) => c.url.includes("/api/match/theme"));
+  assert(!!themeCall, "读过 /api/match/theme（属性名与穿装名的来源）");
+  assert(/attrs":\s*cd\.attr_names\(\)/.test(MAIN_SRC), "/api/match/theme 回带 attrs 属性名表");
+  assert(/function attrName\([\s\S]{0,220}m\.attrs/.test(appjs),
+    "attrName() 走后端 attrs 表，查不到才退回「属性N」");
+  // 主题渲染显示中文属性名（用户问「属性5是啥」）
+  w.eval(`renderMatchTheme()`);
+  const themeBox = $("match-theme-box").textContent;
+  assert(/唱歌\s*40%/.test(themeBox), "今日主题显示成中文属性名：" + themeBox.slice(0, 60));
+  // 出战记录穿装列优先用可读文本，不是裸 id
+  assert(/it\.equip_text/.test(appjs), "出战记录的穿装列用后端可读文本 equip_text");
+  assert(/function equipBest[\s\S]{0,900}sug\.text/.test(appjs),
+    "「最优穿搭建议」日志打印中文穿装（sug.text）");
+  assert(/d\["equip_text"\]\s*=\s*equip_summary/.test(MATCH_SRC)
+      && /"equip_text":\s*d\["equip_text"\]/.test(MATCH_SRC),
+    "后端出战记录落盘 equip_text（可读穿装进出战记录）");
   assert(!errors.length, "运行期无 JS 报错" + (errors.length ? "：" + errors.slice(0, 2).join(" | ") : ""));
   w.close();
   process.exit(process.exitCode || 0);

@@ -37,6 +37,7 @@ from . import travel_elf_auto as te
 from . import dig_auto as dg
 from . import match as mt
 from . import cathome as ch
+from . import cat_dress as cd
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_XIYOU, EP_WORLD_SANGUO)
@@ -2350,10 +2351,13 @@ async def match_race(req: dict):
     if cat_id is None or not equip:
         return {"ok": False, "message": "缺少 cat_id 或 equip"}
     race_id = req.get("race_id")
+    # dress（act=6 装扮表）只为生成可读穿装文本，拿不到也照常出战
+    dress = (await mt.match_state(_session, want_equip=True)).get("equip") or {}
     try:
         return await mt.competition_race(_session, int(cat_id), [int(x) for x in equip],
                                          int(race_id) if race_id is not None else None,
-                                         cat_level=int(req.get("cat_level") or 0) or None)
+                                         int(req.get("cat_level") or 0) or None,
+                                         True, dress)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
@@ -2721,10 +2725,13 @@ async def match_theme():
             "elf_id": c.get("elf_id"), "level": c.get("level"), "mood": c.get("mood"),
             "equip": worn,
             "cover": mt.current_cover(equip, worn, theme) if theme and worn else None,
+            # 「头:头巾(唱歌+25) 手:… ｜ 命中主题：…」—— 让用户看得懂现在穿了什么
+            "equip_text": mt.equip_summary(worn, equip, theme) if theme else "",
         })
     return {
         "ok": True,
         "theme": theme_rows,          # [{id, value, name}]
+        "attrs": cd.attr_names(),     # {属性id: 中文名}，界面显示「属性5=跑动」
         "cats": cats,
         "suggest": suggest,
         "performe_num": st.get("performe_num"),

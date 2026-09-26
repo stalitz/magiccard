@@ -19,6 +19,9 @@ HAR 中实证到的端点与参数：
 import json
 from typing import Optional
 
+from .cat_dress import (  # 装扮名 / 属性名（官方 catHome_Info 配置实证，见 cat_dress 模块 doc）
+    attr_name as _attr_name, equip_name as _equip_name, summary as _equip_summary,
+)
 from .constants import (
     EP_TRAVEL_MATCH, EP_TRAVEL_PVP, EP_TRAVEL_UNION,
     EP_WORLD_SANGUO, EP_WORLD_EXPLORE,
@@ -391,7 +394,8 @@ def load_race_log(limit: int = 20) -> list:
 async def competition_race(session, cat_id: int, equip_ids: list,
                            race_id: int | None = None,
                            cat_level: int | None = None,
-                           feed: bool = True) -> dict:
+                           feed: bool = True,
+                           dress: dict | None = None) -> dict:
     """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
 
     feed=True（默认）：出战前先把心情补到 MOOD_TARGET —— 心情不够游戏里上不了台
@@ -446,11 +450,16 @@ async def competition_race(session, cat_id: int, equip_ids: list,
         save_theme_attr(d.get("theme_attr"), d.get("theme_arr"))
     d["race_id_used"] = int(race_id)
     d["equip_used"] = ids
+    # 可读穿装（名字 / 属性加成 / 是否命中今日主题），供日志与出战记录展示。
+    # dress = act=6 四张装扮表；不给也能出战，只是文本里没有加成数值。
+    theme_map = {a.get("id"): a.get("value", 0) for a in (_last_theme_rows or [])}
+    d["equip_text"] = equip_summary(equip_ids, dress, theme_map)
     if d.get("code") == 0:
         save_race_log({
             "cat_id": int(cat_id),
             "cat_level": cat_level,
             "equip_ids": [int(x) for x in equip_ids],
+            "equip_text": d["equip_text"],
             "race_id": int(race_id),
             "theme": _last_theme_rows,
             "total_value": d.get("total_value"),
@@ -461,6 +470,27 @@ async def competition_race(session, cat_id: int, equip_ids: list,
             "next_theme": d.get("theme_attr"),
         })
     return {"ok": True, "code": r.get("code"), "data": d}
+
+
+def attr_name(aid: int) -> str:
+    """属性 id → 中文名（1=唱歌 … 12=灵活，见 cat_dress 的实证链）。"""
+    return _attr_name(aid) or f"属性{aid}"
+
+
+def equip_label(equip_id) -> str:
+    """装备 id → 「槽位:名字」；官方名表未收录时返回「#id」。"""
+    return f"{cat_dress_slot(equip_id)}:{_equip_name(equip_id)}" if _equip_name(equip_id) \
+        else f"#{equip_id}"
+
+
+def cat_dress_slot(equip_id) -> str:
+    from .cat_dress import slot_of
+    return slot_of(equip_id)
+
+
+def equip_summary(equip_ids, dress: dict = None, theme: dict | None = None) -> str:
+    """穿装可读文本（名字 + 属性加成 + 命中主题），日志与出战记录共用。"""
+    return _equip_summary(equip_ids, dress, theme)
 
 
 # ---------------- 主题适配：最优穿装建议（只读计算）----------------
@@ -487,12 +517,9 @@ _DRESS_TABLES = (
 # ---------------- 今日主题（competition act=2，2026-09-26 用户截图+实读双实证）----------------
 # act=2 零参数、赛前可读、零副作用：attr=[{id,value}...] 合计=100，就是 UI「今日主题」的百分比。
 # 重要：**每场比赛主题独立随机**（09-25 一天三场三个主题），所以必须在每次「出发」前重新读。
-# 属性名实证（装备数值与游戏截图逐一匹配）：1=唱歌 2=舞蹈 3=朗诵 4=演奏；5~12 名字待补。
-ATTR_NAMES = {1: "唱歌", 2: "舞蹈", 3: "朗诵", 4: "演奏"}
-
-
-def attr_name(aid: int) -> str:
-    return ATTR_NAMES.get(int(aid), f"属性{aid}")
+# 属性名不再写死：全 12 个名字由 cat_dress 从官方 catHome_Info 配置实证得出
+# （entry 属性 id ↔ desc 才艺名投票，2026-09-27）：
+#   1=唱歌 2=舞蹈 3=朗诵 4=演奏 5=跑动 6=翻滚 7=跳跃 8=游泳 9=强健 10=艳丽 11=优雅 12=灵活
 
 
 async def competition_theme(session) -> dict:
@@ -601,6 +628,8 @@ def best_equip(equip: dict, theme=None) -> dict:
         "attrs": attrs,
         "theme_cover": {str(k): attrs.get(k, 0) for k in theme},
         "theme_src": "act2_live" if theme else "cache",
+        "labels": [equip_label(i) for i in ids],     # 「头:头巾」「#10493」
+        "text": equip_summary(ids, equip, theme),    # 给用户看的一行穿装说明
     }
 
 
@@ -697,7 +726,8 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
         r = await competition_race(session, int(cat["elf_id"]), ids,
                                    race_id=race_id,
                                    cat_level=int(cat.get("level") or 0),
-                                   feed=False)
+                                   feed=False,
+                                   dress=equip)
         if not r.get("ok"):
             races.append({"err": r.get("message") or "请求异常"})
             break
@@ -717,6 +747,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
             "cat_id": cat.get("elf_id"),
             "cat_level": cat.get("level"),
             "equip": ids,
+            "equip_text": d.get("equip_text") or sug.get("text"),
             "cover": sug.get("cover"),
             "total_value": d.get("total_value"),
             "level_score": d.get("level_score"),
