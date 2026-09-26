@@ -4227,10 +4227,12 @@ async function equipThenRace() {
     mlog("[每日比赛] 没算出最优组合，已中止出战（不浪费次数）", "warn");
     return;
   }
-  // 出战猫：优先「心情达标 + 满 4 件装备」里等级最高的（用户习惯用等级最高的猫）
+  // 出战猫：优先「心情达标 + 满 4 件装备」里等级最高的（用户习惯用等级最高的猫）；
+  // 心情不达标的也放进来，后端出战前会先把心情补到 80
   const cats = (r.cats || []).filter((c) => (c.equip || []).filter((x) => x > 0).length === 4);
   if (!cats.length) { mlog("[每日比赛] 没有满 4 件装备的猫，无法出战", "warn"); return; }
-  cats.sort((a, b) => (b.level || 0) - (a.level || 0));
+  cats.sort((a, b) => ((b.mood ?? 0) >= 80) - ((a.mood ?? 0) >= 80)
+                     || (b.level || 0) - (a.level || 0));
   const cat = cats[0];
   const rr = await fetch("/api/match/race", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -4248,8 +4250,11 @@ async function equipThenRace() {
 }
 
 async function raceOnce() {
-  const st = matchState || await fetch("/api/match/state").then((x) => x.json()).catch(() => null);
-  const cats = (st && st.cats) || [];
+  // 心情会随时间下降：挑猫前必须读最新的比赛状态（act=1 只读）。
+  // 心情不足 80 也照样能打 —— /api/match/race 会在后端先补到 80 再出战。
+  await loadMatchState(true);
+  const st = matchState || {};
+  const cats = (st.cats) || [];
   // 挑「心情够 + 有满 4 件装备」的第一只，参数必须取真实值（铁律：坐标/槽位不用固定值）
   const cat = cats.find((c) => c.mood >= 80 && (c.equip || []).filter((x) => x > 0).length === 4)
            || cats.find((c) => (c.equip || []).filter((x) => x > 0).length === 4);
@@ -4283,7 +4288,7 @@ async function runAllMatch() {
   const before = (matchState && matchState.performe_num) || 0;
   if (!confirm(`一键比赛将连续打完今日剩余场次（当前剩余 ${before} 次）。\n`
     + "上台奖励由系统自动发放，本操作不再去领其他玩法的奖；会真实消耗比赛次数，确认继续？")) return;
-  mlog("[一键比赛] 开始：先读主题与最优穿装，再逐场出战…", "ok");
+  mlog("[一键比赛] 开始：先把心情喂到 80，再读主题与最优穿装、逐场出战…", "ok");
   const r = await fetch("/api/match/run-all", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -4300,6 +4305,9 @@ async function runAllMatch() {
     for (const x of races) mlog("[一键比赛] 第 " + (races.indexOf(x) + 1) + " 场 " + raceLine(x), "ok");
   }
   mlog(`[一键比赛] 完成：打了 ${r.ran || races.length} 场，剩余次数 ${r.left_before ?? "-"} → ${r.left_after ?? "-"}`, "ok");
+  if (r.feed && r.feed.ok) {
+    mlog(`[一键比赛] 出战前已把心情喂到 80（用掉 ${r.feed.candies ?? 0} 颗糖）`, "ok");
+  }
   // 注意：不打这里领奖。一键比赛只管出战，奖励上台后系统自动发；
   // 跨玩法的一键领奖在「猫窝日常」页，由用户自己决定要不要领。
   await loadMatchState(true);

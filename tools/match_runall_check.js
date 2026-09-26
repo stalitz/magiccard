@@ -120,6 +120,10 @@ setTimeout(async () => {
   const logs = w.document.querySelector("[data-mlog]").textContent;
   assert(/一键比赛/.test(logs), "比赛日志里有一键比赛记录");
   assert(/打了\s*2\s*场|打了 2 场/.test(logs) || /一键比赛\] 完成/.test(logs), "日志记录了场次与剩余次数");
+  // 心情前置（用户 2026-09-27 定调）：用猫的一键操作必须先补心情到 80
+  assert(/先把心情喂到 80/.test(logs), "一键比赛日志明说「先把心情喂到 80」（心情前置）");
+  assert(/async function raceOnce[\s\S]{0,400}loadMatchState\(true\)/.test(appjs),
+    "raceOnce 挑猫前读最新状态（心情会掉，不能靠旧缓存筛猫）");
   // 猫窝日常确实被默认加载过
   assert(calls.some((c) => c.url.includes("/api/home/state")), "默认子模块（猫窝日常）自动拉了 /api/home/state");
   // tab 切换：点「出战（比赛）」→ race 显示、home 隐藏

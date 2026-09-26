@@ -338,6 +338,26 @@ async def competition_feed(session, elf_id: int, candy_type: int = 1) -> dict:
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
+# 用猫的一键操作前置阈值（与 cathome.MOOD_TARGET 同一口径，改动处同步）
+MOOD_TARGET = 80
+
+
+async def ensure_mood(session, threshold: int = MOOD_TARGET) -> dict:
+    """【用猫的一键操作前置】把心情不足 threshold 的猫喂到 threshold（act=11）。
+
+    用户 2026-09-27 定调：「只要用到猫的一键操作，都要先把心情补到 80，
+    不只限于日常界面」。因此所有**会用到猫**的写操作（每日比赛上台、竞技
+    挑战、公会战出兵、三国闯关…）在执行前都先走这里，不用每个前端按钮各写一遍。
+
+    实现复用 cathome.feed_smart（那里是 act=11 编排的源头）。
+    cathome 已在本模块顶层 import 了 _act，故这里**函数内 import** 避免循环依赖。
+
+    返回：{"ok": True, "steps": [...], "fed": bool}；某只猫喂失败即 {"ok": False, ...}。
+    """
+    from .cathome import feed_smart          # 函数内 import：避开 cathome → match 的循环
+    return await feed_smart(session, threshold)
+
+
 _RACE_LOG = "/tmp/mc_match_race.jsonl"  # 注意：本文件 _Path 在后面才 import
 
 
@@ -370,8 +390,13 @@ def load_race_log(limit: int = 20) -> list:
 
 async def competition_race(session, cat_id: int, equip_ids: list,
                            race_id: int | None = None,
-                           cat_level: int | None = None) -> dict:
+                           cat_level: int | None = None,
+                           feed: bool = True) -> dict:
     """打一场比赛（competition act=4）：catId=猫、ids=出战 4 件装备（'|' 连接）。
+
+    feed=True（默认）：出战前先把心情补到 MOOD_TARGET —— 心情不够游戏里上不了台
+    （act=11 的注释即「把心情喂到阈值才能做其他任务」），且一键比赛本身也要求
+    心情达标才选得到猫。调用方若已在前面统一喂过，传 feed=False 跳过。
 
     2026-09-26 真机实证（推翻此前「id=猫 id / ids 必须是当前穿着」的错误结论）：
 
@@ -399,6 +424,13 @@ async def competition_race(session, cat_id: int, equip_ids: list,
             _last_theme_rows = _th.get("theme") or []
         except Exception:  # noqa: BLE001
             pass
+    # 心情门槛：用猫的一键操作前置（用户 2026-09-27 定调），单场出战同样先补到 80
+    if feed:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            return {"ok": False, "code": -1,
+                    "message": f"喂猫到 {MOOD_TARGET} 失败，已中止出战（不消耗次数）："
+                               f"{f.get('message') or '糖果可能不足'}"}
     ids = "|".join(str(x) for x in equip_ids)
     try:
         r = await session.post(EP_TRAVEL_MATCH, act=4,
@@ -602,6 +634,14 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
 
     **会消耗 performe_num**，由前端 confirm 后才调用；来一个 max_races 可限制场次。
     """
+    # 心情门槛（用户 2026-09-27 定调）：一键比赛要用猫，出战前先把 4 只猫喂到 80，
+    # 否则 stop_mood 过滤会把猫全筛掉、或上台直接被拒。喂失败即中止（不扣次数）。
+    feed = await ensure_mood(session, stop_mood)
+    if not feed.get("ok"):
+        return {"ok": False, "message": f"喂猫到 {stop_mood} 失败，已中止一键比赛（不消耗次数）："
+                                        f"{feed.get('message') or '糖果可能不足'}"}
+    fed_n = len([s for s in (feed.get("steps") or []) if s.get("candy")])
+
     try:
         th = await competition_theme(session)
     except Exception as e:  # noqa: BLE001
@@ -653,9 +693,11 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
         pool = [c for c in pool
                 if (c.get("mood") or 0) >= stop_mood] or pool
         cat = pool[0]
+        # 心情已在函数开头统一喂过，这里别再重复喂（省 act=1 读 + 糖果）
         r = await competition_race(session, int(cat["elf_id"]), ids,
                                    race_id=race_id,
-                                   cat_level=int(cat.get("level") or 0))
+                                   cat_level=int(cat.get("level") or 0),
+                                   feed=False)
         if not r.get("ok"):
             races.append({"err": r.get("message") or "请求异常"})
             break
@@ -693,6 +735,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
         "races": races,
         "theme": theme_rows,
         "cats": (after.get("cats") if after.get("cats") else cats),
+        "feed": {"ok": True, "candies": fed_n},   # 出战前把心情喂到 stop_mood 的结果
     }
 
 
@@ -818,8 +861,17 @@ async def pvp_flush(session) -> dict:
     return await _act(session, EP_TRAVEL_PVP, 7)
 
 
-async def pvp_fight(session, euin: str) -> dict:
-    """挑战（pvp act=8 {type:'fight', euin}）。**消耗 pvp_num**。"""
+async def pvp_fight(session, euin: str, feed: bool = True) -> dict:
+    """挑战（pvp act=8 {type:'fight', euin}）。**消耗 pvp_num**。
+
+    打的是猫（pvp act=8 用猫当前穿着，见 cathome.arena_auto 注释），所以按用户
+    定调「用到猫的一键操作先补心情」：执行前先把猫喂到 MOOD_TARGET。
+    """
+    if feed:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            msg = f"喂猫到 {MOOD_TARGET} 失败，已中止挑战：{f.get('message') or '糖果可能不足'}"
+            return {"ok": False, "code": -1, "desc": msg, "message": msg}
     return await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=str(euin))
 
 
@@ -860,8 +912,18 @@ async def union_claim(session) -> dict:
     return await _act(session, EP_TRAVEL_UNION, 17)
 
 
-async def union_fight(session, optype: int = 4, uptype: int = 1) -> dict:
-    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。"""
+async def union_fight(session, optype: int = 4, uptype: int = 1,
+                      feed: bool = True) -> dict:
+    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。
+
+    出兵带猫与装备（同族 act=23/act=11 的 cats/eqs 语义），所以出兵前按用户定调
+    先把猫喂到 MOOD_TARGET。
+    """
+    if feed:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            msg = f"喂猫到 {MOOD_TARGET} 失败，已中止出兵：{f.get('message') or '糖果可能不足'}"
+            return {"ok": False, "code": -1, "desc": msg, "message": msg}
     return await _act(session, EP_TRAVEL_UNION, 21, optype=int(optype), uptype=int(uptype))
 
 
@@ -934,12 +996,19 @@ async def sanguo_lineup(session, levelid: int) -> dict:
     return await _act(session, EP_WORLD_SANGUO, 16, levelid=int(levelid), cats="0|0|0|0")
 
 
-async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0) -> dict:
+async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0,
+                     feed: bool = True) -> dict:
     """三国闯关（sanguo act=11 {mode, levelid, eqs, cats}）。
 
     HAR 实证：eqs 是 N×4 个装备 id 平铺（同 union act=23），cats='3|4|2|1|'（**末尾带 |**）。
     **消耗闯关次数** —— 只在用户主动点时才调。
+    闯关带 cats，属于「用到猫的一键操作」：出兵前先把心情喂到 MOOD_TARGET。
     """
+    if feed:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            msg = f"喂猫到 {MOOD_TARGET} 失败，已中止闯关：{f.get('message') or '糖果可能不足'}"
+            return {"ok": False, "code": -1, "desc": msg, "message": msg}
     return await _act(session, EP_WORLD_SANGUO, 11, mode=int(mode), levelid=int(levelid),
                       eqs="|".join(str(int(x)) for x in eqs) + "|",
                       cats="|".join(str(int(c)) for c in cats) + "|")
