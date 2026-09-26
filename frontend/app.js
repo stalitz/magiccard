@@ -2851,8 +2851,13 @@ function renderAuto(st, bx) {
     if (gaps.length) {
       const txt = gaps.map((g) => {
         const left = g.need_total || 0;
+        const cr = g.credit || {};
+        const n = Object.values(cr).reduce((a, b) => a + Number(b || 0), 0);
+        // credit = 变卡环节接下来会交的那几张，先验进净需求 ——
+        // 所以下面这一轮**不会再拿底卡去炼 40 面卡**（否则变卡就白变了）
+        const tail = n ? `；变卡即将补 ${esc(String(n))} 张 → 这轮不再炼 40 面` : "";
         return `${esc(String(g.theme))} 40面 ${esc(String(g.have))}/${esc(String(g.have + left))}`
-          + (left ? `（还差 ${esc(String(left))}）` : "（已够）");
+          + (left ? `（还差 ${esc(String(left))}）` : "（已够）") + tail;
       }).join(" · ");
       head[head.length - 1] += stat("40 面缺口", txt, "礼物卡只变 40 面");
     }

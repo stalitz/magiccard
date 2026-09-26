@@ -287,6 +287,59 @@ async def main() -> None:
     check("dst 是 40 面 → 正常走流程（源卡被消耗）", r3.get("tried") >= 1,
           str(r3)[:120])
 
+    print("\n[10] 变了 40 面卡就要拿去炼 80：净需求不许再拿底卡炼一张同款 40 面卡"
+          "（用户 2026-09-26：「已经变了 40 的卡，怎么不去用 40 的去练 80 的，"
+          "还要再炼 40 的，那变卡的意义在哪」）")
+    from collections import Counter as _C                  # noqa: E402
+    from backend.auto_refine import (ThemePlan, parse_full,  # noqa: E402
+                                     face40_gap, AutoRefine)
+    p = ThemePlan(1810)                                     # 研精覃思
+    f40 = [int(c) for c in p.ids if int(p.cards[c][3] or 0) == 40]
+
+    def _eng(stock, gift_n, switches=(True, True)):
+        """拼一个只算了 credit 的引擎桩（_refine_all 里用的就是这几个字段）。"""
+        e = AutoRefine.__new__(AutoRefine)
+        e.plans = {1810: p}; e.queue = [1810]; e.face40_credit = {}
+        e.box_gift_change, e.gift_drain = switches
+        e._stock, e._pending = _C(stock), _C()
+        gift = ",".join(f'<card slot="{i + 1}" id="7773"/>' for i in range(gift_n))
+        st = parse_full(f"<qqhome><changebox cur=\"9\" max=\"18\" used=\"{gift_n}\">"
+                        f"{gift}</changebox><storebox cur=\"0\" max=\"18\""
+                        f" used=\"0\"></storebox>"
+                        f"<stovebox cur=\"0\" max=\"7\"></stovebox></qqhome>")
+        return e, st
+
+    stock = {26116: 2, 26117: 2, 26118: 3, 26119: 2, 26120: 3}
+    runs_old, _ = p.net_plan(_C(stock), _C())
+    e, st = _eng(stock, gift_n=4)
+    credit = e._face40_credit(p, st)
+    runs_new, _ = p.net_plan(_C(stock), _C(), credit)
+    old40 = sorted(p.cname(k) for k in runs_old if k in f40)
+    new40 = sorted(p.cname(k) for k in runs_new if k in f40)
+    check("变卡开关关着时不给任何 credit（不能凭空造卡）",
+          _eng(stock, gift_n=4, switches=(False, False))[0]._face40_credit(
+              p, _eng(stock, gift_n=4, switches=(False, False))[1]) == _C())
+    check("卡箱里没有礼物卡 → credit 归零（变卡交不出来就得回去炼 40 面，防死锁）",
+          _eng(stock, gift_n=0)[0]._face40_credit(p, _eng(stock, gift_n=0)[1]) == _C())
+    full40 = {int(c): int(p.f40.get(c, 0) or 0) for c in f40}
+    e_full, st_full = _eng(full40, gift_n=99)
+    check("40 面缺口已补齐 → credit 归零（该拿底card炼 40 面了）",
+          e_full._face40_credit(p, st_full) == _C(),
+          f"库存 {full40}")
+    check("credit 张数不超过卡箱里还剩的礼物卡数",
+          sum(credit.values()) <= 4, f"credit 合计 {sum(credit.values())} / 礼物卡 4 张")
+    check("credit 只落在还有缺口的 40 面卡上",
+          all(k in face40_gap(p, _C(stock), _C())["gap"] for k in credit),
+          str({p.cname(k): v for k, v in credit.items()}))
+    check(f"净需求里「拿底卡炼 40 面卡」从 {len(old40)} 种降到 {len(new40)} 种",
+          len(new40) < len(old40), f"改前 {old40} → 改后 {new40}")
+    check("改后要炼的仍是 80/130/510 这些更大面额",
+          any(int(p.cards[k][3] or 0) >= 80 for k in runs_new),
+          str(sorted({p.cname(k) for k in runs_new}))[:120])
+    check("底卡购买量随之下降（少了那些同款 40 面卡）",
+          sum(p.net_plan(_C(stock), _C())[1].values())
+          > sum(p.net_plan(_C(stock), _C(), credit)[1].values()))
+
     print(f"\n结果：PASS {len(PASS)} / FAIL {len(FAIL)}")
     if FAIL:
         for f in FAIL:

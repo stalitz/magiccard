@@ -296,12 +296,20 @@ class ThemePlan:
     def cname(self, cid: int) -> str:
         return card_name(cid)
 
-    def net_plan(self, stock: Counter, pending: Counter) -> tuple[dict, dict]:
+    def net_plan(self, stock: Counter, pending: Counter,
+                 credit: Counter | None = None) -> tuple[dict, dict]:
         """净需求：返回 (要炼的 {卡id: 次数}, 要买的 {底卡id: 张数})。
 
         库存（箱内 + 炉内在炼）从总需求里抵扣；只有**实际要新炼/新买**的数量
         才向素材层传导 —— 已有的成品卡不会再把它那份素材需求全额压到最底层。
+
+        `credit` = **变卡环节接下来会产出的 40 面卡**（见 `_face40_credit`），
+        先算作已到货。否则净需求会把「集卡册那一份 40 面卡」当成还得从底卡炼出来，
+        于是「变卡变出 40 面卡」和「炼卡再炼一张 40 面卡」两头同时做 —— 变卡就白变了。
         """
+        avail = Counter(stock)
+        if credit:
+            avail.update({int(c): n for c, n in credit.items() if n > 0})
         need: dict[int, int] = {cid: 1 for cid in self.ids}
         runs: dict[int, int] = {}
         buy: dict[int, int] = {}
@@ -309,7 +317,7 @@ class ThemePlan:
             n = need.pop(cid, 0)
             if n <= 0:
                 continue
-            net = n - (stock.get(cid, 0) + pending.get(cid, 0))
+            net = n - (avail.get(cid, 0) + pending.get(cid, 0))
             if net <= 0:
                 continue
             c = self.comp.get(cid)
@@ -525,6 +533,9 @@ class AutoRefine:
         # 这一项**不受 gift_drain 开关限制**——没勾收礼变卡，也该把箱里的卡用掉。
         self.box_gift_change = True
         self.box_gift_last: dict | None = None   # 最近一次结果（status 透传）
+        # 最近一次算出的「变卡还没交、但马上会交」的 40 面卡（{套id: Counter}），
+        # 供面板说明「为什么这轮不再炼 40 面卡了」
+        self.face40_credit: dict[int, Counter] = {}
         # ★ 2026-09-26 去掉了「连败 N 次 → 静默 30 分钟」：用户定调「变卡失败要一直变，
         #   直到成功或者礼物卡没了」。失败也烧源卡，所以箱里的卡烧完必然收手，不需要静默。
         self.last_steal: dict | None = None   # 最近一次偷炉尝试结果
@@ -744,6 +755,57 @@ class AutoRefine:
                         break
         return steps
 
+    # ---------- 变卡与炼卡共用的一套 40 面卡口径 ----------
+    def _gift_cards_left(self, st: dict) -> int:
+        """卡箱里还有几张礼物套 48 面卡 = 变卡环节接下来还能产出多少张 40 面卡。
+
+        只读 `st`（本 tick 第 2 步那份，变卡之后重读过），不额外发请求。
+        """
+        ids = gf._face48_ids()
+        return sum(1 for box in ("change", "store")
+                   for c in st.get(box, []) if c.get("id") in ids)
+
+    def _face40_credit(self, plan: "ThemePlan", st: dict) -> Counter:
+        """这套卡「变卡环节还没交、但马上就会交」的 40 面卡 -> 净需求里的虚拟库存。
+
+        用户 2026-09-26 指出：「已经变了 40 的卡，怎么不去用 40 的去练 80 的，
+        还要再炼 40 的，那变卡的意义在哪」—— 原来的净需求只认手上的库存，
+        变卡计划要产出的那几张不算数，于是炼卡环节转头又拿底卡炼了一张同款 40 面卡
+        （真机日志实证：17:58 同一个 tick 里先变出移液器/水浴锅，紧接着又炼了
+        液氮罐/水浴锅/移液器三张 40 面卡）。这里把它们先顶上，炼卡环节就不再重复炼。
+
+        ⚠️ 只顶「变卡环节真能产出的量」（卡箱里还剩几张礼物卡），且只在变卡开关
+        打开时生效；礼物卡用完 credit 自然归零，净需求退回「拿底卡炼 40 面」，
+        不会死锁。
+        """
+        if not (self.box_gift_change or self.gift_drain):
+            return Counter()
+        gap = face40_gap(plan, self._stock, self._pending)["gap"]
+        if not gap:
+            return Counter()
+        cap = self._gift_cards_left(st)
+        if cap <= 0:
+            return Counter()
+        # 与 `_pick_change_target` 同一优先级：缺口大的先补，同缺口按卡 id 稳定排序
+        order = sorted(gap, key=lambda c: (-int(gap[c]), int(c)))
+        out: Counter = Counter()
+        left = cap
+        # 轮着发：先**每个还缺的卡 id 各 1 张**（让「还得从底card炼 40 面」的种类尽量
+        # 变少，这就是用户要的「拿变出来的 40 面去炼 80」），发完一轮再补第二张。
+        while left > 0:
+            moved = False
+            for cid in order:
+                if left <= 0:
+                    break
+                if out.get(int(cid), 0) >= int(gap[cid]):
+                    continue
+                out[int(cid)] += 1
+                left -= 1
+                moved = True
+            if not moved:
+                break
+        return out
+
     async def _refine_all(self, st: dict, stock: Counter, slots: dict,
                           pending: Counter, steps: list[dict]) -> None:
         """把空着的主炉位按轮转顺序分给队列里各套能立刻提交的炉次；
@@ -764,9 +826,14 @@ class AutoRefine:
         planned: set = set()
         plans_net: dict[int, tuple] = {}
         for tid in self.queue:
-            runs, buy = self.plans[tid].net_plan(stock, pending)
+            p = self.plans[tid]
+            # 变卡环节接下来能产出的 40 面卡先顶在库存里 —— 否则炼卡环节会拿底卡
+            # 再炼一张同款 40 面卡，变卡就白做了（详见 _face40_credit）
+            credit = self._face40_credit(p, st)
+            self.face40_credit[tid] = credit
+            runs, buy = p.net_plan(stock, pending, credit)
             plans_net[tid] = (runs, buy)
-            planned |= set(runs) | set(buy)
+            planned |= set(runs) | set(buy) | set(credit)
         bought = 0
         # 轮转：从 _rr 开始，保证每套都有机会拿到炉位，不被第一套独吞
         order = self.queue[self._rr % len(self.queue):] + self.queue[:self._rr % len(self.queue)]
@@ -1282,6 +1349,9 @@ class AutoRefine:
                 "last_collect": self.last_collect,
                 # 每套「40 面卡缺口」：这一套从头炼到尾还要几张 40 面卡（库存已抵扣）
                 "face40": [{"tid": t, "theme": self.plans[t].name,
+                            # credit = 变卡环节接下来会交的 40 面卡，顶在净需求里，
+                            # 所以下面这轮**不再拿底card炼 40 面卡**
+                            "credit": dict(self.face40_credit.get(t) or {}),
                             **face40_gap(self.plans[t], self._stock, self._pending)}
                            for t in self.queue],
                 "gift": {"enabled": self.gift_drain,
