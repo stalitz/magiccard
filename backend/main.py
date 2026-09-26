@@ -2325,29 +2325,83 @@ async def match_sanguo_extra(levelid: int = 0):
             "lineup": await mt.sanguo_lineup(_session, levelid) if levelid else None}
 
 
+def _claim_group(req, g: str, k: str, coro):
+    """包一层，带上玩法组标识（前端各子块一键领奖按 only 过滤后复用本端点）。"""
+    return {"g": g, "k": k, "r": coro}
+
+
 @app.post("/api/match/claim-all")
 async def match_claim_all(req: dict | None = None):
     """一键领奖：依次领各玩法的奖励（都是零消耗的领奖 act）。
 
     覆盖 competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=8。
+    **only** 可选，传 "comp"/"pvp"/"union"/"explore"/"sanguo" 时只领该玩法（其余子块一键用）。
     返回每一项的结果，失败的单独标出，不影响其他项。
     """
     if err := _require_login():
         return err
     req = req or {}
+    only = str(req.get("only") or "").strip()
     cids = req.get("comp_ids") or [1]
+
+    async def want(g: str) -> bool:
+        return (not only) or (only == g)
+
     out = []
-    for cid in cids:
-        out.append({"k": f"比赛领奖 act=17 id={cid}", "r": await mt.comp_claim(_session, cid)})
-        out.append({"k": f"比赛领奖 act=21 id={cid}", "r": await mt.comp_claim2(_session, cid)})
-    for k, coro in (
-        ("竞技场领奖 act=15", mt.pvp_claim(_session, req.get("pvp_id", 1))),
-        ("工会领奖 act=17", mt.union_claim(_session)),
-        ("探索领奖 act=25", mt.explore_claim(_session, req.get("explore_id", 1))),
-        ("三国领奖 act=8", mt.sanguo_claim(_session, req.get("sanguo_id", 0))),
-    ):
-        out.append({"k": k, "r": await coro})
+    if await want("comp"):
+        for cid in cids:
+            out.append(_claim_group(req, "comp", f"比赛领奖 act=17 id={cid}",
+                                    await mt.comp_claim(_session, cid)))
+            out.append(_claim_group(req, "comp", f"比赛领奖 act=21 id={cid}",
+                                    await mt.comp_claim2(_session, cid)))
+    if await want("pvp"):
+        out.append(_claim_group(req, "pvp", "竞技场领奖 act=15",
+                                await mt.pvp_claim(_session, req.get("pvp_id", 1))))
+    if await want("union"):
+        out.append(_claim_group(req, "union", "工会领奖 act=17", await mt.union_claim(_session)))
+    if await want("explore"):
+        out.append(_claim_group(req, "explore", "探索领奖 act=25",
+                                await mt.explore_claim(_session, req.get("explore_id", 1))))
+    if await want("sanguo"):
+        out.append(_claim_group(req, "sanguo", "三国领奖 act=8",
+                                await mt.sanguo_claim(_session, req.get("sanguo_id", 0))))
     return {"ok": True, "items": out}
+
+
+@app.post("/api/match/sanguo-auto")
+async def match_sanguo_auto(req: dict | None = None):
+    """三国闯关（sanguo act=11）：内部先读 act=16 真实阵容再提交，**消耗闯关次数**。
+
+    走后端拼装是为了遵守「参数取真实值」铁律：cats/eqs 一律来自当次 act=16 的 elf_list，
+    不靠前端猜。只在用户主动点子块按钮时才调。
+    """
+    if err := _require_login():
+        return err
+    req = req or {}
+    levelid = req.get("levelid")
+    if levelid is None:
+        return {"ok": False, "message": "缺少 levelid"}
+    try:
+        lu = await mt.sanguo_lineup(_session, int(levelid))
+        d = lu.get("data") if isinstance(lu.get("data"), dict) else {}
+        lcode = d.get("code") if isinstance(d, dict) else lu.get("code")
+        if lcode not in (0, None):
+            desc = (d or {}).get("desc") if isinstance(d, dict) else lu.get("desc")
+            return {"ok": False, "message": f"阵容读取失败 code={lcode} {desc or ''}".strip()}
+        elves = (d or {}).get("elf_list") or [] if isinstance(d, dict) else []
+        if not elves:
+            return {"ok": False, "message": "该关卡没有可用阵容"}
+        cats = [int(e.get("id")) for e in elves]
+        eqs: list = []
+        for e in elves:
+            eqs.extend(int(x) for x in (e.get("equip_list") or []))
+        if len(eqs) != len(cats) * 4:
+            return {"ok": False, "message": f"阵容装备数量异常 cats={len(cats)} eqs={len(eqs)}"}
+        r = await mt.sanguo_run(_session, int(levelid), cats, eqs, req.get("mode", 0))
+        return {"ok": True, "levelid": int(levelid), "cats": cats,
+                "eqs": eqs, "eq_count": len(eqs), "result": r}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
 
 
 @app.post("/api/match/pvp-fight")
