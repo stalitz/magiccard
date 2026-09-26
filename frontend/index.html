@@ -714,47 +714,6 @@
       <div id="pane-overview" class="pane">
         <div class="cards-grid">
           <div class="stat-card">
-            <h3>每日玩法（猫窝）</h3>
-            <div class="mode-grid" id="home-box">
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">点赞（每天各 1 次）</span></div>
-                <div class="state-box"><span id="home-like-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="lib-toolbar"><button id="home-like" class="btn sm ok">一键点赞</button></div>
-              </div>
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">扭蛋机</span></div>
-                <div class="state-box"><span id="home-gacha-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="lib-toolbar">
-                  <button id="home-gacha" class="btn sm ok">免费抽一次</button>
-                  <button id="home-candy" class="btn sm">兑换大糖果（6 积分）</button>
-                </div>
-                <div class="hint" style="padding:0 8px 6px">大糖果 = 喂猫 +50 心情；糖果不够时先兑换再喂。</div>
-              </div>
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">猫咪玩耍（目标心情 80+）</span></div>
-                <div class="state-box"><span id="home-cat-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="lib-toolbar"><button id="home-feed" class="btn sm ok">一键喂到 80</button></div>
-                <div class="hint" style="padding:0 8px 6px">小 +10 / 中 +20 / 大 +50，自动选浪费最少的组合。</div>
-              </div>
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">竞技比赛（自动）</span></div>
-                <div class="state-box"><span id="home-arena-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="lib-toolbar"><button id="home-arena" class="btn sm danger">自动竞技（低战力挑战 + 领奖）</button></div>
-                <div class="hint" style="padding:0 8px 6px">每天 4 次挑战 + 4 次免费刷对手；没有更低战力就自动刷新。</div>
-              </div>
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">金币福利</span></div>
-                <div class="state-box"><span id="home-gold-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="hint" style="padding:0 8px 6px">红宝石 id=2，用 10000 金币兑；兑换动作的接口还没抓到包，暂只能看状态。</div>
-              </div>
-              <div class="lst mode-card">
-                <div class="lst-head"><span class="t">衣柜锻造（每天选 1 件）</span></div>
-                <div class="state-box"><span id="home-forge-st" style="grid-column:1/-1">读取中…</span></div>
-                <div class="hint" style="padding:0 8px 6px">锻造动作的接口还没抓到包，暂只能按服务端原样返回的 forge 字段挑出数值最小的一件。</div>
-              </div>
-            </div>
-          </div>
-          <div class="stat-card">
             <h3>游戏数据</h3>
             <div id="state-box" class="state-box">
               <span class="spinner"></span>正在读取游戏数据…
@@ -1333,6 +1292,48 @@
             <button id="match-modes-refresh" class="btn sm">刷新其他玩法</button>
           </div>
 
+          <div class="stat-card" style="flex:0 0 auto">
+            <h3>每日玩法（猫窝）</h3>
+            <div class="mode-grid" id="home-box">
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">点赞（每天各 1 次）</span></div>
+                <div class="state-box"><span id="home-like-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="lib-toolbar"><button id="home-like" class="btn sm ok">一键点赞</button></div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">扭蛋机</span></div>
+                <div class="state-box"><span id="home-gacha-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="lib-toolbar">
+                  <button id="home-gacha" class="btn sm ok">免费抽一次</button>
+                  <button id="home-candy" class="btn sm">兑换大糖果（6 积分）</button>
+                </div>
+                <div class="hint" style="padding:0 8px 6px">大糖果 = 喂猫 +50 心情；糖果不够时先兑换再喂。</div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">猫咪玩耍（目标心情 80+）</span></div>
+                <div class="state-box"><span id="home-cat-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="lib-toolbar"><button id="home-feed" class="btn sm ok">一键喂到 80</button></div>
+                <div class="hint" style="padding:0 8px 6px">小 +10 / 中 +20 / 大 +50，自动选浪费最少的组合。</div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">竞技比赛（自动）</span></div>
+                <div class="state-box"><span id="home-arena-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="lib-toolbar"><button id="home-arena" class="btn sm danger">自动竞技（低战力挑战 + 领奖）</button></div>
+                <div class="hint" style="padding:0 8px 6px">每天 4 次挑战 + 4 次免费刷对手；没有更低战力就自动刷新。</div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">金币福利</span></div>
+                <div class="state-box"><span id="home-gold-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="hint" style="padding:0 8px 6px">红宝石 id=2，用 10000 金币兑；兑换动作的接口还没抓到包，暂只能看状态。</div>
+              </div>
+              <div class="lst mode-card">
+                <div class="lst-head"><span class="t">衣柜锻造（每天选 1 件）</span></div>
+                <div class="state-box"><span id="home-forge-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="hint" style="padding:0 8px 6px">锻造动作的接口还没抓到包，暂只能按服务端原样返回的 forge 字段挑出数值最小的一件。</div>
+              </div>
+            </div>
+          </div>
+
           <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1.05">
               <div class="lst" style="max-height:none">
@@ -1419,7 +1420,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926i"></script>
+<script src="/app.js?v=20260926j"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

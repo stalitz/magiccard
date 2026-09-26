@@ -24,9 +24,10 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
 (async () => {
   try { w.eval(appjs); } catch (e) { console.log("注入 app.js 失败:", e.message); process.exit(1); }
 
-  // 走真实入口：切到总览页 → switchPane 钩子里的 initHomeOnce + loadHomeState
+  // 走真实入口：切到「每日比赛」页 → switchPane 钩子里的 initHomeOnce + loadHomeState
+  // （玩法分块属于每日比赛页，练卡总览页不该出现）
   try {
-    await w.eval("(async()=>{ switchPane('overview'); await loadHomeState(); })()");
+    await w.eval("(async()=>{ switchPane('match'); await loadHomeState(); })()");
   } catch (e) { console.log("调用失败:", e.message); }
 
   const box = w.document.getElementById("home-box");
@@ -47,7 +48,8 @@ const assert = (c, m) => { console.log((c ? "  [PASS] " : "  [FAIL] ") + m); if 
 
   console.log("\n断言：");
   assert(!!box, "#home-box 存在");
-  assert(chain.includes("pane-overview"), "挂在总览 pane 内");
+  assert(chain.includes("pane-match"), "挂在「每日比赛」pane 内（不是练卡总览）：" + chain.join(" < "));
+  assert(!chain.includes("pane-overview"), "总览页里没有这个块（练卡总览必须干净）");
   assert(cards.length === 6, `6 个玩法子块（实际 ${cards.length}）`);
   assert(["点赞", "扭蛋机", "猫咪玩耍", "竞技比赛", "金币福利", "衣柜锻造"].every((t) => titles.some((x) => x.includes(t))),
     "5 个玩法标题齐全：" + titles.join("/"));

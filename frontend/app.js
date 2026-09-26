@@ -297,7 +297,7 @@ function switchPane(pane) {
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
-  if (pane === "overview") { ovLoadProps(); initLotteryOnce(); initHomeOnce(); loadHomeState(); }
+  if (pane === "overview") { ovLoadProps(); initLotteryOnce(); }
   if (pane === "lib") initLibOnce();
   if (pane === "cardbox") initCardBoxOnce();
   if (pane === "auto") initAutoOnce();
@@ -308,7 +308,7 @@ function switchPane(pane) {
   else travelStopAuto();
   if (pane === "dig") initDigOnce();
   else digStopPoll();
-  if (pane === "match") initMatchOnce();
+  if (pane === "match") { initMatchOnce(); initHomeOnce(); loadHomeState(); }
   else matchStopPoll();
 }
 document.querySelectorAll(".subnav .btn").forEach((b) => {
