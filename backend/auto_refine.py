@@ -66,6 +66,11 @@ from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_ST
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 MAX_BUY_PER_TICK = 6   # 每 tick 最多买几张底卡，防请求过频（就地买后天然远小于此值）
+# 变卡目标的面额：变出一张 40 面卡，引擎就能直接拿它炼更大面额（用户 2026-09-26 定调
+# 「就变自动炼卡队列里的套卡中 40 面额的卡，缺哪个变哪个」）。
+# ⚠️ 目标**绝不能写死**：写死的 26117 属于 theme 1810「研精覃思」，炼的却是别的套 ——
+#    变出来一张本套用不上的卡，整个环节等于白做（失败还白烧两张源卡）。
+CHANGE_FACE = 40
 # 注：不再有「必须留 N 格才买」的硬门槛。旧版留 2 格导致换卡箱满时引擎彻底停摆；
 # 现在买卡只发生在「这一炉马上要提交」之前，买完立刻入炉（消耗 3 张），净释放 2 格，
 # 所以允许把换卡箱买到刚好满 —— 前提是这一炉确实能提交出去。
@@ -343,6 +348,51 @@ class ThemePlan:
         }
 
 
+def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
+                       pending: Counter | None = None,
+                       keep: set | None = None) -> dict | None:
+    """（纯计算）按「在炼队列 + 实时库存」挑下一步该变哪张卡 —— 变卡目标**不许写死**。
+
+    用户 2026-09-26 定调：「不要指定某个卡，就变自动炼卡队列里的套卡中 40 面额的卡，
+    缺哪个变哪个 —— 变卡是为了不用炼 40 面额，直接变了炼更大面额的卡。」
+    此前写死 26117（theme 1810「研精覃思」），炼的却是别的套，变出来的卡本套用不上。
+
+    挑法（严格 → 兜底，逐级放宽；都不满足返回 None = 本轮不动箱里的礼物卡）：
+      ① 套内卡 ∩ 引擎净需求里**要炼/要买**的卡 ∩ **面额 CHANGE_FACE(40)**
+      ② ①为空时放宽到「套内卡 ∩ 净需求」（那一套里没有 40 面卡可补）
+    同分时：需求张数多的优先，再按队列顺序（多套并行时不让第一套独吞）。
+    """
+    if not queue:
+        return None
+    if keep is None:
+        keep = {cid for t in queue for cid in plans[t].ids}
+    stock = stock or Counter()
+    pending = pending or Counter()
+    cards = plans[queue[0]].cards                    # 全局卡表，各套共用
+
+    def face(cid: int) -> int:
+        c = cards.get(int(cid))
+        return int(c[3] or 0) if c else 0
+
+    strict, loose = [], []                           # (需求张数, 队列序, cid)
+    for order, tid in enumerate(queue):
+        runs, buy = plans[tid].net_plan(stock, pending)
+        for cid, n in {**runs, **buy}.items():
+            if cid not in keep or not int(n or 0):
+                continue                             # 必须是套内卡，且引擎确实还缺
+            row = (int(n), order, int(cid))
+            (strict if face(cid) == CHANGE_FACE else loose).append(row)
+    cands = sorted(strict or loose, key=lambda x: (-x[0], x[1], x[2]))
+    if not cands:
+        return None
+    n, order, cid = cands[0]
+    tid = queue[order]
+    plan = plans[tid]
+    return {"dst": cid, "name": plan.cname(cid), "face": face(cid),
+            "times": n, "tid": tid, "theme": plan.name,
+            "target": f'{plan.cname(cid)}（{plan.name} {face(cid)}面，还差 {n}）'}
+
+
 # ---------------------------------------------------------------------
 # 引擎
 # ---------------------------------------------------------------------
@@ -436,6 +486,21 @@ class AutoRefine:
         p = self.plans[tid or self.tids[0]]
         return p.net_plan(stock, pending)
 
+    @staticmethod
+    def _stock_from(st: dict | None) -> Counter:
+        """从 mainpage 解析结果里数库存（换卡箱 + 保险箱，不含炉内在炼的）。"""
+        c: Counter = Counter()
+        for k in ("change", "store"):
+            for x in (st or {}).get(k) or []:
+                c[int(x["id"])] += 1
+        return c
+
+    def _pick_change_dst(self, stock: Counter | None = None) -> dict | None:
+        """自动挑「变卡目标」= `pick_change_target`（本引擎的队列 + 最近库存）。"""
+        return pick_change_target(self.plans, self.queue,
+                                  self._stock if stock is None else stock,
+                                  self._pending, set(self._keep))
+
     def _dst_useful(self, dst: int) -> bool:
         """`dstid` 是不是当前队列**用得上的卡**（套内卡或配方链上任意一层）。
 
@@ -515,9 +580,16 @@ class AutoRefine:
                     steps.append({"action": "翻牌", "ok": dr.get("ok"), "detail": detail})
                     self._log("翻牌", bool(dr.get("ok")), detail)
 
+        # 1.4) 收卡刚把新的成品卡放进箱子 —— 变卡目标必须按**最新**缺口挑：用 tick
+        #      开头那份库存会低估（挑中一张其实已经收到的卡，白烧一张源卡）。
+        #      这一步顺带给第 2 步提供数据，所以闭合时没有额外请求。
+        rd_now = None
+        if self.box_gift_change or self.gift_drain:
+            rd_now = await self._read_state()
+
         # 1.45) 卡箱里已有的礼物套 48 面卡 → 就地变卡（不收礼，见 _drain_box_gift）
         if self.box_gift_change:
-            await self._drain_box_gift(steps)
+            await self._drain_box_gift(steps, rd_now[1] if rd_now else None)
 
         # 1.5) 礼物箱快满 → 收礼 + 变卡成目标卡（可选环节）
         #      变出来的 40 面卡直接进卡箱 → 下面第 2 步重读状态时就当素材了，
@@ -527,7 +599,7 @@ class AutoRefine:
 
         # 2) 重新取状态（收卡后库存变了）。mainpage 偶发 code=-1（服务端抖动），
         #    重试一次再放弃，避免白丢一个 tick。
-        rd = await self._read_state() or await self._read_state()
+        rd = rd_now or await self._read_state() or await self._read_state()
         if rd is None:
             self._log("读取卡箱", False, "重读失败，本轮跳过")
             return steps
@@ -771,7 +843,7 @@ class AutoRefine:
             return None
         return st, stock, slots, pending, need_cnt, need_buy
 
-    async def _drain_box_gift(self, steps: list[dict]) -> None:
+    async def _drain_box_gift(self, steps: list[dict], stock: Counter | None = None) -> None:
         """卡箱里已有的礼物套 48 面卡 → 就地变卡，**不收礼**。
 
         与 _gift_drain 相互独立（不受 gift_drain 开关约束）：礼物收进来产出的
@@ -782,17 +854,30 @@ class AutoRefine:
         门槛（2026-09-26 真机实测补充）：**变卡失败也消耗源卡**（箱里 8 张，尝试 3 次
         只成 1 张，箱里当场剩 5 张），所以每 tick 只试一次，且只在 dstid **确实是当前
         队列用得上的卡**时才动手 —— 变出一张用不上的卡，等于拿 2 张礼物卡换 1 张废卡。
+
+        目标来源（2026-09-26 用户定调）：**不再写死** `gift_dst`。变卡的意义是「省掉炼
+        40 面额这一步」，目标必须是**当前在炼的那套里的 40 面卡、且引擎正缺的那张**
+        —— 所以这里交给 `_pick_change_dst()` 按实时缺口挑（缺哪个变哪个）。
         """
         if self._box_gift_fail >= 2 or time.time() < self._box_gift_cooldown:
             return
-        if not self._dst_useful(int(self.gift_dst)):
+        if stock is None:
+            stock = self._stock
+        pick = self._pick_change_dst(stock)
+        if not pick:
+            self.box_gift_last = {"ok": True, "skipped": True, "inbox": 0, "tried": 0,
+                                  "changed": 0, "dst": None,
+                                  "message": "当前没有缺的套内卡（40 面优先），本轮不消耗卡箱里的礼物卡"}
             return
+        dst = int(pick["dst"])
         try:
-            r = await gf.drain_box_gift_cards(self.s, dstid=int(self.gift_dst))
+            r = await gf.drain_box_gift_cards(self.s, dstid=dst)
         except Exception as e:  # noqa: BLE001
             self._log("礼物卡变卡", False, f"异常：{e}")
             steps.append({"action": "礼物卡变卡", "ok": False, "detail": str(e)})
             return
+        r["dst"] = dst
+        r["target"] = pick.get("target")
         self.box_gift_last = r
         if r.get("skipped"):
             self._box_gift_fail = 0            # 箱里没卡 = 正常，不累计
@@ -813,15 +898,27 @@ class AutoRefine:
 
         只在「箱件数 ≥ upper」时才动，变卡约 50% 成功、失败不阻塞 —— 所以这里
         除了写日志不改变 tick 的成败，绝不让炼卡主流程因为变卡失败而中断。
+
+        变卡目标同样不写死：走 `_pick_change_dst()`（缺哪个套内 40 面卡变哪个），
+        和上面「卡箱礼物卡变卡」保持同一口径 —— 否则收礼变出的卡不属于在炼的那套，
+        等于白烧礼物卡。一条都挑不出来时本环节直接跳过。
         """
+        pick = self._pick_change_dst(self._stock)
+        if not pick:
+            self.gift_last = {"ok": True, "skipped": True, "took": 0, "changed": 0,
+                              "dst": None,
+                              "message": "当前没有缺的套内卡（40 面优先），收礼变卡跳过"}
+            return
         try:
-            r = await gf.drain_gift_box(self.s, dstid=int(self.gift_dst),
+            r = await gf.drain_gift_box(self.s, dstid=int(pick["dst"]),
                                         upper=int(self.gift_upper),
                                         lower=int(self.gift_lower))
         except Exception as e:  # noqa: BLE001
             self._log("礼物变卡", False, f"异常：{e}")
             steps.append({"action": "礼物变卡", "ok": False, "detail": str(e)})
             return
+        r["dst"] = int(pick["dst"])
+        r["target"] = pick.get("target")
         self.gift_last = r
         if not r.get("ok"):
             self._log("礼物变卡", False, r.get("message") or "失败")
@@ -1090,6 +1187,9 @@ class AutoRefine:
         self._task = None
 
     def status(self) -> dict:
+        # 变卡目标按**最近一次读到的库存**实时挑（与 tick 里同一函数同一口径），
+        # 面板就能显示「下一步会变哪张 40 面卡」，而不是写死的 dst。
+        pick = self._pick_change_dst(self._stock)
         # 队列里每一套都按**最近一次读到的库存**算净需求 —— 追加新套卡后
         # 也能立刻显示真实缺口，而不是「全套从零」的静态数字。
         if self._stock or self._pending:
@@ -1107,11 +1207,21 @@ class AutoRefine:
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,
-                "gift": {"enabled": self.gift_drain, "dst": self.gift_dst,
+                "gift": {"enabled": self.gift_drain,
+                         "dst": pick["dst"] if pick else None,
+                         "dst_name": pick["name"] if pick else "",
+                         "dst_face": pick["face"] if pick else 0,
+                         "dst_theme": pick["theme"] if pick else "",
+                         "target": (pick.get("target") if pick else ""),
                          "upper": self.gift_upper, "lower": self.gift_lower,
                          "last": self.gift_last},
-                "box_gift": {"enabled": self.box_gift_change, "dst": self.gift_dst,
-                             "useful": self._dst_useful(int(self.gift_dst)),
+                "box_gift": {"enabled": self.box_gift_change,
+                             "dst": pick["dst"] if pick else None,
+                             "dst_name": pick["name"] if pick else "",
+                             "dst_face": pick["face"] if pick else 0,
+                             "dst_theme": pick["theme"] if pick else "",
+                             "target": (pick.get("target") if pick else ""),
+                             "useful": bool(pick),
                              "cooldown_remain": max(0, int(self._box_gift_cooldown - time.time())),
                              "last": self.box_gift_last},
                 "steal": {"enabled": self.steal_enabled,

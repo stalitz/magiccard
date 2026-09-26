@@ -58,6 +58,10 @@ SEND_LIMIT = 30
 # 变卡默认目标（HAR 实证：srcid=7773 → dstid=26117 涡旋仪，40 面卡）。
 # 用户可在 UI 改成自己正在炼的套卡对应的 40 面卡 id。
 DEFAULT_CHANGE_DST = 26117
+# ⚠️ DEFAULT_CHANGE_DST 只是**手动按钮**的兜底值，自动炼卡流程**不许用它**：
+#    2017 卡 26117 属 theme 1810「研精覃思」，而引擎炼的常常是别的套 ——
+#    变出一张本套用不上的卡，这个环节就是白做（失败还白烧两张源卡）。
+#    自动流程的目标由 auto_refine._pick_change_dst() 按「队列里缺哪张套内 40 面卡」挑。
 # 礼物卡 itemid（freegift_take 产出，可作变卡 srcid）。
 # ⚠️ **不固定**：产出哪个 id 取决于该礼物的 freegift_id 与 action，实测：
 #   freegift_id=81 + action=2 → 7773(蚕丝)；82 + action=2 → 7775(金丝线)；
@@ -455,6 +459,7 @@ async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANG
     inbox = len(pool)
     if not inbox:
         return {"ok": True, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
+                "dst": dstid,
                 "message": "卡箱里没有礼物套的 48 面卡"}
     tried = changed = 0
     last = ""

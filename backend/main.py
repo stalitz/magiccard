@@ -1218,20 +1218,66 @@ async def gift_take_api(body: dict):
         return {"ok": False, "message": f"收礼异常：{e}"}
 
 
+@app.get("/api/gift/change_target")
+async def gift_change_target_api(tids: str = ""):
+    """只读：按「在炼队列（或 tids 指定的套卡）+ 实时库存」算下一步**会自动变哪张卡**。
+
+    面板用它显示自动变卡目标（`_pick_change_dst` 同一口径），**不消耗任何卡**。
+    tids 省略时用当前引擎队列；引擎没启动也没关系（这里只做纯计算）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        from .auto_refine import pick_change_target
+        ids = [int(x) for x in re.split(r"[,\s]+", (tids or "").strip()) if x.strip().isdigit()]
+        if not ids and _auto:
+            ids = list(_auto.queue)
+        if not ids:
+            return {"code": 0, "ok": False, "tids": [], "pick": None,
+                    "message": "没有在炼的套卡队列（启动自动炼卡，或传 tids=1652,1810）"}
+        eng = AutoRefine(None, ids)        # 只为纯计算挑目标，不需要登录态
+        mp = await _session.post(EP_MAINPAGE, code="", opuin=_session.uin)
+        if mp.get("code") != 0:
+            return {"code": -1, "message": "读取卡箱状态失败"}
+        st = parse_full(mp.get("raw", ""))
+        stock: Counter = Counter()
+        for c in st["change"] + st["store"]:
+            stock[c["id"]] += 1
+        pending: Counter = Counter(c["id"] for c in st["stove"] if c["id"] > 0)
+        pick = pick_change_target(eng.plans, eng.queue, stock, pending, set(eng._keep))
+        return {"code": 0, "ok": bool(pick), "tids": ids, "queue": list(eng.queue),
+                "pick": pick, "message": (pick or {}).get("target", "当前不缺套内卡，本轮不动箱里的礼物卡")}
+    except Exception as ex:  # noqa: BLE001
+        return {"code": -1, "message": f"计算异常：{ex}"}
+
+
 @app.post("/api/gift/box_change")
 async def gift_box_change_api(body: dict | None = None):
     """用**卡箱里已有的**礼物套 48 面卡就地变卡（不收礼）。会消耗 1 张源卡。
 
     这就是自动炼卡里「卡箱优先变卡」那一步的手动入口（2026-09-26 用户反馈：以前
     箱里躺着礼物送的 48 面卡一张都没被用，变卡只认 freegift_take 收出来的那张）。
-    body: {"dstid": 目标卡}  默认 26117（40 面涡旋仪）。变卡约 50% 成功。
+    body: {"dstid": 目标卡}。省略 / 填 0 = **自动挑**「当前在炼的套卡里缺的那张 40 面卡」
+    （同一个口径见 auto_refine.pick_change_target），与自动流程保持一致 —— 写死某个卡
+    很容易变成「变出来的卡不属于在炼的那套」，白烧一张源卡。变卡约 50% 成功。
     """
     if err := _require_login():
         return err
     b = body or {}
     try:
-        return await gf.drain_box_gift_cards(
-            _session, int(b.get("dstid") or gf.DEFAULT_CHANGE_DST))
+        dstid = int(b.get("dstid") or 0)
+        if not dstid:
+            from .auto_refine import pick_change_target
+            eng = _auto
+            pick = (pick_change_target(eng.plans, eng.queue, eng._stock, eng._pending,
+                                       set(eng._keep)) if eng else None)
+            if not pick:
+                return {"ok": False, "skipped": True, "message": (
+                    "当前没有缺的套内卡（40 面优先），不动手" if _auto else
+                    "自动炼卡没启动，没有在炼的套卡队列 —— 不知道该变哪张卡；"
+                    "先启动自动炼卡，或手动传 dstid")}
+            dstid = int(pick["dst"])
+        return await gf.drain_box_gift_cards(_session, dstid)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"变卡异常：{e}"}
 
