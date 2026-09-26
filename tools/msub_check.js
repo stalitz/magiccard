@@ -75,8 +75,12 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(resEl && resEl.closest("#match-sub-bar"), "状态文字 #match-res 已并入 tab 条");
   assert(w.document.querySelectorAll("#match-sub-bar .tab").length === 6, "tab 条 6 个子玩法 tab");
   ["match-runall", "match-dressrace", "match-race", "match-dress",
-    "match-claim-all", "match-equip", "match-refresh"].forEach((id) =>
+    "match-equip", "match-refresh"].forEach((id) =>
     assert(inSub(id, "race"), `#${id} 归位到「出战（比赛）」子模块`));
+  // 一键领奖跨 6 个玩法，不属于单一子玩法 → 放「猫窝日常」主界面
+  assert(inSub("claim-all", "home"), "#claim-all 归位到「猫窝日常」主界面");
+  assert(!w.document.querySelector("#match-claim-all"),
+    "出战面板不再挂 match-claim-all（已改名 claim-all 并移走）");
 
   console.log("== 首次进入：只加载「猫窝日常」 ==");
   calls.length = 0;

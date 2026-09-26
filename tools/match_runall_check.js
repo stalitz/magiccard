@@ -89,7 +89,7 @@ const boundIds = new Set([...appjs.matchAll(/bind\("([\w-]+)"/g)].map((m) => m[1
 const unbound = btnIds.filter((id) => !boundIds.has(id));
 console.log("   页面按钮 " + btnIds.length + " 个，其中 bind 过 " + btnIds.filter((i) => boundIds.has(i)).length + " 个");
 assert(!/feedAllCats/.test(appjs), "已移除绑到不存在函数的「一键喂到 80」死按钮");
-for (const id of ["match-runall", "match-race", "match-dress", "match-dressrace", "match-claim-all"]) {
+for (const id of ["match-runall", "match-race", "match-dress", "match-dressrace", "claim-all"]) {
   assert(btnIds.includes(id), `页面有按钮 #${id}`);
   assert(boundIds.has(id), `#${id} 已 bind`);
 }
@@ -114,7 +114,9 @@ setTimeout(async () => {
   const ra = calls.filter((c) => c.url.includes("/api/match/run-all"));
   assert(ra.length === 1, "调用了一次 /api/match/run-all");
   const ca = calls.filter((c) => c.url.includes("/api/match/claim-all"));
-  assert(ca.length >= 1, "打完顺带调用了 /api/match/claim-all 领奖");
+  assert(ca.length === 0, `一键比赛不再顺带领奖（实际调了 ${ca.length} 次 /api/match/claim-all）`);
+  assert(!/顺带领取各玩法奖励/.test(appjs), "confirm 文案已去掉「顺带领取各玩法奖励」");
+  assert(!/打满今日场次 \+ 领奖/.test(appjs), "按钮 idle 文案已去掉「+ 领奖」");
   const logs = w.document.querySelector("[data-mlog]").textContent;
   assert(/一键比赛/.test(logs), "比赛日志里有一键比赛记录");
   assert(/打了\s*2\s*场|打了 2 场/.test(logs) || /一键比赛\] 完成/.test(logs), "日志记录了场次与剩余次数");

@@ -4131,11 +4131,11 @@ function initMatchOnce() {
     restore();
   });
   // 一键比赛：打满今日剩余场次 + 顺带领奖（会消耗 performe_num，函数内已有 confirm）
-  bind("match-runall", (b) => busyBtn(b, "比赛进行中…", "一键比赛（打满今日场次 + 领奖）")(runAllMatch()));
+  bind("match-runall", (b) => busyBtn(b, "比赛进行中…", "一键比赛（打满今日场次）")(runAllMatch()));
   bind("match-race", (b) => busyBtn(b, "出战中…", "打一场（当前装）")(raceOnce()));
   bind("match-dress", (b) => busyBtn(b, "计算中…", "最优穿搭建议")(equipBest()));
   bind("match-dressrace", (b) => busyBtn(b, "出战中…", "按最优装打一场")(equipThenRace()));
-  bind("match-claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖")(claimOnly()));
+  bind("claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（各玩法奖励，零消耗）")(claimOnly()));
   // 各子玩法的刷新按钮
   bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
   bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
@@ -4278,8 +4278,8 @@ function raceLine(r) {
 
 async function runAllMatch() {
   const before = (matchState && matchState.performe_num) || 0;
-  if (!confirm(`一键比赛将连续打完今日剩余场次（当前剩余 ${before} 次），并顺带领取各玩法奖励。\n`
-    + "会真实消耗比赛次数，确认继续？")) return;
+  if (!confirm(`一键比赛将连续打完今日剩余场次（当前剩余 ${before} 次）。\n`
+    + "上台奖励由系统自动发放，本操作不再去领其他玩法的奖；会真实消耗比赛次数，确认继续？")) return;
   mlog("[一键比赛] 开始：先读主题与最优穿装，再逐场出战…", "ok");
   const r = await fetch("/api/match/run-all", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -4297,8 +4297,8 @@ async function runAllMatch() {
     for (const x of races) mlog("[一键比赛] 第 " + (races.indexOf(x) + 1) + " 场 " + raceLine(x), "ok");
   }
   mlog(`[一键比赛] 完成：打了 ${r.ran || races.length} 场，剩余次数 ${r.left_before ?? "-"} → ${r.left_after ?? "-"}`, "ok");
-  // 领奖零消耗，打完顺手领
-  await claimOnly();
+  // 注意：不打这里领奖。一键比赛只管出战，奖励上台后系统自动发；
+  // 跨玩法的一键领奖在「猫窝日常」页，由用户自己决定要不要领。
   await loadMatchState(true);
   await loadMatchTheme();
 }
