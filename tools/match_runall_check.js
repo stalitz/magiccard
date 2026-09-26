@@ -75,7 +75,7 @@ for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
 assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
 assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
 assert(!!w.document.querySelector('#msub-home #home-all'), "猫窝一键按钮在猫窝面板里");
-assert(!!$("match-runall") && !$("match-runall").closest(".msub"), "一键比赛按钮在全局工具栏（不属于某个子面板）");
+assert(!!$("match-runall") && !!$("match-runall").closest("#msub-race"), "一键比赛按钮归位在「出战（比赛）」子面板");
 assert(!!$("match-theme-box"), "存在主题卡容器 #match-theme-box");
 assert(!!$("match-log-box"), "存在出战记录容器 #match-log-box");
 assert(!!w.document.querySelector("[data-mlog]"), "右侧比赛日志容器 #match-mlog-box[data-mlog] 存在");

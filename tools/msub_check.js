@@ -69,9 +69,11 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(inSub("match-modes-box", "modes"), "各玩法一键在 msub-modes 内");
 
   // 按钮归属（2026-09-26 定调）：顶部工具栏一个按钮都不留，功能按钮全部下沉到所属子模块
-  const topBar = w.document.querySelector("#pane-match > .lib > .lib-toolbar");
-  const topBtns = topBar ? topBar.querySelectorAll("button").length : -1;
-  assert(topBtns === 0, `顶部工具栏不留按钮（当前 ${topBtns} 个）`);
+  const topBtns = w.document.querySelectorAll("#pane-match > .lib > .lib-toolbar button").length;
+  assert(topBtns === 0, `一级工具栏不留按钮（当前 ${topBtns} 个）`);
+  const resEl = w.document.getElementById("match-res");
+  assert(resEl && resEl.closest("#match-sub-bar"), "状态文字 #match-res 已并入 tab 条");
+  assert(w.document.querySelectorAll("#match-sub-bar .tab").length === 6, "tab 条 6 个子玩法 tab");
   ["match-runall", "match-dressrace", "match-race", "match-dress",
     "match-claim-all", "match-equip", "match-refresh"].forEach((id) =>
     assert(inSub(id, "race"), `#${id} 归位到「出战（比赛）」子模块`));

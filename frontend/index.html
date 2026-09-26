@@ -49,11 +49,18 @@
   /* 比赛页子玩法 tab：猫窝日常是主界面（默认），比赛只是子玩法之一 */
   .msub{display:none}
   .msub.on{display:block}
-  .msub-bar{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:0 0 12px}
-  .msub-bar .tab{flex:0 0 auto;padding:8px 16px;font-size:13px;border-bottom:none;
-    border-right:1px solid var(--line);border-radius:0}
-  .msub-bar .tab:last-child{border-right:0}
-  .msub-bar .tab.active{background:#f0f7ff}
+  .msub-bar{display:flex;align-items:stretch;flex:0 0 auto;position:relative;
+    background:var(--panel);border-radius:8px 8px 0 0;overflow:hidden;margin:0 0 12px;
+    box-shadow:0 1px 0 var(--qq-blue)}
+  .msub-bar .tab{flex:0 0 auto;padding:9px 16px;font-size:13.5px;font-weight:500;
+    background:transparent;border:none;border-right:1px solid var(--line);border-radius:0;
+    color:var(--muted);cursor:pointer;white-space:nowrap}
+  .msub-bar .tab:hover{color:var(--qq-blue-d);background:#f5faff}
+  .msub-bar .tab.active{background:var(--qq-blue);color:#fff;font-weight:600}
+  .msub-bar .tab:last-of-type{border-right:0}
+  /* 状态文字贴右端，跟着 tab 条走（不再单独占一行状态条） */
+  .msub-bar .res{margin-left:auto;align-self:center;padding:0 14px;font-size:12px;
+    color:var(--muted);white-space:nowrap}
   .msub-hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
   /* 键值行：分行 + 分隔线，key 灰、value 加粗，不再堆在一起 */
   .rv{display:flex;align-items:baseline;gap:10px;padding:4px 2px;border-bottom:1px solid var(--line)}
@@ -1327,11 +1334,6 @@
       </div>
       <div id="pane-match" class="pane match-pane hidden">
         <div class="lib">
-          <div class="lib-toolbar" style="gap:10px;flex-wrap:wrap;align-items:center">
-            <span style="font-weight:600;font-size:13.5px">每日比赛：</span>
-            <span id="match-res" style="font-size:12px;color:var(--muted)"></span>
-          </div>
-
           <div class="msub-bar" id="match-sub-bar">
             <button class="tab active" data-msub="home">猫窝日常</button>
             <button class="tab" data-msub="race">出战（比赛）</button>
@@ -1339,6 +1341,7 @@
             <button class="tab" data-msub="union">工会 · 金卡</button>
             <button class="tab" data-msub="gvg">公会战 · 西游三国</button>
             <button class="tab" data-msub="modes">各玩法一键</button>
+            <span class="res" id="match-res"></span>
           </div>
           <div class="msub-hint">猫窝日常是本页主界面；切到哪个子玩法才拉哪个的接口，停在哪个就刷新哪个。</div>
 
@@ -1536,7 +1539,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260926x"></script>
+<script src="/app.js?v=20260926y"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
