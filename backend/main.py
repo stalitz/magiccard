@@ -2281,23 +2281,26 @@ async def match_gvg():
 
 
 @app.get("/api/match/sanguo")
-async def match_sanguo():
-    """西游三国（card_worldsanguo act=1）。只读。"""
+async def match_sanguo(want_task: int = 0):
+    """三国战役（card_worldsanguo act=1）。只读。
+
+    与「西游记」(/api/match/explore) 是**两个独立玩法**，各自一个 tab。
+    """
     if err := _require_login():
         return err
     try:
-        return await mt.sanguo_state(_session)
+        return await mt.sanguo_state(_session, want_task=bool(want_task))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
 
 @app.get("/api/match/explore")
-async def match_explore():
-    """世界探索（card_worldexplore act=1）。只读。"""
+async def match_explore(want_task: int = 0):
+    """西游记（card_worldexplore act=1）。只读。"""
     if err := _require_login():
         return err
     try:
-        return await mt.explore_state(_session)
+        return await mt.explore_state(_session, want_task=bool(want_task))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
@@ -2557,7 +2560,7 @@ async def match_mode_props(mode: str = "", levelid: int = 0):
 
 @app.get("/api/match/sanguo-extra")
 async def match_sanguo_extra(levelid: int = 0):
-    """西游三国：任务（act=7）+ 关卡（act=9）+ 阵容（act=16）。只读。"""
+    """三国战役：任务（act=7）+ 关卡（act=9）+ 阵容（act=16）。只读。"""
     if err := _require_login():
         return err
     return {"ok": True,

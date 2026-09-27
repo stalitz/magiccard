@@ -65,7 +65,8 @@ EP_TRAVEL_MATCH = "card_travel_elf_competition"  # 每日比赛（猫咪旅行·
 #                                  act=14,uins=… → 批量查成员所属工会
 EP_TRAVEL_PVP = "card_travel_elf_pvp"
 EP_TRAVEL_UNION = "card_travel_elf_union"
-EP_WORLD_SANGUO = "card_worldsanguo"       # 西游三国（bisai.har 实证 act=1/7/9）
+EP_WORLD_SANGUO = "card_worldsanguo"       # 三国战役（bisai.har 实证 act=1/7/9）；
+                                           # 与 EP_WORLD_EXPLORE（西游记）是**两个独立玩法**
 EP_WORLD_EXPLORE = "card_worldexplore"     # 世界探索（act=1 布阵 / act=15 任务 / act=22 data）
 # ⚠️ 关卡参数名是**全小写** levelid（不是 levelId / level_id）—— 用 levelId 一律
 #    返 -40006「错误的关卡ID」，改 levelid=101 才通。

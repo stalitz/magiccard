@@ -242,7 +242,10 @@ async def union_gvg(session) -> dict:
 
 
 async def sanguo_state(session, want_task: bool = False) -> dict:
-    """西游三国（card_worldsanguo act=1，约 18KB）。只读。
+    """三国战役（card_worldsanguo act=1，约 18KB）。只读。
+
+    与 explore_state（西游记 / card_worldexplore）是**两个独立玩法**，不要合并显示。
+    这里 levelId 是**关卡号**（西游同字段是 maxLevelId 上限）。
 
     act=1 主界面：levelId / freenum(每日免费次数) / passId / talent_score /
     talent_rate / formation(12 条技能等级) / logData(86 条关卡记录，含
@@ -254,11 +257,11 @@ async def sanguo_state(session, want_task: bool = False) -> dict:
     try:
         r1 = await session.post(EP_WORLD_SANGUO, act=1, opuin=_plain_uin(session))
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"请求西游三国异常：{e}"}
+        return {"ok": False, "message": f"请求三国战役异常：{e}"}
     d = await _json_of(r1)
     if not d:
         return {"ok": False, "code": r1.get("code"),
-                "message": r1.get("message") or "读取西游三国失败"}
+                "message": r1.get("message") or "读取三国战役失败"}
     out = {"ok": True, "code": r1.get("code")}
     for k in ("levelId", "passId", "freenum", "buynum", "talent_score", "talent_rate",
               "levelData", "formation", "logData", "travel_elf_arr", "img_items",
@@ -278,12 +281,18 @@ async def sanguo_state(session, want_task: bool = False) -> dict:
     return out
 
 
-async def explore_state(session) -> dict:
-    """世界探索（card_worldexplore act=1）。只读。
+async def explore_state(session, want_task: bool = False) -> dict:
+    """西游记大地图（card_worldexplore act=1）。只读。
 
-    HAR 实测：currLevelData(当前关卡 stepData) / logData / formationList(布阵,
-    含 catid/ce/eqlist) / freepowerbit / luckydata / shoplist / 各类 box 数据。
-    act=15 是每日任务（task_detail），act=22 返回 117 条 data。
+    ⚠️ 命名纠偏（2026-09-27）：本端点 = **西游记**（XiYouModule，小地图＝套卡
+    1604..1611），与下面的 `sanguo_state` = **三国战役**（SanGuoModule，套卡
+    1745..1756）是**两个完全独立的玩法**，共用同族接口结构但端点和关卡体系不同，
+    之前前端把两者合称「西游三国」是错的。
+
+    act=1 只读：currLevelData(当前关卡 stepData) / logData / formationList(布阵,
+    含 catid/ce/eqlist) / freepowerbit / luckydata / shoplist / 各类 box / 材料
+    (nlb/sjb/txd) / maxLevelId。
+    want_task=True 会顺带拉 act=15（task_detail 每日任务）。
     """
     try:
         r1 = await session.post(EP_WORLD_EXPLORE, act=1, opuin=_plain_uin(session))
@@ -299,6 +308,15 @@ async def explore_state(session) -> dict:
               "maxLevelId", "nlb", "sjb", "txd", "guide", "newbiebit", "suitcard"):
         if k in d:
             out[k] = d[k]
+    if want_task:
+        try:
+            t = await explore_task(session)
+            dd = t.get("data") or {}
+            if isinstance(dd, dict):
+                out["task_bits"] = dd.get("task_bits")
+                out["task_detail"] = dd.get("task_detail")
+        except Exception as e:  # noqa: BLE001
+            out["task_err"] = str(e)
     return out
 
 
@@ -1150,7 +1168,7 @@ async def explore_rank(session) -> dict:
     return await _act(session, EP_WORLD_EXPLORE, 28)
 
 
-# ---------- 西游三国 ----------
+# ---------- 三国战役（card_worldsanguo，与西游记 card_worldexplore 是不同玩法）----------
 
 async def sanguo_task(session) -> dict:
     """三国任务（sanguo act=7）。读：task_detail。"""

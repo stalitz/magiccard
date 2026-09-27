@@ -3340,7 +3340,10 @@ async function initChangeForm() {
 
 let matchState = null, matchTheme = null, matchPvp = null, matchUnion = null,
     matchGold = null, matchGvg = null, matchSanguo = null, matchModes = null,
-    matchUnionExtra = null;   // 工会任务/碎片/商店（union act=15/16/30）
+    matchUnionExtra = null,   // 工会任务/碎片/商店（union act=15/16/30）
+    matchXiyou = null,        // 西游记（worldexplore act=1）
+    matchXiyouTeam = null,    // 西游记 布阵/记录（act=1 同包，前端切分展示）
+    matchSanguoLevels = null; // 三国战役关卡列表（sanguo act=9）
 let matchSubTimer = null;
 
 // ---- 每日比赛页的子模块：每个子模块 = 一组相关卡片 + 自己的接口 ----
@@ -3524,7 +3527,9 @@ const MODE_RELOAD = {
 
 // ---- 以下函数自 5e57348 恢复（08f8db1 误删；猫窝日常=主界面，比赛是子玩法）----
 
-const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "modes"];
+// ⚠️ 西游记（xiyou / card_worldexplore）与三国战役（sanguo / card_worldsanguo）
+// 是**两个独立玩法**——之前前端把它们合称「西游三国」挤在一个 tab 里，2026-09-27 拆开。
+const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "xiyou", "sanguo", "modes"];
 const MATCH_SUB_LOAD = {
   // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
   home: () => { loadHomeState(); loadMatchState(); },
@@ -3532,7 +3537,11 @@ const MATCH_SUB_LOAD = {
   race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
   pvp: () => { loadMatchPvp(); },
   union: () => { loadMatchUnion(); loadMatchUnionExtra(); loadMatchGold(); },
-  gvg: () => { loadMatchGvg(); loadMatchUnionExtra(); loadMatchSanguo(); },
+  gvg: () => { loadMatchGvg(); loadMatchUnionExtra(); },
+  // 西游记：小程序地图（8 张小地图＝套卡 1604..1611），只拉本玩法自己的接口
+  xiyou: () => { loadMatchXiyou(); },
+  // 三国战役：9 张小地图＝套卡 1745..1756；关卡表 act=9 一次只读，切 tab 不重复打
+  sanguo: () => { loadMatchSanguo(true); if (!matchSanguoLevels) loadMatchSanguoLevels(); },
   modes: () => { loadMatchModes(); loadMatchLog(); },
 };
 
@@ -3845,11 +3854,99 @@ async function loadMatchGvg() {
   if (!r || r.ok === false) mlogFail("公会战", r);
 }
 
-async function loadMatchSanguo() {
-  const r = await fetch("/api/match/sanguo").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+async function loadMatchSanguo(withTask = false) {
+  const url = "/api/match/sanguo" + (withTask ? "?want_task=1" : "");
+  const r = await fetch(url).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchSanguo = r;
   renderMatchSanguo();
-  if (!r || r.ok === false) mlogFail("西游三国", r);
+  if (!r || r.ok === false) mlogFail("三国战役", r);
+}
+
+// ---------- 西游记（worldexplore act=1）· 与三国战役完全独立的玩法 ----------
+async function loadMatchXiyou(withTask = false) {
+  const url = "/api/match/explore" + (withTask ? "?want_task=1" : "");
+  const r = await fetch(url).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchXiyou = r;
+  renderMatchXiyou();
+  renderMatchXiyouTeam();
+  if (!r || r.ok === false) mlogFail("西游记", r);
+}
+
+function renderMatchXiyou() {
+  const box = $("match-xiyou-box"), cnt = $("match-xiyou-cnt");
+  const d = matchXiyou || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const cur = (d.currLevelData || [])[0] || {};
+  const logs = d.logData || [];
+  const steps = cur.stepData || [];
+  const got = steps.filter((s) => s && s.isget).length;
+  const logGot = logs.filter((g) => g && (g.passData || {}).isget).length;
+  cnt.textContent = `关卡 ${cur.levelid ?? "-"} · 材料 ${d.nlb ?? "-"}/${d.sjb ?? "-"}`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("当前关卡 levelid（currLevelData）", cur.levelid) +
+    matchRow("关卡 type / 剩余 time / targetbit",
+      `${cur.type ?? "-"} / ${cur.time ?? "-"} / ${cur.targetbit ?? "-"}`) +
+    matchRow("当前关 stepData 已收", `${got} / ${steps.length || "-"}`) +
+    matchRow("记录 logData", logs.length ? `${logs.length} 关，已过 ${logGot} 关` : "-") +
+    matchRow("宝箱 ex / new / safe", `${d.ex_box_num ?? "-"} / ${d.new_box_num ?? "-"} / ${d.safe_box_num ?? "-"}`) +
+    matchRow("材料 nlb / sjb / txd", `${d.nlb ?? "-"} / ${d.sjb ?? "-"} / ${d.txd ?? "-"}`) +
+    matchRow("关卡上限 maxLevelId", d.maxLevelId) +
+    matchRow("freepowerbit", (d.freepowerbit || []).map((x) => JSON.stringify(x)).join(" ") || "-") +
+    matchRow("luckydata", (d.luckydata || []).map((x) => `id${x.id}=${x.value}`).join("、") || "-") +
+    matchRow("商店 shoplist", (d.shoplist || []).length ? `${(d.shoplist || []).length} 项` : "-") +
+    matchRow("每日任务 task_detail",
+      (d.task_detail || []).length ? `${(d.task_detail || []).length} 项，bits=${d.task_bits || "-"}` : "（未拉）") +
+    `</div>`;
+}
+
+function renderMatchXiyouTeam() {
+  const box = $("match-xiyou-team"), cnt = $("match-xiyou-team-cnt");
+  const d = matchXiyou || {};
+  const fl = d.formationList || [];
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  cnt.textContent = `布阵 ${fl.length} 只`;
+  const rows = fl.map((f) =>
+    `<div class="rv"><span class="k">猫 ${f.catid} · 战力 ${f.ce}</span><span class="v">装 ${f.eqlist || "-"}</span></div>`).join("");
+  box.innerHTML = `<div class="state-box">${rows || "-"}` +
+    `<div class="rv"><span class="k">布阵条数 formationList</span><span class="v">${fl.length}</span></div></div>`;
+}
+
+// 三国战役关卡表（sanguo act=9）：只读，字段语义未证实 → 只报条数与原始关卡号
+async function loadMatchSanguoLevels() {
+  const r = await fetch("/api/match/sanguo-extra?levelid=0")
+    .then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchSanguoLevels = r;
+  renderMatchSanguoLevels();
+}
+
+function renderMatchSanguoLevels() {
+  const box = $("match-sanguo-levels"), cnt = $("match-sanguo-levels-cnt");
+  const d = matchSanguoLevels || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  // act=9 的关卡表是 {levelid: {...}} 字典（不是数组），这里统一成数组再展示
+  const pack = d.levels || {};
+  const raw = pack.data || {};
+  const lv = Array.isArray(raw) ? raw
+    : Object.keys(raw).map((k) => Object.assign({}, raw[k] || {}, { levelid: (raw[k] || {}).levelid ?? k }));
+  cnt.textContent = `${lv.length} 关`;
+  const head = lv.slice(0, 12).map((x) =>
+    `<div class="rv"><span class="k">关卡 ${x.levelid ?? "-"}</span><span class="v">boss ${x.bossid ?? "-"} · 掉 ${x.dropitem || "-"}</span></div>`).join("");
+  box.innerHTML = `<div class="state-box">${head || "-"}` +
+    `<div class="rv"><span class="k">关卡总数（act=9）</span><span class="v">${lv.length}</span></div>` +
+    (lv.length > 12 ? `<div class="empty-tip" style="font-size:12px">只列前 12 条，其余字段原样在 act=9 响应里。</div>` : "") +
+    `</div>`;
 }
 
 async function loadMatchGold() {
@@ -3900,7 +3997,7 @@ async function loadMatchModes() {
   ]);
   matchModes = { comp, pvp, exp, uni, sg };
   renderMatchModes();
-  const names = { comp: "每日比赛", pvp: "竞技场", exp: "世界探索", uni: "工会", sg: "西游三国" };
+  const names = { comp: "每日比赛", pvp: "竞技场", exp: "西游记", uni: "工会", sg: "三国战役" };
   for (const k of Object.keys(matchModes)) {
     if (matchModes[k] && matchModes[k].ok === false) mlogFail(names[k] || k, matchModes[k]);
   }
@@ -3951,16 +4048,17 @@ function renderMatchModes() {
     `<button class="btn sm ok" data-act="mm-claim" data-only="union" data-idle="一键领奖">一键领奖</button>` +
     `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`, "union"));
 
-  // 4) 世界探索：任务 / 队伍 / 商店
-  cards.push(modeCard("世界探索", `任务 ${expDetail.length}`,
+  // 4) 西游记：任务 / 队伍 / 商店（card_worldexplore，与下面的三国战役是不同端点）
+  cards.push(modeCard("西游记", `任务 ${expDetail.length}`,
     matchRow("任务进度", expDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
     matchRow("探索队伍", arrLen((m.exp || {}).team)) +
     matchRow("商店 / 排行", arrLen((m.exp || {}).shop) + " / " + arrLen((m.exp || {}).rank)),
     `<button class="btn sm ok" data-act="mm-claim" data-only="explore" data-idle="一键领奖">一键领奖</button>` +
     `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`, "explore"));
 
-  // 5) 西游三国：任务 / 关卡 / 领奖 / 闯关（消耗，cats+eqs 由后端读 act=16 真实阵容拼装）
-  cards.push(modeCard("西游三国", `关卡 ${sgLevels.length}`,
+  // 5) 三国战役：任务 / 关卡 / 领奖 / 闯关（消耗，cats+eqs 由后端读 act=16 真实阵容拼装）
+  //    ⚠️ 与上面「西游记」(modeCard key=explore) 是两个独立玩法，别再合并命名。
+  cards.push(modeCard("三国战役", `关卡 ${sgLevels.length}`,
     matchRow("任务进度", sgDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
     matchRow("可打关卡", runs.map((l) => l.id).join("、") || "-") +
     matchRow("当前选中", (window.__sgLevelid || (runs[0] && runs[0].id) || "-")),
@@ -4309,12 +4407,15 @@ function initMatchOnce() {
   });
   bind("match-gvg", (b) => busyBtn(b, "读取中…", "刷新公会战")(loadMatchGvg()));
   bind("match-sanguo", async (b) => {
-    const restore = busyBtn(b, "读取中…", "刷新西游三国");
-    const r = await fetch("/api/match/sanguo?want_task=1").then((x) => x.json()).catch(() => null);
-    matchSanguo = r || matchSanguo;
-    renderMatchSanguo();
-    if (!r || r.ok === false) mlogFail("西游三国", r);
-    else mlog("[每日比赛] 西游三国任务已刷新", "ok");
+    const restore = busyBtn(b, "读取中…", "刷新三国战役");
+    await loadMatchSanguo(true);
+    mlog("[每日比赛] 三国战役任务已刷新", "ok");
+    restore();
+  });
+  bind("match-xiyou", async (b) => {
+    const restore = busyBtn(b, "读取中…", "刷新西游记");
+    await loadMatchXiyou(true);
+    mlog("[每日比赛] 西游记已刷新", "ok");
     restore();
   });
   bind("match-modes-refresh", async (b) => {

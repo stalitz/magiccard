@@ -49,7 +49,9 @@
   /* 比赛页子玩法 tab：猫窝日常是主界面（默认），比赛只是子玩法之一 */
   .msub{display:none}
   .msub.on{display:block}
-  .msub-bar{display:flex;align-items:stretch;flex:0 0 auto;position:relative;
+  /* 2026-09-27：tab 已到 8 个（猫窝日常/出战/PVP/工会/公会战/西游记/三国战役/各玩法一键），
+     窄屏下 flex 不换行会被 overflow:hidden 裁掉右侧 tab（旧坑：tab 只剩半截）。 */
+  .msub-bar{display:flex;align-items:stretch;flex:0 0 auto;position:relative;flex-wrap:wrap;
     background:var(--panel);border-radius:8px 8px 0 0;overflow:hidden;margin:0 0 12px;
     box-shadow:0 1px 0 var(--qq-blue)}
   .msub-bar .tab{flex:0 0 auto;padding:9px 16px;font-size:13.5px;font-weight:500;
@@ -1339,7 +1341,9 @@
             <button class="tab" data-msub="race">出战（比赛）</button>
             <button class="tab" data-msub="pvp">PVP 日榜</button>
             <button class="tab" data-msub="union">工会 · 金卡</button>
-            <button class="tab" data-msub="gvg">公会战 · 西游三国</button>
+            <button class="tab" data-msub="gvg">公会战</button>
+            <button class="tab" data-msub="xiyou">西游记</button>
+            <button class="tab" data-msub="sanguo">三国战役</button>
             <button class="tab" data-msub="modes">各玩法一键</button>
             <span class="res" id="match-res"></span>
           </div>
@@ -1495,9 +1499,8 @@
           <div id="msub-gvg" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
               <button id="match-gvg" class="btn sm">刷新公会战</button>
-              <button id="match-sanguo" class="btn sm">刷新西游三国</button>
             </div>
-            <div class="lib-body dg-cols">
+            <div class="lib-body">
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
                   <div class="lst-head"><span class="t">公会战（union act=22）</span>
@@ -1511,13 +1514,52 @@
                   </div>
                 </div>
               </div>
+            </div>
+          </div><!-- /msub-gvg（公会战；西游记/三国战役已在各自 tab 里） -->
+
+          <div id="msub-xiyou" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-xiyou" class="btn sm">刷新西游记</button>
+            </div>
+            <div class="lib-body dg-cols">
+              <div class="dg-col" style="flex:1.15">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">西游记（worldexplore act=1）</span>
+                    <span class="cnt" id="match-xiyou-cnt"></span></div>
+                  <div id="match-xiyou-box">
+                    <div class="state-box"><span class="spinner"></span>正在读取西游记…</div>
+                  </div>
+                </div>
+              </div>
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">西游三国（worldsanguo act=1）</span>
+                  <div class="lst-head"><span class="t">西游记 · 布阵与记录</span>
+                    <span class="cnt" id="match-xiyou-team-cnt"></span></div>
+                  <div id="match-xiyou-team"><div class="state-box">读取中…</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="msub-sanguo" class="msub">
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
+              <button id="match-sanguo" class="btn sm">刷新三国战役</button>
+            </div>
+            <div class="lib-body dg-cols">
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">三国战役（worldsanguo act=1）</span>
                     <span class="cnt" id="match-sanguo-cnt"></span></div>
                   <div id="match-sanguo-box">
-                    <div class="state-box"><span class="spinner"></span>正在读取西游三国…</div>
+                    <div class="state-box"><span class="spinner"></span>正在读取三国战役…</div>
                   </div>
+                </div>
+              </div>
+              <div class="dg-col" style="flex:1">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">三国战役 · 关卡列表（act=9）</span>
+                    <span class="cnt" id="match-sanguo-levels-cnt"></span></div>
+                  <div id="match-sanguo-levels"><div class="state-box">读取中…</div></div>
                 </div>
               </div>
             </div>
@@ -1560,7 +1602,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260927f"></script>
+<script src="/app.js?v=20260927g"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
