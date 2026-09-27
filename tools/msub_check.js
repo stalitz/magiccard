@@ -38,14 +38,16 @@ w.alert = () => {};
 
 const assert = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) process.exitCode = 1; };
 const panel = (k) => w.document.getElementById("msub-" + k);
-const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
+// 2026-09-27：西游记 / 三国战役拆成独立 tab，key 列表要同步
+const SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "xiyou", "sanguo", "modes"];
+const onKeys = () => SUB_KEYS
   .filter((k) => panel(k) && panel(k).classList.contains("on"));
 
 (async () => {
   try { w.eval(appjs); } catch (e) { console.log("注入 app.js 失败:", e.message); process.exit(1); }
 
   console.log("== 子模块结构 ==");
-  const keys = ["home", "race", "pvp", "union", "gvg", "modes"];
+  const keys = SUB_KEYS;
   keys.forEach((k) => assert(!!panel(k), `#msub-${k} 存在`));
   assert(onKeys().join(",") === "home", `默认只显示「猫窝日常」主界面（当前：${onKeys().join(",") || "空"}）`);
 
@@ -73,7 +75,8 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(topBtns === 0, `一级工具栏不留按钮（当前 ${topBtns} 个）`);
   const resEl = w.document.getElementById("match-res");
   assert(resEl && resEl.closest("#match-sub-bar"), "状态文字 #match-res 已并入 tab 条");
-  assert(w.document.querySelectorAll("#match-sub-bar .tab").length === 6, "tab 条 6 个子玩法 tab");
+  assert(w.document.querySelectorAll("#match-sub-bar .tab").length === SUB_KEYS.length,
+    `tab 条 ${SUB_KEYS.length} 个子玩法 tab（含独立的西游记 / 三国战役）`);
   ["match-runall", "match-dressrace", "match-race", "match-dress",
     "match-equip", "match-refresh"].forEach((id) =>
     assert(inSub(id, "race"), `#${id} 归位到「出战（比赛）」子模块`));
@@ -94,7 +97,9 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(calls.some((c) => c.includes("/api/home/state")), "已加载猫窝日常状态");
   assert(!calls.some((c) => c.includes("/api/match/pvp")), "没有抢先加载 PVP 日榜");
   assert(!calls.some((c) => c.includes("/api/match/union")), "没有抢先加载工会");
-  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "没有抢先加载西游三国");
+  // 2026-09-27：西游记 / 三国战役各自一个 tab，进页面不许抢先拉
+  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "没有抢先加载三国战役");
+  assert(!calls.some((c) => c.includes("/api/match/explore")), "没有抢先加载西游记");
 
   console.log("== 点击 tab：切到「PVP 日榜」才拉 PVP ==");
   calls.length = 0;
@@ -105,14 +110,31 @@ const onKeys = () => ["race", "home", "pvp", "union", "gvg", "modes"]
   assert(calls.some((c) => c.includes("/api/match/pvp")), "切过去才拉 PVP 接口");
   assert(!calls.some((c) => c.includes("/api/match/state")), "没把比赛状态又拉一遍");
 
-  console.log("== 点击 tab：公战 / 西游三国 一起 ==");
+  console.log("== 点击 tab：公会战（不再顺带拉三国） ==");
   calls.length = 0;
   try {
     await w.eval("(async()=>{ switchMatchSub('gvg'); await new Promise(r=>setTimeout(r,60)); })()");
   } catch (e) { console.log("  切换失败:", e.message); }
-  assert(onKeys().join(",") === "gvg", "只显示公战子模块");
+  assert(onKeys().join(",") === "gvg", "只显示公会战子模块");
   assert(calls.some((c) => c.includes("/api/match/gvg")), "拉公会战接口");
-  assert(calls.some((c) => c.includes("/api/match/sanguo")), "拉西游三国接口");
+  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "公会战 tab 不再顺带拉三国战役");
+
+  console.log("== 点击 tab：西游记 / 三国战役 各拉各的 ==");
+  calls.length = 0;
+  try {
+    await w.eval("(async()=>{ switchMatchSub('xiyou'); await new Promise(r=>setTimeout(r,60)); })()");
+  } catch (e) { console.log("  切换失败:", e.message); }
+  assert(onKeys().join(",") === "xiyou", "只显示西游记子模块");
+  assert(calls.some((c) => c.includes("/api/match/explore")), "西游记只拉 explore 端点");
+  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "西游记 tab 不碰三国端点");
+
+  calls.length = 0;
+  try {
+    await w.eval("(async()=>{ switchMatchSub('sanguo'); await new Promise(r=>setTimeout(r,60)); })()");
+  } catch (e) { console.log("  切换失败:", e.message); }
+  assert(onKeys().join(",") === "sanguo", "只显示三国战役子模块");
+  assert(calls.some((c) => c.includes("/api/match/sanguo")), "三国战役只拉 sanguo 端点");
+  assert(!calls.some((c) => c.includes("/api/match/explore")), "三国 tab 不碰西游端点");
 
   console.log("== 渲染不报错 ==");
   try {

@@ -64,10 +64,47 @@ const GVGV = {
     gift_record: "1260277398,1292723575,448027192",
   },
 };
+// 西游记（card_worldexplore）与三国战役（card_worldsanguo）是**两个端点、两套字段**，
+// mock 必须分开给，否则断言会拿三国的字段去验西游记。
+const XIYOU = {
+  ok: true, code: 0,
+  currLevelData: [{ formationid: 0, levelid: 2, origin_time: 86400, startts: 1790323040,
+    stepData: [{ getts: 200005, gifts: "121_23200_1", index: 0, isget: 1 }],
+    targetbit: 0, time: 86400, type: 1 }],
+  logData: [{ formationid: 0, levelid: 2, origin_time: 86400, startts: 1790162822,
+    stepData: [{ getts: 200008, gifts: "92_36_4", index: 0, isget: 1 }],
+    targetbit: 0, time: 0, type: 1 }],
+  formationList: [{ catid: 1, ce: 9041, eqlist: "10493,20162,30162,40353", index: 1 }],
+  freepowerbit: [{ bit_1: 0, id_1: 1 }, { bit_2: 0, id_2: 2 }],
+  luckydata: [{ id: 1, value: 66 }, { id: 2, value: 168 }],
+  shoplist: [{ cnt: 0, id: 1 }],
+  ex_box_num: 6, new_box_num: 15, safe_box_num: 17,
+  maxLevelId: 2, nlb: 1825, sjb: 45840, txd: 170, guide: 1, newbiebit: 2, suitcard: [],
+  task_bits: 0, task_detail: [{ type: 1, cnt: 0 }, { type: 2, cnt: 0 }],
+};
+const SANGUO = {
+  ok: true, code: 0, levelId: 204, passId: 0, freenum: 0, buynum: 0,
+  talent_score: 650, talent_rate: 12.0,
+  levelData: [], formation: [{ id: 0, lv: 10 }],
+  logData: [{ bossid: 102, levelid: 102, dropitem: "92_38_6", percent_hp: 62,
+    reduce_hp: 5192, startts: 1790354523, stepData: [],
+    passData: { getts: 0, isget: 0, sitem: "" } }],
+  travel_elf_arr: [], img_items: [], ex_box_num: 6, safe_box_num: 0, shoplist: [],
+  task_bits: 0, task_detail: [{ type: 1, cnt: 0 }],
+};
+// act=9 关卡表是 {levelid: {...}} 字典（不是数组），前端要自己摊平
+const SANGUO_EXTRA = { ok: true,
+  levels: { ok: true, code: 0, data: {
+    101: { levelid: 101, bossid: 101, dropitem: "92_38_6" },
+    102: { levelid: 102, bossid: 102, dropitem: "92_38_5" } } }, lineup: null };
+
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
   const payload = url.includes("/api/home/state") ? HOME_STATE
+    : url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
+    : url.includes("/api/match/explore") ? XIYOU
+    : url.includes("/api/match/sanguo") ? SANGUO
     : url.includes("/api/match/union-extra") ? UNION_EXTRA
     : url.includes("/api/match/union") ? UNION
     : url.includes("/api/match/gvg") ? GVGV
@@ -106,7 +143,14 @@ const $ = (id) => w.document.getElementById(id);
 console.log("\n[1] 子玩法 tab 结构");
 assert(!!$("match-sub-bar"), "二级 tab 栏 #match-sub-bar 存在");
 const tabs = [...w.document.querySelectorAll("#match-sub-bar .tab")].map((b) => b.getAttribute("data-msub"));
-assert(tabs.join(",") === "home,race,pvp,union,gvg,modes", "6 个子玩法 tab，猫窝日常排第一");
+// 2026-09-27：西游记 / 三国战役拆成两个独立 tab（原本挤在「公会战 · 西游三国」里）
+assert(tabs.join(",") === "home,race,pvp,union,gvg,xiyou,sanguo,modes",
+  "8 个子玩法 tab，猫窝日常排第一");
+assert(tabs.indexOf("xiyou") < tabs.indexOf("sanguo"), "西游记在三国战役之前");
+assert(!!$("match-xiyou") && !!$("match-sanguo"), "西游记 / 三国战役的刷新按钮各自独立");
+assert(!!$("match-sanguo-box").closest("#msub-sanguo"), "三国状态块归位在「三国战役」面板");
+assert(!$("msub-gvg").contains($("match-sanguo-box")), "三国状态块没串回公会战面板");
+assert(!!$("match-xiyou-box").closest("#msub-xiyou"), "西游记状态块归位在「西游记」面板");
 for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
 assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
 assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
@@ -196,7 +240,7 @@ setTimeout(async () => {
   // ---- 工会 / 公会战玩法（用户 2026-09-27：「把社团公会玩法做了」）----
   assert(/async def run_union\(/.test(MATCH_SRC), "后端有 run_union() 一键工会编排（领奖→点赞→出兵）");
   assert(/union_run\.json/.test(MATCH_SRC), "工会动作落盘 data/union_run.json（可复查）");
-  assert(/第 2 段＝昵称、第 3 段＝贡献/.test(MATCH_SRC),
+  assert(/只有第 2 段（昵称）与第 3 段（贡献）有实证/.test(MATCH_SRC),
     "成员名册只有实证过的两段被命名，其余段不硬译");
   assert(/\/api\/match\/union-all/.test(MAIN_SRC) && /\/api\/match\/union-claim/.test(MAIN_SRC)
       && /\/api\/match\/union-zan/.test(MAIN_SRC), "工会领奖/点赞/一键工会三个路由齐全");
@@ -223,6 +267,33 @@ setTimeout(async () => {
     "公会战区显示今日已出兵次数：" + $("match-gvg-fightcnt").textContent);
   assert(!/每日上限|上限\s*\d/.test($("match-union-extra-box").textContent),
     "不臆造出兵每日上限（界面不出现「上限 N」这类数字）");
+
+  // ---- 西游记 / 三国战役：两个独立玩法各自一个 tab（2026-09-27）----
+  // 记忆教训：app.js 里的 let 变量外部 eval 赋不进去，必须走 mock fetch 的真实链路
+  w.eval("(async () => { await loadMatchXiyou(true); await loadMatchSanguo(true); await loadMatchSanguoLevels(); })()");
+  await new Promise((r) => setTimeout(r, 60));
+  const xb = $("match-xiyou-box").textContent;
+  const xt = $("match-xiyou-team").textContent;
+  const sg = $("match-sanguo-box").textContent;
+  const lvTxt = $("match-sanguo-levels").textContent;
+  assert(calls.some((c) => c.url.includes("/api/match/explore")), "西游记走自己的 /api/match/explore 端点");
+  assert(calls.some((c) => /\/api\/match\/sanguo\?/.test(c.url)), "三国战役走 /api/match/sanguo（带任务）"
+    + JSON.stringify(calls.map((c) => c.url).filter((u) => u.includes("sanguo"))));
+  assert(/当前关卡 levelid（currLevelData）\s*2/.test(xb), "西游记显示当前关卡：currLevelData.levelid=2");
+  assert(/材料 nlb \/ sjb \/ txd\s*1825 \/ 45840 \/ 170/.test(xb), "西游记显示真实材料数 1825/45840/170");
+  assert(/当前关 stepData 已收\s*1 \/ 1/.test(xb), "西游记统计 stepData 已收 1/1");
+  assert(/记录 logData\s*1 关，已过 0 关/.test(xb), "西游记 logData 统计（'已过'≠'已收'，不混算）");
+  assert(/布阵 1 只/.test($("match-xiyou-team-cnt").textContent) && /猫 1 · 战力 9041/.test(xt),
+    "西游记布阵块列出猫与战力：" + xt.slice(0, 40) + " | cnt=" + $("match-xiyou-team-cnt").textContent);
+  assert(/当前关卡 levelId\s*204/.test(sg) && /每日免费次数 freenum\s*0/.test(sg),
+    "三国战役显示 levelId 204 / freenum 0");
+  assert(/天赋分 \/ 天赋率\s*650 \/ 12/.test(sg), "三国战役显示天赋分/天赋率 650/12");
+  assert(/2 关/.test($("match-sanguo-levels-cnt").textContent), "三国关卡表把字典摊平成 2 关："
+    + $("match-sanguo-levels-cnt").textContent);
+  assert(/关卡 101/.test(lvTxt) && /boss 101/.test(lvTxt), "三国关卡列表显示 bossid：" + lvTxt.slice(0, 40));
+  // 两个玩法绝不能互相串数据
+  assert(!/nlb/.test(sg), "三国面板不出现西游记字段（nlb）");
+  assert(!/levelId/.test(xb), "西游记面板不出现三国字段（levelId）");
 
   assert(!errors.length, "运行期无 JS 报错" + (errors.length ? "：" + errors.slice(0, 2).join(" | ") : ""));
   w.close();
