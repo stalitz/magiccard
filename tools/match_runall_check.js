@@ -143,14 +143,30 @@ const $ = (id) => w.document.getElementById(id);
 console.log("\n[1] 子玩法 tab 结构");
 assert(!!$("match-sub-bar"), "二级 tab 栏 #match-sub-bar 存在");
 const tabs = [...w.document.querySelectorAll("#match-sub-bar .tab")].map((b) => b.getAttribute("data-msub"));
-// 2026-09-27：西游记 / 三国战役拆成两个独立 tab（原本挤在「公会战 · 西游三国」里）
-assert(tabs.join(",") === "home,race,pvp,union,gvg,xiyou,sanguo,modes",
-  "8 个子玩法 tab，猫窝日常排第一");
+// 2026-09-27：① 西游记 / 三国战役拆成两个独立 tab（原本挤在「公会战 · 西游三国」里）
+//             ② 公会战并入工会 tab、删除「各玩法一键」（功能归到各 tab）
+assert(tabs.join(",") === "home,race,pvp,union,xiyou,sanguo", "6 个子玩法 tab，猫窝日常排第一");
+assert(!w.document.getElementById("msub-gvg"), "公会战不再单独占一个 tab");
+assert(!w.document.getElementById("msub-modes"), "「各玩法一键」tab 已删除");
+assert(!!$("match-gvg-box").closest("#msub-union"), "公会战块并进了工会 tab");
+assert(!!w.document.querySelector('#msub-union [data-act="mm-fight-union"]'),
+  "出兵按钮只有公会战块里那一个（工会工具栏不再重复放）");
 assert(tabs.indexOf("xiyou") < tabs.indexOf("sanguo"), "西游记在三国战役之前");
 assert(!!$("match-xiyou") && !!$("match-sanguo"), "西游记 / 三国战役的刷新按钮各自独立");
 assert(!!$("match-sanguo-box").closest("#msub-sanguo"), "三国状态块归位在「三国战役」面板");
-assert(!$("msub-gvg").contains($("match-sanguo-box")), "三国状态块没串回公会战面板");
 assert(!!$("match-xiyou-box").closest("#msub-xiyou"), "西游记状态块归位在「西游记」面板");
+// 「各玩法一键」删掉后，原本只有它有的动作必须能在对应 tab 里找到
+const raceActs = [...w.document.querySelectorAll('#msub-race [data-act="mm-claim"]')]
+  .map((b) => b.getAttribute("data-only"));
+assert(raceActs.indexOf("comp") >= 0, "每日比赛领奖归到「出战（比赛）」tab");
+assert([...w.document.querySelectorAll('#msub-xiyou [data-act="mm-claim"]')]
+  .some((b) => b.getAttribute("data-only") === "explore"), "西游记领奖归到西游记 tab");
+assert([...w.document.querySelectorAll('#msub-sanguo [data-act="mm-claim"]')]
+  .some((b) => b.getAttribute("data-only") === "sanguo"), "三国领奖归到三国 tab");
+assert([...w.document.querySelectorAll('#msub-pvp [data-act]')]
+  .map((b) => b.getAttribute("data-act")).join(",").indexOf("mm-fight-pvp") >= 0,
+  "竞技场挑战/刷对手归到「竞技场 · 日榜」tab");
+assert(!!$("match-pvp-state-box"), "竞技场状态块存在（日榜不再孤零零一个列表）");
 for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
 assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
 assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
@@ -256,7 +272,8 @@ setTimeout(async () => {
   assert(!!w.document.querySelector("#match-union-mem-box [data-zan]"), "成员行有「赞」按钮");
   // 工会任务 / 碎片 / 商店三块
   const ux = $("match-union-extra-box").textContent;
-  assert(/今日已出兵次数/.test(ux) && /\b1\b/.test(ux), "工会任务块显示今日已出兵次数");
+  // 「今日已出兵次数」两处同一个 num，合并后只在公会战块显示一次（去重）
+  assert(!/今日已出兵次数/.test(ux), "工会任务块不再重复显示出兵次数（与公会战块去重）");
   assert(/工会资金（act=16 data）11234/.test(ux), "工会资金显示真实值 11234");
   assert(/工会商店（act=30）/.test(ux) && /80/.test(ux), "工会商店列出商品消耗");
   // 公会战：进度对比条 + 今日已出兵次数

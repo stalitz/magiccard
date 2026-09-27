@@ -39,7 +39,8 @@ w.alert = () => {};
 const assert = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) process.exitCode = 1; };
 const panel = (k) => w.document.getElementById("msub-" + k);
 // 2026-09-27：西游记 / 三国战役拆成独立 tab，key 列表要同步
-const SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "xiyou", "sanguo", "modes"];
+// 公会战并入工会、「各玩法一键」删除 → 6 个 tab
+const SUB_KEYS = ["home", "race", "pvp", "union", "xiyou", "sanguo"];
 const onKeys = () => SUB_KEYS
   .filter((k) => panel(k) && panel(k).classList.contains("on"));
 
@@ -67,8 +68,8 @@ const onKeys = () => SUB_KEYS
   assert(inSub("home-box", "home"), "猫窝 daily 在 msub-home 内");
   assert(inSub("match-pvp-box", "pvp"), "PVP 日榜在 msub-pvp 内");
   assert(inSub("match-union-box", "union"), "工会在 msub-union 内");
-  assert(inSub("match-gvg-box", "gvg"), "公会战在 msub-gvg 内");
-  assert(inSub("match-modes-box", "modes"), "各玩法一键在 msub-modes 内");
+  assert(inSub("match-gvg-box", "union"), "公会战合并进 msub-union（不再单独一个 tab）");
+  assert(inSub("match-pvp-state-box", "pvp"), "竞技场状态在 msub-pvp 内（与日榜同 tab）");
 
   // 按钮归属（2026-09-26 定调）：顶部工具栏一个按钮都不留，功能按钮全部下沉到所属子模块
   const topBtns = w.document.querySelectorAll("#pane-match > .lib > .lib-toolbar button").length;
@@ -108,16 +109,18 @@ const onKeys = () => SUB_KEYS
   } catch (e) { console.log("  切换失败:", e.message); }
   assert(onKeys().join(",") === "pvp", `只显示 PVP 子模块（当前：${onKeys().join(",")}）`);
   assert(calls.some((c) => c.includes("/api/match/pvp")), "切过去才拉 PVP 接口");
+  assert(calls.some((c) => c.includes("/api/match/pvp-extra")), "同时拉竞技场状态（日榜 + 次数/对手）");
   assert(!calls.some((c) => c.includes("/api/match/state")), "没把比赛状态又拉一遍");
 
-  console.log("== 点击 tab：公会战（不再顺带拉三国） ==");
+  console.log("== 点击 tab：工会（含公会战，一个 tab 一次拉全） ==");
   calls.length = 0;
   try {
-    await w.eval("(async()=>{ switchMatchSub('gvg'); await new Promise(r=>setTimeout(r,60)); })()");
+    await w.eval("(async()=>{ switchMatchSub('union'); await new Promise(r=>setTimeout(r,60)); })()");
   } catch (e) { console.log("  切换失败:", e.message); }
-  assert(onKeys().join(",") === "gvg", "只显示公会战子模块");
-  assert(calls.some((c) => c.includes("/api/match/gvg")), "拉公会战接口");
-  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "公会战 tab 不再顺带拉三国战役");
+  assert(onKeys().join(",") === "union", "只显示工会子模块");
+  assert(calls.some((c) => c.includes("/api/match/union")), "拉工会接口");
+  assert(calls.some((c) => c.includes("/api/match/gvg")), "同时拉公会战（合并进同一 tab）");
+  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "工会 tab 不拉三国战役");
 
   console.log("== 点击 tab：西游记 / 三国战役 各拉各的 ==");
   calls.length = 0;
@@ -138,10 +141,11 @@ const onKeys = () => SUB_KEYS
 
   console.log("== 渲染不报错 ==");
   try {
-    await w.eval("(async()=>{ await loadMatchState(true); await loadMatchPvp(); await loadMatchUnion();"
-      + " await loadMatchGold(); await loadMatchGvg(); await loadMatchSanguo();"
-      + " await loadMatchModes(); await loadMatchLog(); renderMatchState(); })()");
-    assert(true, "8 个渲染函数全部跑通，无异常");
+    await w.eval("(async()=>{ await loadMatchState(true); await loadMatchPvp(); await loadMatchPvpExtra();"
+      + " await loadMatchUnion(); await loadMatchGold(); await loadMatchGvg();"
+      + " await loadMatchXiyou(); await loadMatchSanguo(); await loadMatchSanguoLevels();"
+      + " await loadMatchLog(); renderMatchState(); })()");
+    assert(true, "10 个渲染函数全部跑通，无异常（modes 已删）");
   } catch (e) { assert(false, "渲染抛错：" + e.message); }
 
   assert(errors.length === 0, "无 jsdom 运行时错误" + (errors.length ? "：" + errors.slice(0, 3).join(" | ") : ""));

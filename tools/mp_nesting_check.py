@@ -58,11 +58,19 @@ else:
         print(f"   {k} -> {v}")
     c.errs.append("msub 祖先链不一致")
 
-# app.js 里 modeCard 的模板：div 数量必须自洽
-tmpl = appjs[appjs.index("function modeCard"):appjs.index("async function loadMatchModes")]
+# 「各玩法一键」tab 已删（2026-09-27），modeCard 模板随之移除 —— 改为校验
+# 承接它的三国闯关按钮模板（data-act 委托，div 必须配平）。
+_i = appjs.index("function renderMatchSanguoLevels")
+tmpl = appjs[_i:_i + 2200]
 opens = tmpl.count("<div") + tmpl.count("<span") - tmpl.count("</div>") - tmpl.count("</span>")
-print("modeCard 模板 opens-closes =", opens, "（其余为 title/cnt 插值，0 表示配平）")
+print("renderMatchSanguoLevels 模板 opens-closes =", opens, "（0 表示配平）")
 
-for need in ['class="mp-tip"', 'class="mp-body"', 'id="mp-${mode}"', 'data-act="mm-props"', 'data-act="mm-reload"']:
+for need in ['data-act="mm-run-sg"', 'data-idle="闯关 L${x.levelid}"', '关卡总数（act=9）']:
     print(f"  含 {need}:", need in tmpl)
+# 已删的 modes tab 不能留下任何残留（按钮/元素/函数）
+for gone in ["match-modes-box", "match-modes-cnt", "loadMatchModes", "renderMatchModes", "modeCard(", "mm-props", "mm-reload"]:
+    if gone in html or gone in appjs:
+        print(f"  ✗ 残留 {gone}")
+        c.errs.append(f"残留 {gone}")
+print("  各玩法一键残留检查：", "无" if not [e for e in c.errs if "残留" in e] else "有")
 print("index.html 版本：", [l for l in html.splitlines() if "app.js?v=" in l])

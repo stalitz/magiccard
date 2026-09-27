@@ -62,6 +62,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await send("Page.navigate", { url: URL_PAGE });
   await sleep(2500);
 
+  // LIVE=1：不注入 mock，直接看**服务端真实数据**渲染出来的样子（需要服务端已登录）
+  if (process.env.LIVE) {
+    console.log("[LIVE] 用真实接口渲染，不 mock");
+  } else {
   // 注入 mock：不登录也能看到两个玩法的真实字段（结构与 /api 实际返回一致）
   await evaluate(`(() => {
     const XIYOU = { ok:true, code:0,
@@ -95,6 +99,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         : url.includes("/api/match/gvg") ? { ok:true, code:0, data:{level:8,inlv:8,levelgetbits:",10100,20100",
             e_name:"夜半钟声到客船",e_progress:595420,enemy_uinon:21718,progress:478555,
             level_rank_bit:252,level_rank_bit2:0,season_gift:0,ts:1787673667,gift_record:"1260277398"} }
+        : url.includes("/api/match/pvp-extra") ? { ok:true, code:0,
+            state:{ok:true,code:0,data:{surplus:2,free_pvp_num:4,pvp_num:0,flush_num:1,
+              score:1902,revenge_num:0,battle_arr:[3,4,2],
+              enemy_list:[{uin:10012,name:"沧海月明",ce:312232798},{uin:10015,name:"倚栏听风雨",ce:312196611}]}},
+            store:{ok:true,code:0,data:{list:[{id:1,cnt:0}]}} }
         : url.includes("/api/match/pvp") ? { ok:true, code:0, list:[], total:0, my_score:0, my_ce:0, zan_bit:0 }
         : url.includes("/api/match/state") ? { ok:true, code:0, cats:[{elf_id:3,level:20,mood:85,equip:[]}],
             performe_num:2, races:[] }
@@ -103,8 +112,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     };
     "injected";
   })()`);
+  }
 
-  const measure = async (key, file) => {
+  const measure = async (key, file, boxId, cntId) => {
     await evaluate(`(async () => {
       switchPane('match');
       switchMatchSub(${JSON.stringify(key)});
@@ -118,15 +128,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const barR = bar.getBoundingClientRect();
       const tabs = [...bar.querySelectorAll('.tab')];
       const p = document.getElementById('msub-${key}').getBoundingClientRect();
-      const box = document.getElementById('match-${key === 'xiyou' ? 'xiyou' : key === 'sanguo' ? 'sanguo' : key}-box');
+      const box = document.getElementById(${JSON.stringify(boxId)});
       return {
         barW: Math.round(barR.width), barH: Math.round(barR.height),
         barScrollW: bar.scrollWidth, barClientW: bar.clientWidth,
         tabCount: tabs.length,
         lastTabRight: Math.round(tabs[tabs.length - 1].getBoundingClientRect().right),
         paneW: Math.round(p.width), paneVisible: p.width > 300 && p.height > 80,
-        cnt: (document.getElementById('match-${key === 'xiyou' ? 'xiyou-cnt' : key === 'sanguo' ? 'sanguo-cnt' : key + '-cnt'}') || {}).textContent || "",
-        boxText: box ? box.textContent.slice(0, 120) : "(no box)",
+        cnt: (document.getElementById(${JSON.stringify(cntId)}) || {}).textContent || "",
+        boxText: box ? box.textContent.slice(0, 110) : "(no box)",
       };
     })()`);
     console.log(`\n[${key}] ` + JSON.stringify(m, null, 1));
@@ -134,9 +144,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     fs.writeFileSync(`${OUT}/${file}.png`, Buffer.from(shot.result.data, "base64"));
   };
 
-  await measure("gvg", "gvg");
-  await measure("xiyou", "xiyou");
-  await measure("sanguo", "sanguo");
+  // 2026-09-27 整理后：6 个 tab（公会战并入工会、各玩法一键删除）
+  await measure("pvp", "pvp", "match-pvp-state-box", "match-pvp-state-cnt");
+  await measure("union", "union", "match-gvg-box", "match-gvg-cnt");
+  await measure("xiyou", "xiyou", "match-xiyou-box", "match-xiyou-cnt");
+  await measure("sanguo", "sanguo", "match-sanguo-box", "match-sanguo-cnt");
   console.log("\n截图已存到 " + OUT);
   ws.close();
   process.exit(0);
