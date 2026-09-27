@@ -1435,8 +1435,7 @@
               </div>
             </div>
           </div>
-        </div>
-          </div>
+          </div><!-- /msub-race（此处不能多关一层：再关会把 .lib 提前闭合，导致后面所有 msub 塌出布局） -->
 
           <div id="msub-pvp" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
@@ -1539,7 +1538,8 @@
                 </div>
               </div>
             </div>
-          </div>
+          </div><!-- /msub-modes -->
+          </div><!-- /.lib（所有 msub 子页都收在里面；.mlog-col 是它的兄弟） -->
 
         <!-- 右侧常驻：只记每日比赛页内各玩法的操作与结果（与总览页全局日志互相独立） -->
         <div class="mlog-col">
