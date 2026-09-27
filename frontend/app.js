@@ -3339,8 +3339,9 @@ async function initChangeForm() {
 // 后端 backend/match.py；未证实语义的字段一律原样透出，不做中文硬译。
 
 let matchState = null, matchTheme = null, matchPvp = null, matchUnion = null,
-    matchGold = null, matchGvg = null, matchSanguo = null, matchModes = null,
+    matchGold = null, matchGvg = null, matchSanguo = null,
     matchUnionExtra = null,   // 工会任务/碎片/商店（union act=15/16/30）
+    matchPvpExtra = null,     // 竞技场状态（pvp act=1：surplus/对手/score）
     matchXiyou = null,        // 西游记（worldexplore act=1）
     matchXiyouTeam = null,    // 西游记 布阵/记录（act=1 同包，前端切分展示）
     matchSanguoLevels = null; // 三国战役关卡列表（sanguo act=9）
@@ -3457,38 +3458,6 @@ function renderMatchLog() {
 // ===================== 各玩法子块（每块各自一键） =====================
 
 // 数组长度：接口各端点字段层级不一（data.list / data.data / ...），统一兜底
-function arrLen(x) {
-  const o = x || {};
-  const d = o.data || {};
-  if (Array.isArray(d.list)) return d.list.length;
-  if (Array.isArray(d.data)) return d.data.length;
-  if (Array.isArray(o.list)) return o.list.length;
-  return "-";
-}
-
-// 单个玩法子块：标题 + 计数 + 信息行 + 该玩法专属按钮（走 data-act 全局委托）
-function modeCard(title, cnt, rows, acts, mode) {
-  // mode 有值 => 该子块带上「本玩法的状态属性」折叠区 + 只刷本块的刷新按钮。
-  // 展开状态记在 window.__mpOpen，定时刷新重渲染后不会被收起。
-  window.__mpOpen = window.__mpOpen || {};
-  const open = !!(mode && window.__mpOpen[mode]);
-  const pd = mode ? (window.__modeProps || {})[mode] : null;
-  const btnTxt = open ? (pd && pd.ok ? `收起（${pd.total}）` : "收起") : "状态属性";
-  const tip = mode ? `<div class="mp-tip">` +
-    `<button class="btn sm ghost" data-act="mm-props" data-mode="${mode}" data-idle="${btnTxt}">${btnTxt}</button>` +
-    `<button class="btn sm ghost" data-act="mm-reload" data-mode="${mode}" data-idle="刷新本块">刷新本块</button>` +
-    `</div>` : "";
-  return `<div class="lst mode-card">` +
-    `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
-    `<div class="state-box">${rows || "-"}</div>` +
-    tip +
-    (mode ? `<div class="mp-body" id="mp-${mode}"${open ? "" : " hidden"}></div>` : "") +
-    (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
-    `</div>`;
-}
-
-// ===================== 各玩法子块（每块各自一键） =====================
-
 // 数组长度：接口各端点字段层级不一（data.list / data.data / ...），统一兜底
 function arrLen(x) {
   const o = x || {};
@@ -3501,48 +3470,27 @@ function arrLen(x) {
 
 
 
-// 本玩法状态属性：每个子块单独展示自己玩法的字段（后端 /api/match/mode-props 分组返回）
-
-
-// 只刷新某一个玩法子块（不影响其他块）
-const MODE_RELOAD = {
-  comp: "/api/match/comp-extra",
-  pvp: "/api/match/pvp-extra",
-  union: "/api/match/union-extra",
-  explore: "/api/match/explore-extra",
-  sanguo: "/api/match/sanguo-extra?levelid=" + (window.__sgLevelid || 101),
-};
-
-// 子块一键领奖：only 填空即全量（原「一键领奖（全玩法）」也走这里）
-
-
-
-
-// data-act 委托（document 级，只绑一次）：新增子块/按钮无需再改 bind 列表
-
-// 全量一键领奖：与子块「一键领奖」同一端点，only 传空 = 全跑
-
-
-
-
 // ---- 以下函数自 5e57348 恢复（08f8db1 误删；猫窝日常=主界面，比赛是子玩法）----
 
 // ⚠️ 西游记（xiyou / card_worldexplore）与三国战役（sanguo / card_worldsanguo）
 // 是**两个独立玩法**——之前前端把它们合称「西游三国」挤在一个 tab 里，2026-09-27 拆开。
-const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "gvg", "xiyou", "sanguo", "modes"];
+// 2026-09-27 二次整理：
+//  · 公会战并进「工会 · 公会战」（原本两个 tab 内容高度重复：都显示出兵与今日次数）
+//  · 「各玩法一键」删除 —— 领奖/刷对手/挑战/闯关已归到各玩法自己的 tab
+//  · PVP 日榜 tab 改「竞技场 · 日榜」，并入竞技场状态与操作（日榜只是其中一个视图）
+const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "xiyou", "sanguo"];
 const MATCH_SUB_LOAD = {
   // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
   home: () => { loadHomeState(); loadMatchState(); },
   // 出战记录（#match-log-box）就在本面板，必须一起拉，否则永远停在「读取中…」
   race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
-  pvp: () => { loadMatchPvp(); },
-  union: () => { loadMatchUnion(); loadMatchUnionExtra(); loadMatchGold(); },
-  gvg: () => { loadMatchGvg(); loadMatchUnionExtra(); },
+  pvp: () => { loadMatchPvp(); loadMatchPvpExtra(); },
+  // 工会 / 公会战 / 金卡限购 一个面板一起拉（公会战 act=22 依赖工会数据）
+  union: () => { loadMatchUnion(); loadMatchUnionExtra(); loadMatchGold(); loadMatchGvg(); },
   // 西游记：小程序地图（8 张小地图＝套卡 1604..1611），只拉本玩法自己的接口
   xiyou: () => { loadMatchXiyou(); },
   // 三国战役：9 张小地图＝套卡 1745..1756；关卡表 act=9 一次只读，切 tab 不重复打
   sanguo: () => { loadMatchSanguo(true); if (!matchSanguoLevels) loadMatchSanguoLevels(); },
-  modes: () => { loadMatchModes(); loadMatchLog(); },
 };
 
 let homeInited = false;
@@ -3598,6 +3546,40 @@ function renderMatchPvp() {
           </div>`;
         }).join("")
       : `<div class="empty-tip">榜单为空</div>`) +
+    `</div>`;
+}
+
+// 竞技场状态（pvp act=1）：次数口径与 cathome 一致，surplus=剩余、free_pvp_num=每日 4
+async function loadMatchPvpExtra() {
+  const r = await fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchPvpExtra = r;
+  renderMatchPvpState();
+  if (!r || r.ok === false) mlogFail("竞技场", r);
+}
+
+function renderMatchPvpState() {
+  const box = $("match-pvp-state-box"), cnt = $("match-pvp-state-cnt");
+  const d = matchPvpExtra || {};
+  const st = (d.state || {}).data || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const enemies = st.enemy_list || [];
+  cnt.textContent = `剩余 ${st.surplus ?? "-"} / 每日免费 ${st.free_pvp_num ?? "-"}`;
+  const store = (d.store || {}).data || {};
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("今日剩余场次 surplus", st.surplus) +
+    matchRow("每日免费 free_pvp_num", st.free_pvp_num) +
+    matchRow("付费次数 pvp_num", st.pvp_num) +
+    matchRow("已刷对手 flush_num", st.flush_num) +
+    matchRow("我的积分 score", st.score) +
+    matchRow("可复仇 revenge_num", st.revenge_num) +
+    matchRow("当前对手（前 3）",
+      enemies.slice(0, 3).map((e) => `${e.name || e.uin}(${e.ce ?? "-"})`).join("、") || "-") +
+    matchRow("竞技场商店（act=? store）", (store.list || []).length ? `${(store.list || []).length} 项` : "-") +
+    `<div class="empty-tip" style="font-size:12px">battle_arr=[${(st.battle_arr || []).join(",")}] 语义未定位，只记录不解读。</div>` +
     `</div>`;
 }
 
@@ -3663,7 +3645,7 @@ function renderMatchUnionExtra() {
   const items = sh.data || sh || [];
   if (cnt) cnt.textContent = `任务次数 ${t.num ?? "-"} · 工会资金 ${ch.data ?? "-"}`;
   box.innerHTML = `<div class="state-box">` +
-    matchRow("今日已出兵次数 num", t.num ?? "-") +
+    // 「今日已出兵次数」改由下方公会战块统一显示（两处同一个 num，不再重复）
     matchRow("任务位 bits / 重置位", `${t.bits ?? "-"} / ${t.resetnum ?? "-"}`) +
     matchRow("工会资金（act=16 data）", ch.data ?? "-") +
     matchRow("工会商店（act=30）", (Array.isArray(items) && items.length)
@@ -3943,10 +3925,15 @@ function renderMatchSanguoLevels() {
   cnt.textContent = `${lv.length} 关`;
   const head = lv.slice(0, 12).map((x) =>
     `<div class="rv"><span class="k">关卡 ${x.levelid ?? "-"}</span><span class="v">boss ${x.bossid ?? "-"} · 掉 ${x.dropitem || "-"}</span></div>`).join("");
+  // 闯关按钮从「各玩法一键」搬到这里：合法关卡 id 从 101 起（1~9 会被判「错误的关卡ID」）
+  const runs = lv.filter((x) => Number(x.levelid) >= 101).slice(0, 3);
   box.innerHTML = `<div class="state-box">${head || "-"}` +
     `<div class="rv"><span class="k">关卡总数（act=9）</span><span class="v">${lv.length}</span></div>` +
     (lv.length > 12 ? `<div class="empty-tip" style="font-size:12px">只列前 12 条，其余字段原样在 act=9 响应里。</div>` : "") +
-    `</div>`;
+    `</div>` +
+    (runs.length ? `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
+      runs.map((x) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${x.levelid}" data-idle="闯关 L${x.levelid}">闯关 L${x.levelid}（消耗）</button>`).join("") +
+      `<span class="hint" style="font-size:12px">闯关会消耗次数（先喂猫到 80 再上阵）。</span></div>` : "");
 }
 
 async function loadMatchGold() {
@@ -3965,148 +3952,6 @@ function arrLen(x) {
   if (Array.isArray(d.data)) return d.data.length;
   if (Array.isArray(o.list)) return o.list.length;
   return "-";
-}
-
-function modeCard(title, cnt, rows, acts, mode) {
-  // mode 有值 => 该子块带上「本玩法的状态属性」折叠区 + 只刷本块的刷新按钮。
-  // 展开状态记在 window.__mpOpen，定时刷新重渲染后不会被收起。
-  window.__mpOpen = window.__mpOpen || {};
-  const open = !!(mode && window.__mpOpen[mode]);
-  const pd = mode ? (window.__modeProps || {})[mode] : null;
-  const btnTxt = open ? (pd && pd.ok ? `收起（${pd.total}）` : "收起") : "状态属性";
-  const tip = mode ? `<div class="mp-tip">` +
-    `<button class="btn sm ghost" data-act="mm-props" data-mode="${mode}" data-idle="${btnTxt}">${btnTxt}</button>` +
-    `<button class="btn sm ghost" data-act="mm-reload" data-mode="${mode}" data-idle="刷新本块">刷新本块</button>` +
-    `</div>` : "";
-  return `<div class="lst mode-card">` +
-    `<div class="lst-head"><span class="t">${title}</span><span class="cnt">${cnt || ""}</span></div>` +
-    `<div class="state-box">${rows || "-"}</div>` +
-    tip +
-    (mode ? `<div class="mp-body" id="mp-${mode}"${open ? "" : " hidden"}></div>` : "") +
-    (acts ? `<div class="lib-toolbar">${acts}</div>` : "") +
-    `</div>`;
-}
-
-async function loadMatchModes() {
-  const [comp, pvp, exp, uni, sg] = await Promise.all([
-    fetch("/api/match/comp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
-    fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false })),
-    fetch("/api/match/explore-extra").then((x) => x.json()).catch(() => ({ ok: false })),
-    fetch("/api/match/union-extra").then((x) => x.json()).catch(() => ({ ok: false })),
-    fetch("/api/match/sanguo-extra").then((x) => x.json()).catch(() => ({ ok: false })),
-  ]);
-  matchModes = { comp, pvp, exp, uni, sg };
-  renderMatchModes();
-  const names = { comp: "每日比赛", pvp: "竞技场", exp: "西游记", uni: "工会", sg: "三国战役" };
-  for (const k of Object.keys(matchModes)) {
-    if (matchModes[k] && matchModes[k].ok === false) mlogFail(names[k] || k, matchModes[k]);
-  }
-}
-
-function renderMatchModes() {
-  const box = $("match-modes-box"), cnt = $("match-modes-cnt");
-  if (!box) return;
-  const m = matchModes || {};
-  const sc = ((m.comp || {}).score || {}).data || {};
-  const hero = ((m.comp || {}).hero || {}).data || {};
-  const pv = ((m.pvp || {}).state || {}).data || {};
-  const enemies = pv.enemy_list || [];
-  const expTask = ((m.exp || {}).task || {}).data || {};
-  const expDetail = expTask.task_detail || [];
-  const uniTask = ((m.uni || {}).task || {}).data || {};
-  const sgTask = ((m.sg || {}).task || {}).data || {};
-  const sgDetail = sgTask.task_detail || [];
-  const sgLevels = (((m.sg || {}).levels || {}).data || {}).data || [];
-  // 合法关卡 id 从 101 起（1~9 会被 act=16 判成「错误的关卡ID」），给每个候选各一个闯关按钮
-  const runs = sgLevels.filter((l) => l.id >= 101).slice(0, 3);
-  const cards = [];
-
-  // 1) 每日比赛：积分 / 次数 / 最高分
-  cards.push(modeCard("每日比赛", `${sc.score ?? "-"} 分`,
-    matchRow("积分 score / 免费次数", `${sc.score ?? "-"} / ${sc.free_num ?? "-"}`) +
-    matchRow("今日次数 free_times", sc.free_times ?? "-") +
-    matchRow("报名次数 signleTimes / multiTimes", `${sc.signleTimes ?? "-"} / ${sc.multiTimes ?? "-"}`) +
-    matchRow("我的最高分 my_top_score", hero.my_top_score ?? "-"),
-    `<button class="btn sm ok" data-act="mm-claim" data-only="comp" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`, "comp"));
-
-  // 2) 竞技场：次数 / 对手 / 领奖 / 刷对手 / 挑战（消耗）
-  cards.push(modeCard("竞技场", `对手 ${enemies.length}`,
-    matchRow("挑战次数 / 免费", `${pv.pvp_num ?? "-"} / ${pv.free_pvp_num ?? "-"}`) +
-    matchRow("刷新次数 flush_num", pv.flush_num ?? "-") +
-    matchRow("当前对手（前 3）", enemies.slice(0, 3).map((e) => `${e.name || e.uin}(${e.ce})`).join("、") || "-"),
-    `<button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm ghost" data-act="mm-flush" data-idle="刷对手">刷对手</button>` +
-    (enemies.length
-      ? `<button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战首位">挑战首位（消耗）</button>` : ""), "pvp"));
-
-  // 3) 工会任务：次数 / 任务位 / 商店
-  cards.push(modeCard("工会任务", `num ${uniTask.num ?? "-"}`,
-    matchRow("任务 num / resetnum", `${uniTask.num ?? "-"} / ${uniTask.resetnum ?? "-"}`) +
-    matchRow("任务位 bits", uniTask.bits ?? "-") +
-    matchRow("工会商店", arrLen((m.uni || {}).shop)),
-    `<button class="btn sm ok" data-act="mm-claim" data-only="union" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`, "union"));
-
-  // 4) 西游记：任务 / 队伍 / 商店（card_worldexplore，与下面的三国战役是不同端点）
-  cards.push(modeCard("西游记", `任务 ${expDetail.length}`,
-    matchRow("任务进度", expDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
-    matchRow("探索队伍", arrLen((m.exp || {}).team)) +
-    matchRow("商店 / 排行", arrLen((m.exp || {}).shop) + " / " + arrLen((m.exp || {}).rank)),
-    `<button class="btn sm ok" data-act="mm-claim" data-only="explore" data-idle="一键领奖">一键领奖</button>` +
-    `<button class="btn sm ghost" data-act="mm-refresh" data-idle="刷新">刷新</button>`, "explore"));
-
-  // 5) 三国战役：任务 / 关卡 / 领奖 / 闯关（消耗，cats+eqs 由后端读 act=16 真实阵容拼装）
-  //    ⚠️ 与上面「西游记」(modeCard key=explore) 是两个独立玩法，别再合并命名。
-  cards.push(modeCard("三国战役", `关卡 ${sgLevels.length}`,
-    matchRow("任务进度", sgDetail.map((t) => `type${t.type || t.id}×${t.cnt ?? 0}`).join(" ") || "-") +
-    matchRow("可打关卡", runs.map((l) => l.id).join("、") || "-") +
-    matchRow("当前选中", (window.__sgLevelid || (runs[0] && runs[0].id) || "-")),
-    `<button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>` +
-    runs.map((l) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${l.id}" data-idle="闯关 L${l.id}">闯关 L${l.id}（消耗）</button>`).join(""), "sanguo"));
-
-  // 6) 公会战：出兵入口（与工会子块同一动作，参数走后端默认 optype=4/uptype=1）
-  cards.push(modeCard("公会战", "",
-    matchRow("出兵", "optype=4 / uptype=1（参数语义未完全证实，点了看返回）") +
-    matchRow("说明", "出兵消耗次数，失败多返回 system busy"),
-    `<button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（消耗）</button>`));
-
-  box.innerHTML = `<div class="mode-grid">` + cards.join("") + `</div>`;
-  if (cnt) {
-    cnt.textContent = `积分 ${sc.score ?? "-"} · 对手 ${enemies.length} · 工会 ${uniTask.num ?? "-"} · 关卡 ${sgLevels.length}`;
-  }
-  // 重渲染后把已展开的属性区内容补回去（内容存在 window.__modeProps 缓存里）
-  window.__mpOpen = window.__mpOpen || {};
-  for (const md of Object.keys(window.__mpOpen)) {
-    if (window.__mpOpen[md]) renderModeProps(md);
-  }
-}
-
-// 本玩法状态属性：每个子块单独展示自己玩法的字段（后端 /api/match/mode-props 分组返回）
-
-async function loadModeProps(mode) {
-  const r = await fetch("/api/match/mode-props?mode=" + encodeURIComponent(mode))
-    .then((x) => x.json()).catch(() => ({ ok: false }));
-  window.__modeProps = window.__modeProps || {};
-  window.__modeProps[mode] = r;
-  renderModeProps(mode);
-  if (!r || r.ok === false) mlogFail(mode + " 状态属性", r);
-  return r;
-}
-
-function renderModeProps(mode) {
-  const box = $("mp-" + mode);
-  if (!box) return;
-  const d = (window.__modeProps || {})[mode];
-  if (!d) { box.innerHTML = `<div class="mp-g">读取中…</div>`; return; }
-  if (!d.ok) { box.innerHTML = `<div class="mp-g" style="color:var(--danger)">${d.message || "读取失败"}</div>`; return; }
-  box.innerHTML = (d.groups || []).map((g) =>
-    `<div class="mp-g"><div class="mp-gt">${g.name}</div>` +
-    (g.rows || []).map((r) =>
-      `<div class="rv"><span class="k">${r.k}</span><span class="v" title="${String(r.v).replace(/"/g, "&quot;")}">${r.v}</span></div>`).join("") +
-    `</div>`).join("") || `<div class="mp-g">该玩法没有可读状态</div>`;
-  const b = document.querySelector(`[data-act="mm-props"][data-mode="${mode}"]`);
-  if (b) b.textContent = d.ok ? `状态属性（${d.total}）` : "状态属性（失败）";
 }
 
 // 子块一键领奖：only 填空即全量（原「一键领奖（全玩法）」也走这里）
@@ -4135,12 +3980,27 @@ async function claimGroup(only) {
 
 async function claimAll() {
   await claimGroup("");
-  await loadMatchModes();
+  await refreshAfterClaim("");
+}
+
+// 领奖后刷新对应玩法的视图（「各玩法一键」tab 已删，不能再去刷新它）
+async function refreshAfterClaim(only) {
+  const m = {
+    comp: async () => { await loadMatchState(true); await loadMatchLog(); },
+    pvp: async () => { await loadMatchPvp(); await loadMatchPvpExtra(); },
+    union: async () => { await loadMatchUnion(); await loadMatchUnionExtra(); await loadMatchGvg(); },
+    explore: async () => { await loadMatchXiyou(true); },
+    sanguo: async () => { await loadMatchSanguo(true); await loadMatchSanguoLevels(); },
+  };
+  if (only && m[only]) { await m[only](); return; }
+  // 全量领奖：刷新当前停留的子模块（其余切过去时会自己拉）
+  const fn = MATCH_SUB_LOAD[window.__matchSub || "home"];
+  if (fn) fn();
 }
 
 async function pvpFight() {
-  const p = matchModes && matchModes.pvp;
-  const st = (p && p.state && p.state.data) || {};
+  // 竞技场状态已在「竞技场 · 日榜」tab 自己拉过（/api/match/pvp-extra）
+  const st = (matchPvpExtra && matchPvpExtra.state && matchPvpExtra.state.data) || {};
   const e0 = (st.enemy_list || [])[0];
   if (!e0) { mlog("[竞技场] 没有可挑战的对手", "warn"); return; }
   if (!confirm("挑战「" + (e0.name || e0.uin) + "」会消耗 1 次竞技场次数，确认？")) return;
@@ -4152,11 +4012,13 @@ async function pvpFight() {
   const bad = (r && r.ok === false) || (d.code !== undefined && d.code !== 0);
   mlog("[竞技场] 挑战 " + (e0.name || e0.uin) + " → " +
     (bad ? (d.desc || d.code || r.message || "失败") : (d.content || "胜利 " + (d.winnum ?? ""))), bad ? "" : "ok");
-  await loadMatchPvp();
+  await loadMatchPvp(); await loadMatchPvpExtra();
 }
 
 async function unionFight() {
-  if (!confirm("公会战出兵会消耗出兵次数，确认？")) return;
+  // 出兵按钮在工会 tab 的「公会战」块里（data-act="mm-fight-union"），
+  // busyBtn 由 data-act 委托统一处理，这里只管发请求 + 刷视图。
+  if (!confirm("公会战出兵会消耗出兵次数，确认？")) return { ok: false, message: "已取消" };
   const r = await fetch("/api/match/union-fight", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
   }).then((x) => x.json()).catch(() => null);
@@ -4164,6 +4026,7 @@ async function unionFight() {
   const bad = (r && r.ok === false) || (d.code !== undefined && d.code !== 0);
   mlog("[工会] 出兵 → " + (bad ? (d.desc || d.code || r.message || "失败") : (d.content || "成功")), bad ? "" : "ok");
   await loadMatchUnion();
+  return r;
 }
 
 async function sanguoRun(levelid) {
@@ -4178,7 +4041,7 @@ async function sanguoRun(levelid) {
   const bad = (d.code !== undefined && d.code !== 0);
   mlog("[三国] 闯关 L" + levelid + "（" + r.eq_count + " 件装 / " + (r.cats || []).join(",") + "）→ " +
     (bad ? (d.desc || d.code) : (d.content || "成功")), bad ? "" : "ok");
-  await loadMatchModes();
+  await loadMatchSanguo(true); await loadMatchSanguoLevels();
 }
 
 // data-act 委托（document 级，只绑一次）：新增子块/按钮无需再改 bind 列表
@@ -4193,12 +4056,10 @@ function bindMatchModeActs() {
     const restore = busyBtn(b, "处理中…", b.dataset.idle || b.textContent);
     (async () => {
       try {
-        if (act === "mm-refresh") {
-          await loadMatchModes(); await loadMatchLog();
-          mlog("[每日比赛] 各玩法状态已刷新", "ok");
-        } else if (act === "mm-claim") {
+        if (act === "mm-claim") {
           await claimGroup(b.dataset.only || "");
-          await loadMatchModes(); await loadMatchLog();
+          await refreshAfterClaim(b.dataset.only || "");
+          await loadMatchLog();
         } else if (act === "mm-flush") {
           const r = await fetch("/api/match/pvp-flush", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -4206,38 +4067,13 @@ function bindMatchModeActs() {
           const d = (r && r.data) || {};
           mlog("[竞技场] 刷新对手 → " + ((d.code !== undefined && d.code !== 0)
             ? (d.desc || d.code || (r && r.message) || "失败") : "已刷新"), "");
-          await loadMatchModes(); await loadMatchPvp();
+          await loadMatchPvpExtra(); await loadMatchPvp();
         } else if (act === "mm-fight-pvp") {
-          await pvpFight(); await loadMatchModes();
+          await pvpFight();
         } else if (act === "mm-fight-union") {
-          await unionFight(); await loadMatchModes();
+          await unionFight(); await loadMatchUnionExtra(); await loadMatchGvg();
         } else if (act === "mm-run-sg") {
           await sanguoRun(parseInt(b.dataset.levelid, 10));
-        } else if (act === "mm-props") {
-          // 注意：busyBtn 的还原文案取 data-idle，改文案必须同步改它，否则会被还原成旧文案
-          const mode = b.dataset.mode;
-          const body = $("mp-" + mode);
-          window.__mpOpen = window.__mpOpen || {};
-          if (window.__mpOpen[mode]) {          // 已展开 => 收起
-            window.__mpOpen[mode] = false;
-            renderMatchModes();
-            return;
-          }
-          if (!window.__modeProps || !window.__modeProps[mode]) await loadModeProps(mode);
-          else renderModeProps(mode);
-          window.__mpOpen[mode] = true;
-          renderMatchModes();
-          mlog("[每日比赛] " + mode + " 状态属性已展开", "ok");
-        } else if (act === "mm-reload") {
-          const mode = b.dataset.mode;
-          const url = MODE_RELOAD[mode];
-          if (!url) { mlog("[每日比赛] " + mode + " 没有独立的刷新接口", "warn"); return; }
-          const r = await fetch(url).then((x) => x.json()).catch(() => null);
-          matchModes[mode] = r || { ok: false };
-          const body = $("mp-" + mode);
-          if (body && !body.hidden) { window.__modeProps = window.__modeProps || {}; window.__modeProps[mode] = null; await loadModeProps(mode); }
-          renderMatchModes();
-          mlog("[每日比赛] " + mode + " 状态已刷新", (r && r.ok !== false) ? "ok" : "warn");
         }
       } finally {
         restore();
@@ -4388,15 +4224,26 @@ function initMatchOnce() {
   bind("match-dressrace", (b) => busyBtn(b, "出战中…", "按最优装打一场")(equipThenRace()));
   bind("claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（各玩法奖励，零消耗）")(claimOnly()));
   // 各子玩法的刷新按钮
-  bind("match-pvp", (b) => busyBtn(b, "榜单中…", "刷新 PVP 日榜")(loadMatchPvp()));
-  bind("match-union", (b) => busyBtn(b, "读取中…", "刷新工会")(loadMatchUnion()));
+  // 竞技场 = 状态（次数/对手）+ 日榜，一个按钮两个都刷
+  bind("match-pvp", async (b) => {
+    const restore = busyBtn(b, "读取中…", "刷新竞技场");
+    await loadMatchPvp(); await loadMatchPvpExtra();
+    restore();
+  });
+  // 工会 / 公会战已合并成一个 tab：一次刷新把工会信息、任务、金卡、公会战都带上
+  bind("match-union", async (b) => {
+    const restore = busyBtn(b, "读取中…", "刷新工会 / 公会战");
+    await loadMatchUnion(); await loadMatchUnionExtra();
+    await loadMatchGold(); await loadMatchGvg();
+    restore();
+  });
   bind("match-union-extra", (b) => busyBtn(b, "读取中…", "刷新工会任务/商店")(loadMatchUnionExtra()));
   bind("match-gold", (b) => busyBtn(b, "读取中…", "金卡限购")(loadMatchGold()));
   // 工会玩法动作（结果走全局日志，操作完立刻刷新工会/公会战视图）
   bind("union-all", (b) => unionAll());
   bind("union-claim", (b) => unionClaim());
   bind("union-zan", (b) => unionZan());
-  bind("union-fight", (b) => unionFight());
+  // 「出兵」按钮随公会战块一起移进工会 tab（data-act="mm-fight-union"），这里不再单绑一个
   document.addEventListener("click", async (ev) => {
     const btn = ev.target && ev.target.closest ? ev.target.closest("[data-zan]") : null;
     if (!btn) return;
@@ -4405,7 +4252,6 @@ function initMatchOnce() {
       { uins: [btn.getAttribute("data-zan")] }, "赞", "[工会] 已给该成员点赞");
     if (r && r.ok === false) mlog(`[工会] 点赞失败：${r.message || "服务端未接受"}`, "err");
   });
-  bind("match-gvg", (b) => busyBtn(b, "读取中…", "刷新公会战")(loadMatchGvg()));
   bind("match-sanguo", async (b) => {
     const restore = busyBtn(b, "读取中…", "刷新三国战役");
     await loadMatchSanguo(true);
@@ -4417,10 +4263,6 @@ function initMatchOnce() {
     await loadMatchXiyou(true);
     mlog("[每日比赛] 西游记已刷新", "ok");
     restore();
-  });
-  bind("match-modes-refresh", async (b) => {
-    const restore = busyBtn(b, "读取中…", "刷新其他玩法");
-    await loadMatchModes(); await loadMatchLog(); restore();
   });
   bindMatchModeActs();
   // 子模块 tab：全局委托（按钮是页面里的静态元素）
