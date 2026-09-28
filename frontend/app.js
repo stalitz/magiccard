@@ -3354,6 +3354,11 @@ function matchFmtTs(ts) {
   try { return new Date(Number(ts) * 1000).toLocaleString("zh-CN", { hour12: false }); }
   catch (e) { return String(ts); }
 }
+// 装扮槽位中文名（后端 cat_dress.slot_of 给的是 头/手/衣/其他）。
+// 官方配置里只有 96 件基础装扮有名字，进阶款（如 10353）没收录 → 用部位兜底，
+// 界面上不出现数字 id；真实 id 放在 title 里供对照。
+const SLOT_CN = { "头": "头饰", "手": "手持", "衣": "服装", "其他": "饰品" };
+
 function matchRow(k, v) {
   if (v === undefined || v === null || v === "") return "";
   return `<div class="rv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
@@ -3384,14 +3389,22 @@ function renderMatchState() {
   cnt.textContent = d.ok ? (d.bound ? "已开通" : "空态") : "失败";
   const cs = d.cats || [];
   cats.innerHTML = cs.length
-    ? cs.map((c, i) => `<div class="pk" style="margin-bottom:6px">
-        <div class="pk-bdg ${(c.skills || []).length ? "ok" : ""}">#${c.elf_id}</div>
-        <div><b>等级 ${c.level ?? "-"}</b> · 星 ${c.star ?? "-"}
-          · 心情 ${c.mood ?? "-"} · 运动 ${c.motion ?? "-"} · 表演 ${c.perform ?? "-"}
-          <br><span style="color:var(--muted);font-size:12px">
-            技能 ${(c.skills || []).map((s) => `#${s.cat_skill_id}·L${s.cat_skill_level}`).join("、") || "-"}
-            · 装备(equip_arr) ${(c.equip || []).filter((x) => x).join("/") || "-"}
-          </span></div></div>`).join("")
+    ? `<div class="cat-row">` + cs.map((c) => {
+        const eq = (c.equip || []).filter((x) => x);
+        // 名字优先：进阶款官方名表没收录，退回槽位名（头/手/衣/其他），界面不留数字 id
+        const names = c.equip_names || [];
+        const slots = c.equip_slots || [];
+        const wear = eq.map((id, i) => names[i] || (slots[i] ? SLOT_CN[slots[i]] || slots[i] : String(id)));
+        const skl = (c.skills || []).map((s) => `L${s.cat_skill_level}`).join("、");
+        const lv = c.level ?? "-";
+        return `<div class="cat-card">
+          <div class="cat-n">${c.elf_id ?? "-"} 号猫</div>
+          <div class="cat-lv">${lv} 级 · 星 ${c.star ?? "-"}</div>
+          <div class="cat-meta">心情 ${c.mood ?? "-"} · 运动 ${c.motion ?? "-"} · 表演 ${c.perform ?? "-"}
+            <br><span class="cat-sk">技能 ${skl || "-"}</span></div>
+          <div class="cat-w" title="装扮名取官方配置；进阶款未收录时显示部位，id ${eq.join("/")}">穿戴：${wear.join("、") || "—"}</div>
+        </div>`;
+      }).join("") + `</div>`
     : `<div class="empty-tip">暂无猫咪数据${d.bound ? "" : "（该号未开通比赛模块）"}</div>`;
 }
 

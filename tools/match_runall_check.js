@@ -135,7 +135,10 @@ w.fetch = (u, opt) => {
     : url.includes("/api/match/gvg") ? GVGV
     : {
       ok: true, code: 0, bound: true,
-      cats: [{ elf_id: 3, level: 20, mood: 85, equip: [1, 2, 3, 4] }],
+      cats: [{ elf_id: 3, level: 20, mood: 85, star: 2, motion: 400, perform: 300,
+               equip: [1, 2, 3, 4], equip_names: ["魔法帽", "", "连衣裙", "徽章"],
+               equip_slots: ["头", "手", "衣", "其他"],
+               skills: [{ cat_skill_id: 1, cat_skill_level: 5 }, { cat_skill_id: 2, cat_skill_level: 3 }] }],
       equip: {
         cat_home_dress_head_attr: [{ id: 10101, eq_attr: [{ id: 1, value: 30 }] }],
         cat_home_dress_hand_attr: [{ id: 20101, eq_attr: [{ id: 5, value: 20 }] }],
@@ -283,6 +286,19 @@ setTimeout(async () => {
   w.eval(`renderMatchState()`);
   const st = $("match-state-box").textContent;
   assert(/猫咪数量/.test(st) && /今日剩余次数/.test(st), "状态卡有比赛字段（猫咪数量/今日剩余次数）");
+  {
+    const cards = $("match-cats").querySelectorAll(".cat-card");
+    assert(cards.length === 1, `出战猫咪渲染成卡片（.cat-card ${cards.length} 个）`);
+    assert(!!$("match-cats").querySelector(".cat-row"), "猫咪横排容器 .cat-row 存在")
+      , "横排放得下：4 只猫不再竖着堆成一列";
+    const ct = $("match-cats").textContent;
+    assert(/3 号猫/.test(ct), "猫咪用「N 号猫」标识，不带 # 编号：" + ct.replace(/\\s+/g, " ").slice(0, 60));
+    assert(!ct.includes("#"), "出战猫咪区不含 # 编号（技能/猫咪都不带）");
+    assert(!/equip_arr/i.test(ct), "装备行不出现 equip_arr 字段名");
+    assert(/穿戴：魔法帽、手持、连衣裙、徽章/.test(ct),
+      "官方名表没收录的进阶款退化为部位名，界面不留数字 id：");
+    assert(!/\d{4,}/.test(ct), "出战猫咪文本里没有装扮数字 id");
+  }
   assert(!/每日期望/.test(st), "状态卡不再重复显示 performe_num（旧「每日期望次数」行已删）");
   assert(!/talent_score|clover_num|season_rank|unionid|dzs/.test(st), "状态卡不再渲染 talent/clover/dzs/season/unionid");
   // 键值行样式：k 与 v 分离（不再堆在一起）

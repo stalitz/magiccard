@@ -183,6 +183,14 @@
   .stat-card h3{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:12px;
     text-transform:uppercase;letter-spacing:.4px}
   .state-box{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+  /* 出战猫咪：4 只横排刚好放得下，不必竖着堆 */
+  .cat-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:8px}
+  .cat-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px;font-size:12px}
+  .cat-n{font-weight:700;font-size:12.5px;margin-bottom:3px}
+  .cat-lv{color:var(--muted);font-size:11.5px}
+  .cat-meta{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5}
+  .cat-sk{color:#0a7d43}
+  .cat-w{color:var(--text);font-size:11.5px;margin-top:4px;word-break:break-all}
   .stat-chip{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
   .stat-chip .k{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
   .stat-chip .v{font-size:15px;font-weight:700;color:var(--text)}
@@ -1570,7 +1578,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928d"></script>
+<script src="/app.js?v=20260928e"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

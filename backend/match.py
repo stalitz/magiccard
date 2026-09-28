@@ -26,6 +26,7 @@ from typing import Optional
 
 from .cat_dress import (  # 装扮名 / 属性名（官方 catHome_Info 配置实证，见 cat_dress 模块 doc）
     attr_name as _attr_name, equip_name as _equip_name, summary as _equip_summary,
+    slot_of as _equip_slot,
 )
 from .constants import (
     EP_TRAVEL_MATCH, EP_TRAVEL_PVP, EP_TRAVEL_UNION,
@@ -68,6 +69,13 @@ def _cats(rows: list) -> list:
             "exp2": c.get("ce"),
             "appearance": c.get("cat_appearance"),
             "equip": c.get("equip_arr"),
+            # 装扮中文名，与 equip_arr 一一对应（进阶款官方表无收录，
+            # 会是空串，前端退回显示 id）
+            "equip_names": [_equip_name(x) for x in (c.get("equip_arr") or [])
+                            if x and str(x).strip() not in ("", "0")],
+            # 官方名表没收录的进阶款，退回槽位名（头/手/衣/其他），界面上不留数字 id
+            "equip_slots": [_equip_slot(x) for x in (c.get("equip_arr") or [])
+                            if x and str(x).strip() not in ("", "0")],
             "skills": c.get("skill_data"),
             "talent": c.get("talent_arr"),
             "tease": c.get("tease"),
