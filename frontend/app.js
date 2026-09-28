@@ -3893,7 +3893,8 @@ function sgBoxPanel(label, plan, bno) {
     const keep = s.keep || {};
     // 同一层里不同的卡都要收集；只有同名卡拿到 2+ 张，多出来的才是多余
     const extra = s.count > 1 ? `（同名卡拿到 ${s.count} 张，多 ${s.count - 1} 张可卖）` : "";
-    return matchRow(`第 ${s.layer} 层`, `${keep.name || "?"}${extra}`);
+    // s.g = 游戏界面的层号（1=boss 层只有 1 张，5=要攒 8 张），别用 s.layer（卡库编号，反的）
+    return matchRow(`第 ${s.g ?? s.layer} 层`, `${keep.name || "?"}${extra}`);
   }).join("");
   const spare = plan.spare || [];
   return `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">` +
@@ -3926,28 +3927,31 @@ function renderMatchSanguoBox() {
   const diag = "";
 
   box.innerHTML = `<div class="state-box">` +
-    matchRow("当前大关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
+    matchRow("下一个该打的关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
     diag +
     sgLayerPanel(d.layers || {}) +
     sgBoxPanel("关卡卡箱", ex, 0) +
     sgBoxPanel("保险箱", safe, 1) +
     `<div style="opacity:.7;margin:4px 0;font-size:11.5px">` +
-    `打小关 10N 就掉第 N 层的卡；同一层里不同的卡都要收集，只有同名重复的才卖掉换三国币。` +
+    `关卡越靠后掉的卡越少：游戏第 1 层只有 1 张（张角关那档的 boss 层），第 5 层要攒 8 张。` +
+    `同一层里不同的卡都要收集，只有同名重复的才卖掉换三国币。` +
     `集齐一套的全部 5 层才能上交、进入下一大关。` +
     `保险箱是另一个箱子、也能卖卡换三国币，但两箱之间怎么搬没有实证，所以只显示、不自动动它。` +
     `</div>` +
     `</div>`;
 }
 
-// 层进度 + 该打哪一关：小关 10N 就掉第 N 层的卡，层里卡越少越好集齐
+// 层进度 + 该打哪一关。
+// ⚠ 层号用游戏口径 lv.g（1＝boss 层只有 1 张、5＝要攒 8 张），**不是** lv.layer
+//   （那是卡库位置值编号，跟游戏里显示的正好相反 —— 2026-09-28 用户纠正）。
 function sgLayerPanel(L) {
   const rec = L.recommend || null;
   const head = `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-weight:600">` +
-    `层进度（打小关 10N 就掉第 N 层的卡）</div>`;
+    `层进度（关卡越靠后掉卡越少：第 1 层 1 张、第 2 层 3 张、第 5 层 8 张）</div>`;
   const recHtml = rec
     ? `<div style="color:var(--danger);margin:3px 0">` +
-      `建议打<b>小关 ${rec.levelid}</b>（第 ${rec.layer} 层）：` +
-      `${rec.why}，比第 1 层那种 8 张一套的快得多。</div>`
+      `建议打<b>小关 ${rec.levelid}</b>（游戏第 ${rec.g} 层）：` +
+      `${rec.why}，比第 5 层那种 8 张一套的快得多。</div>`
     : `<div style="color:var(--ok,var(--muted,#888));margin:3px 0">每一层都齐了，可以继续上交了。</div>`;
   // 「还差什么」只列**再打一张就能补齐**的卡（差 1 张的），其余整层表里有。
   // 全列的话两套加一起 20 张，反而盖住真正该盯的目标（2026-09-28 实测 20 个卡名刷屏）。
@@ -3977,8 +3981,8 @@ function sgLayerPanel(L) {
     if (nSf) where.push(`保险箱 ${nSf}`);
     const none = where.length
       ? where.join(" + ") + "（两套分着算）"
-      : "一个都没有，得打小关 " + lv.levelid + " 才出";
-    return matchRow(`第 ${lv.layer} 层 · 小关 ${lv.levelid}`,
+      : "一个都没有，得打这一档的小关才出";
+    return matchRow(`游戏第 ${lv.g} 层 · 小关 ${lv.levelid}`,
       `${per}${mark}<br><span style="opacity:.7;font-size:11.5px">现在：${none}</span>`);
   }).join("");
   return head + recHtml + lackHtml + rows;
@@ -3991,7 +3995,7 @@ async function sanguoSellSpare(bno) {
   const list = plan.spare || [];
   if (!list.length) { log(`${boxName}没有多余层卡可卖`); return; }
   if (!confirm(`卖掉${boxName}重复多余的 ${list.length} 张层卡（同名卡留一张，换三国币）？\n` +
-    list.map((s) => `  第 ${s.layer} 层 · ${s.name || "卡" + s.card_id}`).join("\n") +
+    list.map((s) => `  第 ${s.g ?? s.layer} 层 · ${s.name || "卡" + s.card_id}`).join("\n") +
     `\n注意：同一层里**不同的卡**是要收集的，只有同名重复的才会出现在这里。`)) return;
   const done = [];
   for (const s of list) {
@@ -4004,7 +4008,7 @@ async function sanguoSellSpare(bno) {
       break;
     }
     done.push(`${s.name || s.card_id} → ${r.content || "三国币"}`);
-    log(`${boxName}卖卡：${s.name || s.card_id}（第 ${s.layer} 层）→ ${r.content || "三国币"}`);
+    log(`${boxName}卖卡：${s.name || s.card_id}（第 ${s.g ?? s.layer} 层）→ ${r.content || "三国币"}`);
   }
   if (done.length) log(`本轮卖掉 ${done.length} 张：${done.join("、")}`);
   await loadMatchSanguoBox();

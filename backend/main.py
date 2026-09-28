@@ -2672,6 +2672,8 @@ async def match_sanguo_box():
     """三国关卡卡箱（只读）：ex_box 里每层攒了几张、缺哪层、同层多余的可卖哪些。
 
     纯只读，不碰卡。界面据此提示「还差第 N 层」和一键卖多余旧卡。
+    ⚠ 所有对外层号都是**游戏界面口径**（第 1 层＝boss 层只有 1 张，第 5 层＝要攒 8 张）；
+      卡库位置值那一套编号是反的，别直接显示（2026-09-28 用户纠正）。
     """
     if err := _require_login():
         return err
@@ -2679,7 +2681,10 @@ async def match_sanguo_box():
     if not st.get("ok"):
         return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
     lv = (st.get("levelData") or [{}])[0]
-    return {"ok": True, "levelid": lv.get("levelid"), "freenum": st.get("freenum"),
+    # ⚠ levelData[0] 是「上一条记录」（旧残留，如 102），顶层 levelId 才是**下一个该打的关**
+    #   （实测 204）。拿 102 当当前关会跟游戏里看到的对不上。
+    return {"ok": True, "levelid": st.get("levelId") or lv.get("levelid"),
+            "freenum": st.get("freenum"),
             "box": mt.plan_sg_boxes(st), "layers": mt.plan_sg_layers(st),
             "dropitem": lv.get("dropitem"), "pass": lv.get("passData"),
             "steps": lv.get("stepData")}

@@ -1267,8 +1267,25 @@ SG_BOX_SAFE = 1      # 保险箱（safe_box_data，12 格）
 _SG_BOX_KEY = {"ex": ("ex_box_data", "ex_box_num"),
                "safe": ("safe_box_data", "safe_box_num")}
 
-# 一套三国卡从低到高共 5 层（位置值 15xx/25xx/35xx/45xx/55xx 的第 1 位）
+# 一套三国卡从低到高共 5 层（位置值 15xx/25xx/35xx/45xx/55xx 的第 1 位）。
+# ⚠⚠ 这个「层」是卡库编号（卡位置值千位），**不是游戏界面上的层号，两者是反的**：
+#   游戏里「第 1 层」＝本文件第 5 层，只有 1 张「黄巾起义」（张角关＝最后一关出的）；
+#   游戏里「第 5 层」＝本文件第 1 层，共 8 张（张曼成＝第一关出的 8 张里的卡）。
+#   用户口述的「第 4 层的太平道」＝本文件第 2 层，「第 3 层的天下大吉」＝本文件第 3 层。
+#   → 对外（接口/界面）一律用 `_SG_G` 的游戏层号，别把 _SG_LAYERS 的编号直接显示出去。
 _SG_LAYERS = (1, 2, 3, 4, 5)
+_SG_G = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}      # 卡库层号 -> 游戏界面层号
+
+
+def _sg_g(layer):
+    """卡库层号 → 游戏界面层号。查不到就原样返回，不编。"""
+    return _SG_G.get(layer) if layer else layer
+
+
+def _sg_chapter(levelid) -> int:
+    """当前所在大关的百位（204 → 200）。推小关号必须留在同一大关里。"""
+    n = int(levelid or 0)
+    return (n // 100) * 100 if n >= 100 else 100
 
 
 def plan_box(state: dict, box: str = "ex") -> dict:
@@ -1307,6 +1324,7 @@ def plan_box(state: dict, box: str = "ex") -> dict:
         for m in sorted(a, key=lambda m: -m["ts"]):
             g = seen.setdefault(m["card_id"],
                                 {"slot": slot, "layer": m["layer"],
+                                 "g": _sg_g(m["layer"]),   # 游戏界面的层号（1=boss层）
                                  "theme": m["theme"],
                                  "keep": m, "cards": [], "count": 0})
             g["cards"].append(m)
@@ -1345,13 +1363,14 @@ def plan_sg_boxes(state: dict) -> dict:
         present = sorted({k[1] for k in holders if k[0] == th})
         ex_missing = [L for L in _SG_LAYERS if L not in
                       {s["layer"] for s in ex["slots"] if s["theme"] == th}]
+        # 对外一律给游戏层号（1=boss 层 1 张，5=8 张），别把卡库编号漏出去
         themes.append({
-            "theme": th, "present": present,
+            "theme": th, "present": sorted(_SG_G[L] for L in present),
             # 整套视角（两箱合计）缺的层
-            "missing": [L for L in _SG_LAYERS if L not in present],
+            "missing": sorted(_SG_G[L] for L in _SG_LAYERS if L not in present),
             # 关卡卡箱里没有、但保险箱里有的层 —— 卡很可能就在保险箱里压着
-            "in_safe_only": [L for L in ex_missing
-                             if holders.get((th, L), {}).get("safe")],
+            "in_safe_only": sorted(_SG_G[L] for L in ex_missing
+                                   if holders.get((th, L), {}).get("safe")),
         })
     return {"ex": ex, "safe": safe, "themes": themes,
             "free_total": ex["free"] + safe["free"]}
@@ -1360,15 +1379,21 @@ def plan_sg_boxes(state: dict) -> dict:
 def plan_sg_layers(state: dict) -> dict:
     """层进度 + **该打哪一关**（小关 ↔ 层的对应关系）。
 
-    实证（2026-09-28，act=1 的 logData 里每条通关记录都带 levelid 与 sitem）：
-      小关 101 通关给的卡 = 第 1 层（围困长社 / 白波军 / 黄巾军 …）；
-      小关 102 给的 = 第 2 层（黄巾力士 / 三十六方渠帅）；
+    实证（2026-09-28，真机 act=1 的 logData：每条通关记录带 levelid 与
+    passData.sitem，形如 `126_25107_1` ＝ 掉了 25107 这张层卡）：
+      小关 101 通关给的卡 = 第 1 层（波才 / 白波军 / 张曼成 / 黄巾军 … 共 8 张）；
+      小关 102 给的 = 第 2 层（黄巾力士 / 三十六方渠帅，5 张）；
       小关 103 给的 = 第 3 层（岁在甲子），小关 203 给的 = 第 3 层（吕布投董）。
     配合 card_lib 里每层张数 8/5/4/3/1（两套 1745 / 1746 完全一样），
-    规律即 **小关号 = 100 + 层号**（101…105），打哪关掉哪层的卡。
+    规律即 **小关号 = 100 + 卡库层号**（101…105，203…205 是下一大关同一套规律）。
 
-    所以「还卡在哪儿」其实是「**还差哪几层的卡没打出来**」；层里卡越少
-    （第 5 层 1 张、第 4 层 3 张）就越快集齐 —— 用户原话：
+    ⚠ **卡库层号 ≠ 游戏界面的层号，是反的**（2026-09-28 用户纠正）：
+      游戏里「第 1 层」＝卡库第 5 层，全层只有 1 张「黄巾起义」——那是张角关
+      （最后一关）掉的 boss 层卡；游戏里「第 5 层」＝卡库第 1 层，要攒 8 张。
+      所以对外显示、给用户看的层号一律走 `_sg_g()`（见 `_SG_G`）。
+
+    所以「还卡在哪儿」其实是「**还差哪几层的卡没打出来**」；游戏层号越小
+    （第 1 层 1 张、第 2 层 3 张）就越快集齐 —— 用户原话：
     「小关和层少的卡有关，要打少卡的小关，这样才能集齐」。
 
     纯函数（不联网），便于离线验证。已持有张数按「套」分别算，不做两套混算，
@@ -1398,6 +1423,10 @@ def plan_sg_layers(state: dict) -> dict:
         return {s["keep"]["card_id"] for s in plan["slots"]
                 if s["theme"] == th and s["layer"] == layer}
 
+    # ⚠ 只认顶层 levelId：真机实测顶层 `levelId=204` 而 `levelData[0].levelid=102`
+    #   是上一关的旧残留记录（isget=0 也没通过），拿它当「当前关」会错推一整层。
+    levelid_now = state.get("levelId")
+    chapter = _sg_chapter(levelid_now)     # 204 → 200：推荐打同大关的小关（202），不是 102
     levels, open_gaps, setgaps = [], [], []
     for layer in _SG_LAYERS:
         ths = sorted({k[0] for k in spec if k[1] == layer})
@@ -1407,7 +1436,7 @@ def plan_sg_layers(state: dict) -> dict:
             id_ex, id_safe = ids_of(ex, th, layer), ids_of(safe, th, layer)
             have_ids = id_ex | id_safe      # 同一张卡两箱各一份只算一次
             have = len(have_ids)
-            rows.append({"theme": th, "need": s["need"], "have": have,
+            rows.append({"theme": th, "need": s["need"], "have": have, "g": _sg_g(layer),
                          "have_ex": len(id_ex), "have_safe": len(id_safe),
                          "done": have >= s["need"],
                          "cards": s["cards"],
@@ -1418,7 +1447,8 @@ def plan_sg_layers(state: dict) -> dict:
                          # 一张都没有、且既不在关卡卡箱也不在保险箱 = 只能靠打出来
                          "in_boxes": len(have_ids)})
         levels.append({
-            "layer": layer, "levelid": 100 + layer,
+            "layer": layer, "g": _sg_g(layer),          # g = 游戏界面的层号
+            "levelid": chapter + layer,                 # 同大关内的层号，204 → 打 202
             "by_theme": rows,
             "need": sum(r["need"] for r in rows),
             "have": sum(r["have"] for r in rows),
@@ -1433,18 +1463,16 @@ def plan_sg_layers(state: dict) -> dict:
             ms = [c for c in (spec.get((th, layer)) or {}).get("cards", [])
                   if c["card_id"] not in (ids_of(ex, th, layer) | ids_of(safe, th, layer))]
             if ms:
-                setgaps.append({"theme": th, "layer": layer,
-                                "levelid": 100 + layer, "gap": len(ms),
+                setgaps.append({"theme": th, "layer": layer, "g": _sg_g(layer),
+                                "levelid": chapter + layer, "gap": len(ms),
                                 "theme_layer_cards": ms})
         if gap:
-            open_gaps.append({"layer": layer, "levelid": 100 + layer,
+            open_gaps.append({"layer": layer, "g": _sg_g(layer),
+                              "levelid": chapter + layer,
                               "gap": gap, "done": False})
-    # ⚠ 只认顶层 levelId：真机实测顶层 `levelId=204` 而 `levelData[0].levelid=102`
-    #   是上一关的旧残留记录（isget=0 也没通过），拿它当「当前关」会错推一整层。
-    levelid_now = state.get("levelId")
-    # 推荐打哪一关。卡最少的层不一定打得着 —— 小关号跨大关连续，
-    # 「服务端刚给的当前关」才是现在真能打的（2026-09-28 实证：levelId=204 → 第 4 层，
-    # 而 105 属于下一大关）。所以先保当前关，当前关那层已经齐了才退而挑 gap 最小的。
+    # 推荐打哪一关。卡最少的层不一定打得着 —— 跨大关的小关未必解锁：
+    # 现在 levelId=204（第 2 大关），想补第 2 层就得打 202，不是 102。
+    # 所以先保「服务端刚给的当前关」，当前关那层齐了才退而挑 gap 最小的。
     recommend = None
     if open_gaps:
         now_layer = int(levelid_now) % 100 if int(levelid_now or 0) else None
@@ -1454,7 +1482,7 @@ def plan_sg_layers(state: dict) -> dict:
         cand = [g for g in setgaps
                 if now_layer is None or g["layer"] <= now_layer] or setgaps
         pick = min(cand, key=lambda g: (g["gap"], g["layer"], g["theme"]))
-        recommend = {k: pick[k] for k in ("theme", "layer", "levelid", "gap")}
+        recommend = {k: pick[k] for k in ("theme", "layer", "g", "levelid", "gap")}
         # 打的是「服务端给的当前关号」（如 levelId=204），不是按层号推出来的 104
         if pick["layer"] == now_layer:
             recommend["levelid"] = int(levelid_now)
@@ -1463,11 +1491,11 @@ def plan_sg_layers(state: dict) -> dict:
             [c["name"] for c in pick["theme_layer_cards"]]
         recommend["from_now"] = pick["layer"] == now_layer
         names = "、".join(recommend["missing"]) or "这张"
-        recommend["why"] = (f"第 {pick['layer']} 层还只差 {pick['gap']} 张"
-                            f"（缺 {names}），打小关 {recommend['levelid']} 就有机会补齐 —— "
-                            + (f"这正是服务端给的当前关（{levelid_now}）。"
+        recommend["why"] = (f"游戏第 {pick['g']} 层还只差 {pick['gap']} 张"
+                            f"（缺 {names}），打这一档的小关就能补齐 —— "
+                            + (f"正是服务端给的当前关（{levelid_now}）。"
                                if pick["layer"] == now_layer else
-                               "这关在大关里排在前面，应该已解锁。"))
+                               "这关在同一个大关里排在前面，应该已解锁。"))
     return {"levels": levels, "open": open_gaps, "recommend": recommend,
             "levelid_now": levelid_now}
 

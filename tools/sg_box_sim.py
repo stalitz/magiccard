@@ -168,11 +168,12 @@ async def main():
     check("同时给出两箱", allp["ex"]["box"] == "ex" and allp["safe"]["box"] == "safe")
     t1745 = next((t for t in allp["themes"] if t["theme"] == 1745), None)
     check("1745 两箱合计不缺层", bool(t1745) and t1745["missing"] == [], str(t1745))
-    check("但关卡卡箱缺第 4 层，且第 4 层只躺在保险箱里",
-          bool(t1745) and t1745["in_safe_only"] == [4], str(t1745))
+    # ⚠ 这里给的都是**游戏层号**（1=boss 层 1 张、5=8 张），与卡库编号相反
+    check("但关卡卡箱缺第 2 游戏层，且那一层只躺在保险箱里",
+          bool(t1745) and t1745["in_safe_only"] == [2], str(t1745))
     t1746 = next((t for t in allp["themes"] if t["theme"] == 1746), None)
-    check("1746 套缺第 4/5 层，且保险箱里也没有",
-          bool(t1746) and t1746["missing"] == [4, 5] and not t1746["in_safe_only"],
+    check("1746 套缺游戏第 1/2 层，且保险箱里也没有",
+          bool(t1746) and t1746["missing"] == [1, 2] and not t1746["in_safe_only"],
           str(t1746))
 
     print("\n== auto_sell_spare（卖**重复**卡腾位；构造 25110 重复的快照）")
@@ -233,6 +234,15 @@ async def main():
     p6 = mt.plan_sg_layers(st6)
     lv = {l["layer"]: l for l in p6["levels"]}
     check("算出 1..5 五层", sorted(lv) == [1, 2, 3, 4, 5], str(sorted(lv)))
+    # 用户 2026-09-28 纠正：游戏层号是反的 —— 第 1 层＝卡库第 5 层（boss，1 张），
+    # 第 5 层＝卡库第 1 层（第一关张曼成那档，8 张/套）。
+    check("游戏层号 g 与卡库层号相反",
+          all(l["g"] == 6 - l["layer"] for l in p6["levels"])
+          and lv[5]["g"] == 1 and lv[1]["g"] == 5,
+          str({l["layer"]: l["g"] for l in p6["levels"]}))
+    check("游戏第 5 层 = 两套各 8 张（用户说的「第一关掉 8 张」那档）",
+          lv[1]["need"] == 16 and lv[5]["need"] == 2,
+          str({L: lv[L]["need"] for L in (1, 5)}))
     check("每层都给了对应小关号 10N",
           all(l["levelid"] == 100 + l["layer"] for l in p6["levels"]),
           str({l["layer"]: l["levelid"] for l in p6["levels"]}))
@@ -267,8 +277,8 @@ async def main():
           and p6["recommend"]["levelid"] == 102
           and p6["recommend"].get("from_now") is False,
           str(p6["recommend"]))
-    check("推荐理由里带小关号和缺的卡名",
-          "小关 102" in (p6["recommend"] or {}).get("why", "")
+    check("推荐理由里带游戏层号和缺的卡名",
+          "游戏第 4 层" in (p6["recommend"] or {}).get("why", "")
           and "太平道" in (p6["recommend"] or {}).get("why", ""),
           (p6["recommend"] or {}).get("why", ""))
     # 给了当前关 204（= 第 4 层）：那层 1745 已齐，打它纯拿重复卡，
@@ -276,9 +286,9 @@ async def main():
     st7 = STATE()
     st7["levelId"] = 204
     p7 = mt.plan_sg_layers(st7)
-    check("当前关 204 那层已齐时改推第 2 层（不是死守 204）",
+    check("当前关 204 那层已齐时改推同大关的小关 202（不是死守 204）",
           bool(p7["recommend"]) and p7["recommend"]["layer"] == 2
-          and p7["recommend"]["levelid"] == 102
+          and p7["recommend"]["levelid"] == 202
           and p7["recommend"].get("from_now") is False,
           str(p7["recommend"]))
     # open 只按层号升序供展示，挑「打哪个关」由 recommend 按 gap 取最小
