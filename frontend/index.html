@@ -70,7 +70,8 @@
   .rv .k{flex:0 0 150px;color:var(--muted);font-size:12px}
   .rv .v{flex:1 1 auto;font-weight:600;font-size:12.5px;word-break:break-all}
   /* 状态框里一行一行排，不走多列网格（多列会把键值挤成一团） */
-  #match-state-box, #match-theme-box, #match-log-box .state-box{display:block}
+  #match-state-box, #match-theme-box, #match-log-box .state-box,
+  #match-sgbox-box .state-box{display:block}
   .pane.match-pane>.lib{flex:1 1 auto;min-width:0;overflow-y:auto}
   /* 关键：.lib 是 flex 列，内容高于可视区时子项默认 flex-shrink:1 会被压扁 ——
      msub-bar 曾被压到 2px 高，tab 只剩半截（用户报「tab 被挡住」）。
@@ -1574,7 +1575,7 @@
 
             <div class="lib-body" style="grid-template-columns:minmax(0,1fr);margin-top:8px">
               <div class="lst" style="max-height:none">
-                <div class="lst-head"><span class="t">关卡卡箱（当前大关攒的层卡）</span>
+                <div class="lst-head"><span class="t">关卡卡箱 + 保险箱</span>
                   <span class="cnt" id="match-sgbox-cnt"></span></div>
                 <div id="match-sgbox-box">
                   <div class="state-box"><span class="spinner"></span>正在读取关卡卡箱…</div>
@@ -1606,7 +1607,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928k"></script>
+<script src="/app.js?v=20260928l"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

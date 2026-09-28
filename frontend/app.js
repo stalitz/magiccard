@@ -3873,7 +3873,11 @@ async function loadMatchSanguo(withTask = false) {
   if (!r || r.ok === false) mlogFail("三国战役", r);
 }
 
-// ---------- 三国「关卡卡箱」：层卡 / 缺层 / 同层多余可卖 ----------
+// ---------- 三国「关卡卡箱 + 保险箱」：层卡 / 缺层 / 同层多余可卖 ----------
+// 两个箱子（关卡卡箱 ex_box 15 格＝箱子编号 0，保险箱 safe_box 12 格＝编号 1），
+// 都能用 act=5 {cards:'{箱子}_{卡位}_{卡id}'} 卖掉换三国币。
+// 关卡卡箱是自动攒层卡的地方、缺层就出不了关；保险箱只展示 + 手动卖 ——
+// 「保险箱 ↔ 关卡卡箱」怎么搬没有实证，自动动它可能把还缺的层卡卖掉。
 let matchSgBox = null;
 
 async function loadMatchSanguoBox() {
@@ -3881,6 +3885,26 @@ async function loadMatchSanguoBox() {
     .then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchSgBox = r;
   renderMatchSanguoBox();
+}
+
+// 一个箱子的层卡明细 + 同层多余可卖
+function sgBoxPanel(label, plan, bno) {
+  const rows = (plan.slots || []).map((s) => {
+    const keep = s.keep || {};
+    const extra = s.count > 1 ? `（本层共 ${s.count} 张，留「${keep.name || "?"}」）` : "";
+    return matchRow(`第 ${s.layer} 层`, `${keep.name || "?"}${extra}`);
+  }).join("");
+  const spare = plan.spare || [];
+  return `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">` +
+    `<div style="font-weight:600;margin-bottom:4px">${label}` +
+    `<span style="opacity:.7;font-weight:400">　${plan.filled}/${plan.capacity} 格</span></div>` +
+    (rows || matchRow("层卡", "（空）")) +
+    (spare.length
+      ? matchRow("同层多余（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
+        `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all" data-box="${bno}">` +
+        `卖掉${label}多余的 ${spare.length} 张（换三国币）</button></div>`
+      : matchRow("同层多余（可卖）", "无，每层都只留了一张")) +
+    `</div>`;
 }
 
 function renderMatchSanguoBox() {
@@ -3891,71 +3915,66 @@ function renderMatchSanguoBox() {
     cnt.textContent = "失败";
     return;
   }
-  const p = d.plan || {};
-  const cap = p.capacity || 0, filled = p.filled || 0, free = p.free || 0;
-  // 层：card_list 第 4 字段（如 1502）前一位是层号，后两位是套内编号
-  const have = new Set((p.slots || []).map((s) => s.layer).filter((x) => x !== null));
-  const allLayers = [...have].sort((a, b) => a - b);
-  const spare = p.spare || [];
-  const miss = missingLayerOf(p);
-  cnt.textContent = `卡箱 ${filled}/${cap}，空 ${free} 格 · 已有层 ${allLayers.length ? allLayers.join("/") : "-"}` +
-    (spare.length ? ` · 多余 ${spare.length} 张` : "");
+  const all = d.box || {};
+  const ex = all.ex || {}, safe = all.safe || {};
+  cnt.textContent = `关卡卡箱 ${ex.filled || 0}/${ex.capacity || 0} · 保险箱 ${safe.filled || 0}/${safe.capacity || 0}`;
 
-  const layerRows = (p.slots || []).map((s) => {
-    const keep = s.keep || {};
-    const extra = s.count > 1 ? `（本层共 ${s.count} 张，留新的「${keep.name || "?"}」）` : "";
-    return matchRow(`第 ${s.layer} 层`, `${keep.name || "?"}${extra}`);
+  // 缺哪几层；「只躺在保险箱里」的层单独点出来
+  const diag = (all.themes || []).map((t) => {
+    const miss = t.missing || [], inSafe = t.in_safe_only || [];
+    if (!miss.length && !inSafe.length) return "";
+    const label = miss.length
+      ? `已有 ${t.present.join("/")} 层，缺 ${miss.join("/")}`
+      : `全套 5 层都有，但关卡卡箱里缺第 ${inSafe.join("/")} 层`;
+    return matchRow(`${t.theme} 套`, label) +
+      (inSafe.length
+        ? `<div style="color:var(--danger);margin:2px 0">第 ${inSafe.join("/")} 层一张都不在关卡卡箱里，` +
+          `但保险箱里压着：${safeCardsOf(safe, t.theme, inSafe)
+            .map((m) => m.name || "卡" + m.card_id).join("、") || "同层的卡"}。</div>`
+        : "");
   }).join("");
 
   box.innerHTML = `<div class="state-box">` +
     matchRow("当前大关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
-    matchRow("卡箱余量", `${filled} / ${cap} 格，空 ${free} 格`) +
-    (free <= 1
-      ? `<div style="color:var(--danger);margin:4px 0">卡箱快满了：再拿一张层卡就没有位置，出战前得先卖掉同层多余的旧卡。</div>`
-      : `<div style="margin:4px 0">卡箱还有 ${free} 格空位，暂不用处理。</div>`) +
-    layerRows +
-    (spare.length
-      ? matchRow("同层多余（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
-        `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all">卖掉多余的 ${spare.length} 张（换三国币，每张 100）</button></div>`
-      : matchRow("同层多余（可卖）", "无，每层都只留了最新那张")) +
+    diag +
+    sgBoxPanel("关卡卡箱", ex, 0) +
+    sgBoxPanel("保险箱", safe, 1) +
     `<div style="opacity:.7;margin:4px 0;font-size:11.5px">` +
-    `每打过一小关会给一张层卡进卡箱；集齐某一套的全部层才能上交、进入下一大关。` +
-    `现在缺第 ${miss.join("、") || "?"} 层。</div>` +
+    `每打过一小关会给一张层卡进关卡卡箱；集齐一套的全部 5 层才能上交、进入下一大关。` +
+    `保险箱是另一个箱子、也能卖卡换三国币，但两箱之间怎么搬没有实证，所以只显示、不自动动它。` +
+    `</div>` +
     `</div>`;
 }
 
-// 缺哪一层：已持有层的最大连续区间断在哪儿（缺层 4 就报 4）
-function missingLayerOf(p) {
-  const layers = [...new Set((p.slots || []).map((s) => s.layer)
-    .filter((x) => x !== null))].sort((a, b) => a - b);
-  if (!layers.length) return [];
-  const out = [];
-  for (let i = 0; i < layers.length - 1; i++) {
-    if (layers[i + 1] - layers[i] > 1) out.push(layers[i] + 1);
-  }
-  if (layers.length && layers[0] > 1) out.unshift(1);
-  return out;
+// 某个箱里「属于这几层」的全部卡名（同层有多张同层卡时一张不漏）
+function safeCardsOf(plan, theme, layers) {
+  const want = new Set(layers);
+  return (plan.slots || [])
+    .filter((s) => s.theme === theme && want.has(s.layer) && s.theme === theme)
+    .flatMap((s) => s.cards || []).filter(Boolean);
 }
 
-async function sanguoSellSpare() {
-  const p = (matchSgBox || {}).plan || {};
-  const list = p.spare || [];
-  if (!list.length) { log("关卡卡箱没有多余层卡可卖"); return; }
-  if (!confirm(`卖掉同层多余的 ${list.length} 张层卡（留最新那张，换三国币）？\n` +
+async function sanguoSellSpare(bno) {
+  const boxName = bno === 1 ? "保险箱" : "关卡卡箱";
+  const all = (matchSgBox || {}).box || {};
+  const plan = bno === 1 ? (all.safe || {}) : (all.ex || {});
+  const list = plan.spare || [];
+  if (!list.length) { log(`${boxName}没有多余层卡可卖`); return; }
+  if (!confirm(`卖掉${boxName}同层多余的 ${list.length} 张层卡（每层留一张，换三国币）？\n` +
     list.map((s) => `  第 ${s.layer} 层 · ${s.name || "卡" + s.card_id}`).join("\n") +
-    `\n卖完卡箱会空出格子，才能继续接新给的层卡。`)) return;
+    `\n卖掉后找不回来，卖之前先看清是不是你缺的那层。`)) return;
   const done = [];
   for (const s of list) {
     const r = await fetch("/api/match/sanguo-sell", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ index: s.index, card_id: s.card_id }),
+      body: JSON.stringify({ box: bno, index: s.index, card_id: s.card_id }),
     }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
     if (!r || r.ok === false) {
       log(`卖掉「${s.name || s.card_id}」失败：${(r && r.message) || "服务端拒绝"}（已停手，后面的没动）`);
       break;
     }
     done.push(`${s.name || s.card_id} → ${r.content || "三国币"}`);
-    log(`关卡卡箱卖卡：${s.name || s.card_id}（第 ${s.layer} 层）→ ${r.content || "三国币"}`);
+    log(`${boxName}卖卡：${s.name || s.card_id}（第 ${s.layer} 层）→ ${r.content || "三国币"}`);
   }
   if (done.length) log(`本轮卖掉 ${done.length} 张：${done.join("、")}`);
   await loadMatchSanguoBox();
@@ -4208,7 +4227,7 @@ function bindMatchModeActs() {
         } else if (act === "mm-sgbox") {
           await loadMatchSanguoBox();
         } else if (act === "mm-sgsell-all") {
-          await sanguoSellSpare();
+          await sanguoSellSpare(parseInt(b.dataset.box || "0", 10));
         }
       } finally {
         restore();

@@ -1230,7 +1230,10 @@ async def sanguo_lineup(session, levelid: int) -> dict:
 #   - ex_box 满了就打不了（出战前必须先腾位）；
 #   - 同一「层」（card_list 第 4 字段，如 1502／2502／3502）只需要留最新的一张，
 #     旧的要卖掉换三国币（act=5），否则新卡没地方放；
-#   - 某套的每一层都齐了才「上交」进下一大关（上交接口未实证，见 _sg_handin TODO）。
+#   - 某套的每一层都齐了才「上交」进下一大关（上交接口未实证，见 _sg_handin TODO）；
+#   - 还有第二个箱子「**保险箱**」safe_box_data（12 格，2026-09-28 用户指出）：
+#     一样装层卡、也能卖（箱子编号 1），但**不与关卡卡箱互通**这一条没有实证，
+#     所以默认只显示、只手动卖，不进自动流程。
 # ---------------------------------------------------------------------------
 
 _SG_CARDS: dict | None = None
@@ -1258,16 +1261,30 @@ def _sg_meta(card_id) -> dict:
             "layer": slot // 1000}
 
 
-def plan_ex_box(state: dict) -> dict:
-    """只读推演关卡卡箱：哪些层齐了、缺哪层、哪些是同层里可以卖掉的多余旧卡。
+SG_BOX_EX = 0        # 关卡卡箱（ex_box_data，15 格）
+SG_BOX_SAFE = 1      # 保险箱（safe_box_data，12 格）
+
+_SG_BOX_KEY = {"ex": ("ex_box_data", "ex_box_num"),
+               "safe": ("safe_box_data", "safe_box_num")}
+
+# 一套三国卡从低到高共 5 层（位置值 15xx/25xx/35xx/45xx/55xx 的第 1 位）
+_SG_LAYERS = (1, 2, 3, 4, 5)
+
+
+def plan_box(state: dict, box: str = "ex") -> dict:
+    """只读推演某一个箱：哪些层齐了、缺哪层、哪些是同层里可以卖掉的多余卡。
 
     纯函数（不联网），便于离线验证。规则只有一条、且来自用户口述：
-    **同一位置值（同一层）只留 ts 最新的一张，其余算多余。**
+    **同一位置值（同一层）只留一张，其余算多余。**
+
+    ⚠ 保险箱里所有卡的 `ts` 都是 0（2026-09-28 实测），同层多张时只能留**第一个**，
+    不能假装「留最新」。
     """
-    ex = state.get("ex_box_data") or []
-    cap = int(state.get("ex_box_num") or len(ex) or 0)
+    dkey, ckey = _SG_BOX_KEY[box]
+    arr = state.get(dkey) or []
+    cap = int(state.get(ckey) or len(arr) or 0)
     slots: dict = {}          # slot(位置值) -> [卡信息]
-    for i, x in enumerate(ex):
+    for i, x in enumerate(arr):
         cid = int(x.get("card_id") or 0)
         if not cid:
             continue
@@ -1281,56 +1298,96 @@ def plan_ex_box(state: dict) -> dict:
         slots.setdefault(m["slot"], []).append(m)
     by_slot = []
     spare = []
-    for slot, arr in sorted(slots.items(), key=lambda kv: -kv[1][0]["ts"]):
-        arr.sort(key=lambda m: -m["ts"])
-        keep, redundant = arr[0], arr[1:]
+    for slot, a in sorted(slots.items(), key=lambda kv: -kv[1][0]["ts"]):
+        a.sort(key=lambda m: -m["ts"])
+        keep, redundant = a[0], a[1:]
         by_slot.append({"slot": slot, "layer": keep["layer"], "theme": keep["theme"],
-                        "keep": keep, "count": len(arr)})
+                        "keep": keep, "cards": a, "count": len(a)})
         spare.extend(redundant)
-    themes = sorted({m["theme"] for m in
-                     [a for arr in slots.values() for a in arr] if m["theme"]})
+    cards = [m for g in slots.values() for m in g]
     return {
+        "box": box,
         "capacity": cap,
-        "filled": sum(len(a) for a in slots.values()),
-        "free": max(0, cap - sum(len(a) for a in slots.values())),
-        "slots": by_slot,               # 按「层」分组，最新那张是 keep
-        "spare": spare,                 # 同层多出来的旧卡（可卖，换三国币）
-        "themes": themes,
+        "filled": len(cards),
+        "free": max(0, cap - len(cards)),
+        "slots": by_slot,               # 按「层」分组，保留的那张是 keep
+        "spare": spare,                 # 同层多出来的（可卖，换三国币）
+        "themes": sorted({m["theme"] for m in cards if m["theme"]}),
     }
 
 
-async def sanguo_sell_ex(session, index: int, card_id: int) -> dict:
-    """卖掉（上交）关卡卡箱里某一格的层卡（sanguo act=5 {cards:'0_{index}_{card_id}'}）。
+def plan_ex_box(state: dict) -> dict:
+    """关卡卡箱（ex_box）的只读推演。"""
+    return plan_box(state, "ex")
 
-    实证（2026-09-28，bisai2.har 00:41:34）：请求 `cards=0_5_25097` → 该卡位立刻
-    从 {card_id:25097} 变成 {card_id:0}（被清空），同时 `content=48_1614_100`
-    （100 三国币）。参数三段是 **`{箱子}_{卡位 index}_{卡 id}`**，index 与 card_id
-    必须和 ex_box_data 对得上，否则服务端回 `code -311 卡牌有变化,交易失败~`
-    （今天实测：ex_box 第 5 位已经不是 25097，照抄就 -311，卡箱纹丝不动）。
-    只卖关卡卡箱（箱子 0），不动保险箱。
+
+def plan_sg_boxes(state: dict) -> dict:
+    """关卡卡箱 + 保险箱一起看：每套缺哪几层，缺的层卡现在躺在哪个箱里。"""
+    ex, safe = plan_ex_box(state), plan_box(state, "safe")
+    holders: dict = {}          # (theme, layer) -> {"ex": n, "safe": n}
+    for bx, plan in (("ex", ex), ("safe", safe)):
+        for s in plan["slots"]:
+            h = holders.setdefault((s["theme"], s["layer"]), {"ex": 0, "safe": 0})
+            h[bx] += s["count"]
+    themes = []
+    for th in sorted({k[0] for k in holders}):
+        present = sorted({k[1] for k in holders if k[0] == th})
+        ex_missing = [L for L in _SG_LAYERS if L not in
+                      {s["layer"] for s in ex["slots"] if s["theme"] == th}]
+        themes.append({
+            "theme": th, "present": present,
+            # 整套视角（两箱合计）缺的层
+            "missing": [L for L in _SG_LAYERS if L not in present],
+            # 关卡卡箱里没有、但保险箱里有的层 —— 卡很可能就在保险箱里压着
+            "in_safe_only": [L for L in ex_missing
+                             if holders.get((th, L), {}).get("safe")],
+        })
+    return {"ex": ex, "safe": safe, "themes": themes,
+            "free_total": ex["free"] + safe["free"]}
+
+
+async def sanguo_sell(session, box: int, index: int, card_id: int) -> dict:
+    """卖掉某箱里某一格的层卡（sanguo act=5 {cards:'{箱子}_{卡位}_{卡id}'}）。
+
+    **箱子编号实证（2026-09-28 真机，各发一次）**：
+      `cards=0_5_25097` → 关卡卡箱第 5 格清空，`content=48_1614_100`；
+      `cards=1_2_25111` → 保险箱第 2 格清空，`content=48_1614_300`。
+    所以 **0 = 关卡卡箱 ex_box_data，1 = 保险箱 safe_box_data**。
+    参数必须和当前卡箱对得上，否则服务端回 `code -311 卡牌有变化,交易失败~`
+    （卡纹丝不动，可安全重试；换了三国币的卖单才会真的成交）。
     """
     return await _act(session, EP_WORLD_SANGUO, 5,
-                      cards=f"0_{int(index)}_{int(card_id)}")
+                      cards=f"{int(box)}_{int(index)}_{int(card_id)}")
 
 
-async def auto_sell_spare(session, state: dict, keep_free: int = 1) -> dict:
-    """出战前腾卡箱：把 ex_box 里同层的多余旧卡卖掉，至少留 `keep_free` 格。
+async def sanguo_sell_ex(session, index: int, card_id: int) -> dict:
+    """卖关卡卡箱（箱子 0）。"""
+    return await sanguo_sell(session, SG_BOX_EX, index, card_id)
+
+
+async def auto_sell_spare(session, state: dict, box: str = "ex",
+                          keep_free: int = 1) -> dict:
+    """腾位：把某一箱里同层的多余卡卖掉，至少留 `keep_free` 格。
 
     只在「卡箱将满」时才动手（free <= keep_free），绝不在还有空位时主动卖卡。
-    返回 {ok, sold:[…], free_after, skipped}。
+    默认只动关卡卡箱 —— 保险箱里可能压着还缺的层卡（实测：第 4 层三张全在保险箱），
+    而「保险箱 → 关卡卡箱」的搬运接口没有实证，自动卖保险箱的卡很容易把需要的卡卖掉。
+    返回 {ok, box, sold:[…], failed, free_after, skipped}。
     """
-    plan = plan_ex_box(state)
+    plan = plan_box(state, box)
     if plan["free"] > keep_free:
-        return {"ok": True, "skipped": True, "sold": [], "free_after": plan["free"]}
-    # 卡位 index 要回查 ex_box_data 的真实下标（card_list 里没有 index 字段）
-    ex = state.get("ex_box_data") or []
-    idx = {int(x.get("card_id") or 0): i for i, x in enumerate(ex)}
+        return {"ok": True, "box": box, "skipped": True, "sold": [],
+                "free_after": plan["free"]}
+    # 卡位 index 要回查该箱 real 下标（card_list 里没有 index 字段）
+    real = state.get(_SG_BOX_KEY[box][0]) or []
+    idx = {int(x.get("card_id") or 0): i for i, x in enumerate(real)}
+    bno = SG_BOX_EX if box == "ex" else SG_BOX_SAFE
     sold, failed = [], None
     for m in plan["spare"]:
         i = idx.get(m["card_id"], -1)
         if i < 0:
             continue
-        r = await sanguo_sell_ex(session, i, m["card_id"])
+        r = await sanguo_sell(session, bno, i, m["card_id"])
         d = r.get("data")
         okc = bool(r.get("ok")) and (d.get("code") if isinstance(d, dict) else None) in (0, None)
         sold.append({"index": i, "card_id": m["card_id"], "name": m["name"],
@@ -1341,8 +1398,9 @@ async def auto_sell_spare(session, state: dict, keep_free: int = 1) -> dict:
         if not okc:
             failed = sold[-1]
             break
-    after = plan_ex_box(await sanguo_state(session))["free"]
-    return {"ok": True, "sold": sold, "failed": failed, "free_after": after}
+    after = plan_box(await sanguo_state(session), box)["free"]
+    return {"ok": True, "box": box, "sold": sold, "failed": failed,
+            "free_after": after}
 
 
 async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0,

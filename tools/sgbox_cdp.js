@@ -64,21 +64,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const info = await evaluate(`(() => {
     const b = document.getElementById("match-sgbox-box");
-    const btn = document.querySelector('[data-act="mm-sgsell-all"]');
+    const btns = [...document.querySelectorAll('[data-act="mm-sgsell-all"]')];
     return {
       cnt: (document.getElementById("match-sgbox-cnt") || {}).textContent || "",
       len: b ? b.textContent.length : -1,
-      txt: b ? b.textContent.replace(/\\s+/g, " ").slice(0, 400) : "",
-      hasBtn: !!btn,
-      btnText: btn ? btn.textContent.trim() : "",
-      free: (window.matchSgBox && window.matchSgBox.plan) ? window.matchSgBox.plan.free : null,
-      spare: (window.matchSgBox && window.matchSgBox.plan) ? window.matchSgBox.plan.spare.length : null
+      txt: b ? b.textContent.replace(/\\s+/g, " ").slice(0, 600) : "",
+      nBtn: btns.length,
+      btns: btns.map((x) => ({ box: x.dataset.box, t: x.textContent.trim() })),
+      layer4: (b || "").textContent.indexOf("第 4 层") >= 0,
+      safeBlock: (b || "").textContent.indexOf("保险箱") >= 0
     };
   })()`);
   console.log("面板计数：" + info.cnt);
-  console.log("卖卡按钮：" + info.hasBtn + " 「" + info.btnText + "」");
-  console.log("多余张数：" + info.spare + "  空格：" + info.free);
   console.log("面板文本：" + info.txt);
+  console.log("卖卡按钮 " + info.nBtn + " 个：" + JSON.stringify(info.btns, null, 0));
+  console.log("面板含第 4 层行：" + info.layer4 + "　含保险箱段：" + info.safeBlock);
 
   const shot = await evaluate(`(() => {
     document.querySelector("#match-sgbox-box").scrollIntoView({ block: "center" });

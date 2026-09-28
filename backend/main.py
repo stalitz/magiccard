@@ -2680,15 +2680,16 @@ async def match_sanguo_box():
         return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
     lv = (st.get("levelData") or [{}])[0]
     return {"ok": True, "levelid": lv.get("levelid"), "freenum": st.get("freenum"),
-            "plan": mt.plan_ex_box(st),
+            "box": mt.plan_sg_boxes(st),
             "dropitem": lv.get("dropitem"), "pass": lv.get("passData"),
             "steps": lv.get("stepData")}
 
 
 @app.post("/api/match/sanguo-sell")
 async def match_sanguo_sell(req: dict):
-    """卖掉关卡卡箱里指定格的层卡（act=5），换三国币。传 {index, card_id}。
+    """卖掉某一箱里指定格的层卡（act=5），换三国币。传 {box, index, card_id}。
 
+    box 缺省 0 = 关卡卡箱，1 = 保险箱（2026-09-28 真机实证）。
     index / card_id 必须和 /api/match/sanguo-box 读到的对得上，否则服务端回 -311。
     """
     if err := _require_login():
@@ -2696,14 +2697,17 @@ async def match_sanguo_sell(req: dict):
     idx, cid = req.get("index"), req.get("card_id")
     if idx is None or cid is None:
         return {"ok": False, "message": "缺少 index / card_id"}
-    r = await mt.sanguo_sell_ex(_session, int(idx), int(cid))
+    box = int(req.get("box") if req.get("box") is not None else mt.SG_BOX_EX)
+    if box not in (mt.SG_BOX_EX, mt.SG_BOX_SAFE):
+        return {"ok": False, "message": "box 只能是 0（关卡卡箱）或 1（保险箱）"}
+    r = await mt.sanguo_sell(_session, box, int(idx), int(cid))
     if not r.get("ok"):
         return {"ok": False, "message": r.get("message") or "卖卡失败"}
     d = r.get("data") or {}
     if d.get("code") not in (0, None):
         return {"ok": False, "message": str(d.get("desc") or d.get("code"))}
-    return {"ok": True, "content": d.get("content"), "index": int(idx),
-            "card_id": int(cid), "ex_box_free": d.get("ex_box_num")}
+    return {"ok": True, "box": box, "content": d.get("content"), "index": int(idx),
+            "card_id": int(cid), "box_free": d.get(f"{'ex' if box == mt.SG_BOX_EX else 'safe'}_box_num")}
 
 
 @app.post("/api/match/pvp-fight")
