@@ -136,7 +136,10 @@ async def main():
     check("容量 15 / 已放 14 / 剩 1 格",
           p["capacity"] == 15 and p["filled"] == 14 and p["free"] == 1,
           f"free={p['free']}")
-    check("算出多余卡（可卖）", len(p["spare"]) >= 5, f"spare={len(p['spare'])}")
+    check("14 张全是不同的卡 → 一张都不该卖（同层≠同卡，别把收集进度当垃圾）",
+          len(p["spare"]) == 0,
+          f"spare={len(p['spare'])} "
+          f"{[x['name'] for x in p['spare']]}")
     check("每张多余卡都带卡名", all(x["name"] for x in p["spare"]),
           str([(x["card_id"], x["name"]) for x in p["spare"]][:3]))
     layers = sorted({(s["slot"] // 1000) for s in p["slots"]})
@@ -147,12 +150,16 @@ async def main():
     check("容量 12 / 已放 12 / 剩 0 格",
           sp["capacity"] == 12 and sp["filled"] == 12 and sp["free"] == 0,
           f"filled={sp['filled']} free={sp['free']}")
-    # 一张层卡可以有多个「同层不同张」：25113/25114/25115 都是层 4、位置值都是 4502，
-    # 所以第 4 层那组是 3 张（留 1 张，另 2 张算多余）。
-    g4 = next((s for s in sp["slots"] if s["layer"] == 4), None)
-    check("保险箱第 4 层一组 3 张、只留 1 张",
-          bool(g4) and g4["count"] == 3 and len(sp["spare"]) == 7,
-          str([(s["layer"], s["keep"]["card_id"], s["count"]) for s in sp["slots"]]))
+    # 第 4 层三张（25113/25114/25115）是**三张不同的卡**，位置值同为 4502：
+    # 一张都不能当「同层多余」卖掉 —— 这正是之前判错的地方
+    g4 = [s for s in sp["slots"] if s["layer"] == 4]
+    check("保险箱第 4 层 3 张分成 3 组、每组都留",
+          len(g4) == 3 and all(s["count"] == 1 for s in g4)
+          and {s["keep"]["card_id"] for s in g4} == {25113, 25114, 25115},
+          str([(s["layer"], s["keep"]["card_id"]) for s in g4]))
+    dup = [x["card_id"] for x in sp["spare"]]
+    check("真正多余的是 25111、25116 各多的那 1 张（同名卡重复）",
+          sorted(dup) == [25111, 25116], str(dup))
     check("保险箱 ts 全是 0 → 不假装「留最新」",
           all(m["ts"] == 0 for m in sp["spare"] + [s["keep"] for s in sp["slots"]]))
 
@@ -168,51 +175,104 @@ async def main():
           bool(t1746) and t1746["missing"] == [4, 5] and not t1746["in_safe_only"],
           str(t1746))
 
-    print("\n== auto_sell_spare（关卡卡箱卖多余旧卡腾位）")
-    sim = BoxSim(STATE())
+    print("\n== auto_sell_spare（卖**重复**卡腾位；构造 25110 重复的快照）")
+    dup_ex = STATE(ex=EX[:-1] + [dict(EX[0])])   # 15 格全满，且 25110 放了两张
+    sim = BoxSim(dup_ex)
     r = await mt.auto_sell_spare(sim, sim.state, keep_free=1)
-    check("确实卖掉了一些", len(r["sold"]) >= 5, f"卖了 {len(r['sold'])} 张")
+    check("确实卖掉重复的那张", len(r["sold"]) == 1
+          and r["sold"][0]["card_id"] == 25110, str(r["sold"]))
     check("每张都带层/名字/三国币",
           all(s["name"] and s["slot"] and s["content"] for s in r["sold"]),
           str(r["sold"][0] if r["sold"] else {}))
-    check("卖完空出格子", r["free_after"] >= 7, f"free_after={r['free_after']}")
+    check("卖完空出格子", r["free_after"] >= 1, f"free_after={r['free_after']}")
     check("参数一律 0_{index}_{card_id}（箱子 0）",
           all(c["cards"].startswith("0_") for c in sim.calls if "cards" in c),
           str([c["cards"] for c in sim.calls if "cards" in c][:2]))
     check("不动保险箱",
           all(not c["cards"].startswith("1_") for c in sim.calls if "cards" in c))
 
-    print("\n== auto_sell_spare 保险箱（箱子 1）")
+    print("\n== auto_sell_spare 保险箱（箱子 1，快照自带 25111/25116 各重复一张）")
     sim2 = BoxSim(STATE())
     r2 = await mt.auto_sell_spare(sim2, sim2.state, box="safe", keep_free=1)
-    check("保险箱卖掉重复卡", len(r2["sold"]) >= 2, f"卖了 {len(r2['sold'])} 张")
+    check("只卖同名重复的 2 张，第 4 层三张一张不碰",
+          sorted(s["card_id"] for s in r2["sold"]) == [25111, 25116],
+          str([(s["card_id"], s["name"]) for s in r2["sold"]]))
     check("参数一律 1_{index}_{card_id}（箱子 1）",
           all(c["cards"].startswith("1_") for c in sim2.calls if "cards" in c),
           str([c["cards"] for c in sim2.calls if "cards" in c][:2]))
-    check("卖完保险箱空出格子", r2["free_after"] >= 2, f"free_after={r2['free_after']}")
+    check("卖完保险箱空出 2 格", r2["free_after"] == 2, f"free_after={r2['free_after']}")
 
-    print("\n== 还有空位时不主动卖卡")
+    print("\n== 没有重复卡（哪怕同层挤了 6 张）也不主动卖")
     roomy = STATE(ex=[dict(EX[0]), {"card_id": 0, "ts": 0}])
     sim3 = BoxSim(roomy)
     r3 = await mt.auto_sell_spare(sim3, roomy, keep_free=1)
-    check("空 13 格 → skipped 且一次都没卖",
+    check("还有空位 → skipped 且一次都没卖",
           r3.get("skipped") and not r3["sold"]
           and not [c for c in sim3.calls if "cards" in c])
 
     print("\n== 卡位对不上时 -311，必须记失败并停手")
-    sim4 = ErrSim(STATE())
+    dup_err = STATE(ex=EX[:-1] + [dict(EX[0])])
+    sim4 = ErrSim(dup_err)
     r4 = await mt.auto_sell_spare(sim4, sim4.state, keep_free=1)
     check("失败被记进 sold 且 failed 非空", bool(r4.get("failed")),
           str(r4.get("failed")))
 
-    print("\n== 一键出战前的腾位仍然只动关卡卡箱")
+    print("\n== 一键出战前的腾位：快照里没有重复卡就一张不动")
     st5 = STATE()
     sim5 = BoxSim(st5)
     r5 = await mt.auto_sell_spare(sim5, st5, keep_free=1)
-    check("关卡卡箱腾出位置", r5["free_after"] >= 7, f"free_after={r5['free_after']}")
+    check("没重复卡 → skipped，卡箱原样", r5.get("skipped")
+          and not r5["sold"] and r5["free_after"] == 1,
+          f"free_after={r5['free_after']} sold={r5['sold']}")
     check("保险箱 12 格纹丝不动",
           sum(1 for x in sim5.state["safe_box_data"] if x["card_id"]) == 12,
           f"保险箱剩 {sum(1 for x in sim5.state['safe_box_data'] if x['card_id'])} 张")
+
+    print("\n== 层进度：小关 10N = 第 N 层，推荐打卡少的层")
+    st6 = STATE()
+    p6 = mt.plan_sg_layers(st6)
+    lv = {l["layer"]: l for l in p6["levels"]}
+    check("算出 1..5 五层", sorted(lv) == [1, 2, 3, 4, 5], str(sorted(lv)))
+    check("每层都给了对应小关号 10N",
+          all(l["levelid"] == 100 + l["layer"] for l in p6["levels"]),
+          str({l["layer"]: l["levelid"] for l in p6["levels"]}))
+    # 每层两套的张数固定 8/5/4/3/1
+    want_need = {1: 16, 2: 10, 3: 8, 4: 6, 5: 2}
+    check("每层总需求 = 两套各 8/5/4/3/1",
+          all(lv[L]["need"] == want_need[L] for L in want_need),
+          str({L: lv[L]["need"] for L in sorted(lv)}))
+    check("第 4 层在关卡卡箱里一张都没有（只有保险箱压着那一张）",
+          all(r["have_ex"] == 0 for r in lv[4]["by_theme"]),
+          str([(r["theme"], r["have_ex"], r["have_safe"]) for r in lv[4]["by_theme"]]))
+    # STATE() 没有 levelId，推荐退化为「gap 最小那一层」= 第 5 层（只差 1 张）
+    check("没给当前关时退化为推 gap 最小的第 5 层",
+          bool(p6["recommend"]) and p6["recommend"]["layer"] == 5
+          and p6["recommend"].get("from_now") is False,
+          str(p6["recommend"]))
+    check("推荐理由里带小关号",
+          "小关 105" in (p6["recommend"] or {}).get("why", ""),
+          (p6["recommend"] or {}).get("why", ""))
+    # 给了当前关 204（= 第 4 层）就必须先保当前关，别去推荐打不到的 105
+    st7 = STATE()
+    st7["levelId"] = 204
+    p7 = mt.plan_sg_layers(st7)
+    check("当前关 204 时推荐打 204 自己（不是 105）",
+          bool(p7["recommend"]) and p7["recommend"]["levelid"] == 204
+          and p7["recommend"].get("from_now") is True,
+          str(p7["recommend"]))
+    # open 只按层号升序供展示，挑「打哪个关」由 recommend 按 gap 取最小
+    check("open 覆盖所有没齐的层、按层号升序",
+          [g["layer"] for g in p6["open"]] == sorted(g["layer"] for g in p6["open"])
+          and len(p6["open"]) == sum(1 for L in want_need if lv[L]["have"] != lv[L]["need"]),
+          str([(g["layer"], g["gap"]) for g in p6["open"]]))
+    check("recommend 的 gap 是 open 里最小的一档",
+          (p6["recommend"] or {}).get("gap") ==
+          min(g["gap"] for g in p6["open"]),
+          f'recommend={p6["recommend"] and p6["recommend"]["gap"]}')
+    check("每层 gap 与该层已持有张数一致",
+          all(lv[g["layer"]]["need"] - lv[g["layer"]]["have"] == g["gap"]
+              for g in p6["open"]),
+          str([(g["layer"], g["gap"], lv[g["layer"]]["have"]) for g in p6["open"]]))
 
     print(f"\n通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:

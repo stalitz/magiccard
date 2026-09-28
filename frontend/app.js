@@ -3891,7 +3891,8 @@ async function loadMatchSanguoBox() {
 function sgBoxPanel(label, plan, bno) {
   const rows = (plan.slots || []).map((s) => {
     const keep = s.keep || {};
-    const extra = s.count > 1 ? `（本层共 ${s.count} 张，留「${keep.name || "?"}」）` : "";
+    // 同一层里不同的卡都要收集；只有同名卡拿到 2+ 张，多出来的才是多余
+    const extra = s.count > 1 ? `（同名卡拿到 ${s.count} 张，多 ${s.count - 1} 张可卖）` : "";
     return matchRow(`第 ${s.layer} 层`, `${keep.name || "?"}${extra}`);
   }).join("");
   const spare = plan.spare || [];
@@ -3900,10 +3901,10 @@ function sgBoxPanel(label, plan, bno) {
     `<span style="opacity:.7;font-weight:400">　${plan.filled}/${plan.capacity} 格</span></div>` +
     (rows || matchRow("层卡", "（空）")) +
     (spare.length
-      ? matchRow("同层多余（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
+      ? matchRow("重复多余的（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
         `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all" data-box="${bno}">` +
-        `卖掉${label}多余的 ${spare.length} 张（换三国币）</button></div>`
-      : matchRow("同层多余（可卖）", "无，每层都只留了一张")) +
+        `卖掉${label}重复的 ${spare.length} 张（换三国币）</button></div>`
+      : matchRow("重复多余的（可卖）", "无 —— 同一层的不同卡都要留着收集")) +
     `</div>`;
 }
 
@@ -3919,31 +3920,61 @@ function renderMatchSanguoBox() {
   const ex = all.ex || {}, safe = all.safe || {};
   cnt.textContent = `关卡卡箱 ${ex.filled || 0}/${ex.capacity || 0} · 保险箱 ${safe.filled || 0}/${safe.capacity || 0}`;
 
-  // 缺哪几层；「只躺在保险箱里」的层单独点出来
-  const diag = (all.themes || []).map((t) => {
-    const miss = t.missing || [], inSafe = t.in_safe_only || [];
-    if (!miss.length && !inSafe.length) return "";
-    const label = miss.length
-      ? `已有 ${t.present.join("/")} 层，缺 ${miss.join("/")}`
-      : `全套 5 层都有，但关卡卡箱里缺第 ${inSafe.join("/")} 层`;
-    return matchRow(`${t.theme} 套`, label) +
-      (inSafe.length
-        ? `<div style="color:var(--danger);margin:2px 0">第 ${inSafe.join("/")} 层一张都不在关卡卡箱里，` +
-          `但保险箱里压着：${safeCardsOf(safe, t.theme, inSafe)
-            .map((m) => m.name || "卡" + m.card_id).join("、") || "同层的卡"}。</div>`
-        : "");
-  }).join("");
+  // 缺哪几层由下面的层进度表讲清楚，这里只补层表说不了的一条：
+  // 缺的那层卡具体躺在保险箱哪一格（卖保险箱前必须知道）
+  const diag = (all.themes || [])
+    .filter((t) => (t.in_safe_only || []).length)
+    .map((t) => `<div style="color:var(--danger);margin:2px 0">${t.theme} 套缺的第 ` +
+      `${t.in_safe_only.join("/")} 层卡不在关卡卡箱里，保险箱压着：` +
+      `${safeCardsOf(safe, t.theme, t.in_safe_only)
+        .map((m) => m.name || "卡" + m.card_id).join("、")}。</div>`)
+    .join("");
 
   box.innerHTML = `<div class="state-box">` +
     matchRow("当前大关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
     diag +
+    sgLayerPanel(d.layers || {}) +
     sgBoxPanel("关卡卡箱", ex, 0) +
     sgBoxPanel("保险箱", safe, 1) +
     `<div style="opacity:.7;margin:4px 0;font-size:11.5px">` +
-    `每打过一小关会给一张层卡进关卡卡箱；集齐一套的全部 5 层才能上交、进入下一大关。` +
+    `打小关 10N 就掉第 N 层的卡；同一层里不同的卡都要收集，只有同名重复的才卖掉换三国币。` +
+    `集齐一套的全部 5 层才能上交、进入下一大关。` +
     `保险箱是另一个箱子、也能卖卡换三国币，但两箱之间怎么搬没有实证，所以只显示、不自动动它。` +
     `</div>` +
     `</div>`;
+}
+
+// 层进度 + 该打哪一关：小关 10N 就掉第 N 层的卡，层里卡越少越好集齐
+function sgLayerPanel(L) {
+  const rec = L.recommend || null;
+  const head = `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-weight:600">` +
+    `层进度（打小关 10N 就掉第 N 层的卡）</div>`;
+  const recHtml = rec
+    ? `<div style="color:var(--danger);margin:3px 0">` +
+      `建议打<b>小关 ${rec.levelid}</b>（第 ${rec.layer} 层）：` +
+      `${rec.why}，比第 1 层那种 8 张一套的快得多。</div>`
+    : `<div style="color:var(--ok,var(--muted,#888));margin:3px 0">每一层都齐了，可以继续上交了。</div>`;
+  const rows = (L.levels || []).map((lv) => {
+    const per = (lv.by_theme || []).map((r) => {
+      const tag = r.done ? "已齐" : (r.need - r.have) + " 张缺";
+      return `${r.theme} 套 ${r.have}/${r.need}（${tag}）`;
+    }).join("；");
+    // 推荐关号不一定等于 10N（当前关 204 属于第 4 层），别写成 104
+    const mark = (rec && rec.layer === lv.layer)
+      ? `<br><b style="color:var(--danger)">现在就打小关 ${rec.levelid}</b>` : "";
+    // 按箱合计，别按套重复列（两套各 1 张不该写成「关卡卡箱 1 + 关卡卡箱 1」）
+    const nEx = (lv.by_theme || []).reduce((s, r) => s + r.have_ex, 0);
+    const nSf = (lv.by_theme || []).reduce((s, r) => s + r.have_safe, 0);
+    const where = [];
+    if (nEx) where.push(`关卡卡箱 ${nEx}`);
+    if (nSf) where.push(`保险箱 ${nSf}`);
+    const none = where.length
+      ? where.join(" + ") + "（两套分着算）"
+      : "一个都没有，得打小关 " + lv.levelid + " 才出";
+    return matchRow(`第 ${lv.layer} 层 · 小关 ${lv.levelid}`,
+      `${per}${mark}<br><span style="opacity:.7;font-size:11.5px">现在：${none}</span>`);
+  }).join("");
+  return head + recHtml + rows;
 }
 
 // 某个箱里「属于这几层」的全部卡名（同层有多张同层卡时一张不漏）
@@ -3960,9 +3991,9 @@ async function sanguoSellSpare(bno) {
   const plan = bno === 1 ? (all.safe || {}) : (all.ex || {});
   const list = plan.spare || [];
   if (!list.length) { log(`${boxName}没有多余层卡可卖`); return; }
-  if (!confirm(`卖掉${boxName}同层多余的 ${list.length} 张层卡（每层留一张，换三国币）？\n` +
+  if (!confirm(`卖掉${boxName}重复多余的 ${list.length} 张层卡（同名卡留一张，换三国币）？\n` +
     list.map((s) => `  第 ${s.layer} 层 · ${s.name || "卡" + s.card_id}`).join("\n") +
-    `\n卖掉后找不回来，卖之前先看清是不是你缺的那层。`)) return;
+    `\n注意：同一层里**不同的卡**是要收集的，只有同名重复的才会出现在这里。`)) return;
   const done = [];
   for (const s of list) {
     const r = await fetch("/api/match/sanguo-sell", {

@@ -2680,7 +2680,7 @@ async def match_sanguo_box():
         return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
     lv = (st.get("levelData") or [{}])[0]
     return {"ok": True, "levelid": lv.get("levelid"), "freenum": st.get("freenum"),
-            "box": mt.plan_sg_boxes(st),
+            "box": mt.plan_sg_boxes(st), "layers": mt.plan_sg_layers(st),
             "dropitem": lv.get("dropitem"), "pass": lv.get("passData"),
             "steps": lv.get("stepData")}
 

@@ -1272,18 +1272,22 @@ _SG_LAYERS = (1, 2, 3, 4, 5)
 
 
 def plan_box(state: dict, box: str = "ex") -> dict:
-    """只读推演某一个箱：哪些层齐了、缺哪层、哪些是同层里可以卖掉的多余卡。
+    """只读推演某一个箱：哪些卡重复了（可卖）、各层收集进度。
 
-    纯函数（不联网），便于离线验证。规则只有一条、且来自用户口述：
-    **同一位置值（同一层）只留一张，其余算多余。**
+    纯函数（不联网），便于离线验证。
 
-    ⚠ 保险箱里所有卡的 `ts` 都是 0（2026-09-28 实测），同层多张时只能留**第一个**，
-    不能假装「留最新」。
+    **「多余」的判据是同一张卡重复，不是同层**（2026-09-28 晚修正，之前判错了）：
+    card_lib 里三国套的位置值只编码层号（第 3 层 4 张全是 3502、第 4 层 3 张全是
+    4502），同层内每张是**不同的卡**、都要收集 —— 只有拿到 2 张「黄天当立」这种
+    **同名同 id** 的重复卡才该卖。用户口述「小关过了随机给一张层卡，把多余的买掉，
+    留下新卡」指的正是重复卡，不是同层旧卡。
+
+    ⚠ 保险箱里所有卡的 `ts` 都是 0（2026-09-28 实测），重复时只能留**第一个**。
     """
     dkey, ckey = _SG_BOX_KEY[box]
     arr = state.get(dkey) or []
     cap = int(state.get(ckey) or len(arr) or 0)
-    slots: dict = {}          # slot(位置值) -> [卡信息]
+    slots: dict = {}          # slot(位置值=层) -> [卡信息]
     for i, x in enumerate(arr):
         cid = int(x.get("card_id") or 0)
         if not cid:
@@ -1296,22 +1300,29 @@ def plan_box(state: dict, box: str = "ex") -> dict:
             m["name"] = f"卡{cid}"
         m["ts"] = int(x.get("ts") or 0)
         slots.setdefault(m["slot"], []).append(m)
-    by_slot = []
-    spare = []
+    by_slot, spare = [], []
     for slot, a in sorted(slots.items(), key=lambda kv: -kv[1][0]["ts"]):
-        a.sort(key=lambda m: -m["ts"])
-        keep, redundant = a[0], a[1:]
-        by_slot.append({"slot": slot, "layer": keep["layer"], "theme": keep["theme"],
-                        "keep": keep, "cards": a, "count": len(a)})
-        spare.extend(redundant)
+        # 同 slot = 同层。层内按卡 id 再分：同 id 重复的才是多余，不同的卡都要留
+        seen: dict = {}
+        for m in sorted(a, key=lambda m: -m["ts"]):
+            g = seen.setdefault(m["card_id"],
+                                {"slot": slot, "layer": m["layer"],
+                                 "theme": m["theme"],
+                                 "keep": m, "cards": [], "count": 0})
+            g["cards"].append(m)
+            g["count"] += 1
+            if len(g["cards"]) > 1:
+                spare.append(m)
+        by_slot.extend(sorted(seen.values(),
+                              key=lambda g: -g["keep"]["ts"]))
     cards = [m for g in slots.values() for m in g]
     return {
         "box": box,
         "capacity": cap,
         "filled": len(cards),
         "free": max(0, cap - len(cards)),
-        "slots": by_slot,               # 按「层」分组，保留的那张是 keep
-        "spare": spare,                 # 同层多出来的（可卖，换三国币）
+        "slots": by_slot,               # 按「层」再按卡分组，每张不同的卡一个组
+        "spare": spare,                 # 同一张卡的第 2+ 张（可卖，换三国币）
         "themes": sorted({m["theme"] for m in cards if m["theme"]}),
     }
 
@@ -1346,6 +1357,95 @@ def plan_sg_boxes(state: dict) -> dict:
             "free_total": ex["free"] + safe["free"]}
 
 
+def plan_sg_layers(state: dict) -> dict:
+    """层进度 + **该打哪一关**（小关 ↔ 层的对应关系）。
+
+    实证（2026-09-28，act=1 的 logData 里每条通关记录都带 levelid 与 sitem）：
+      小关 101 通关给的卡 = 第 1 层（围困长社 / 白波军 / 黄巾军 …）；
+      小关 102 给的 = 第 2 层（黄巾力士 / 三十六方渠帅）；
+      小关 103 给的 = 第 3 层（岁在甲子），小关 203 给的 = 第 3 层（吕布投董）。
+    配合 card_lib 里每层张数 8/5/4/3/1（两套 1745 / 1746 完全一样），
+    规律即 **小关号 = 100 + 层号**（101…105），打哪关掉哪层的卡。
+
+    所以「还卡在哪儿」其实是「**还差哪几层的卡没打出来**」；层里卡越少
+    （第 5 层 1 张、第 4 层 3 张）就越快集齐 —— 用户原话：
+    「小关和层少的卡有关，要打少卡的小关，这样才能集齐」。
+
+    纯函数（不联网），便于离线验证。已持有张数按「套」分别算，不做两套混算，
+    免得「一套齐了」被另一套的缺张掩盖。
+    """
+    ex, safe = plan_ex_box(state), plan_box(state, "safe")
+    lib = _sg_cards()
+    # (theme, layer) -> {need, cards}
+    spec: dict = {}
+    for cid, c in lib.items():
+        th, pos = int(c[1]), int(c[3])
+        if th in (1745, 1746):
+            s = spec.setdefault((th, pos // 1000), {"need": 0, "cards": []})
+            s["need"] += 1
+            s["cards"].append({"card_id": cid, "name": str(c[2]), "theme": th,
+                               "layer": pos // 1000})
+    for s in spec.values():
+        s["cards"].sort(key=lambda m: m["card_id"])
+
+    def have_of(plan, th, layer) -> int:
+        return sum(1 for s in plan["slots"]
+                   if s["theme"] == th and s["layer"] == layer)
+
+    levels, open_gaps = [], []
+    for layer in _SG_LAYERS:
+        ths = sorted({k[0] for k in spec if k[1] == layer})
+        rows = []
+        for th in ths:
+            s = spec.get((th, layer)) or {"need": 0, "cards": []}
+            he, hs = have_of(ex, th, layer), have_of(safe, th, layer)
+            have = min(s["need"], he + hs)
+            rows.append({"theme": th, "need": s["need"], "have": have,
+                         "have_ex": he, "have_safe": hs,
+                         "done": have >= s["need"],
+                         "cards": s["cards"],
+                         # 一张都没有、且既不在关卡卡箱也不在保险箱 = 只能靠打出来
+                         "in_boxes": he + hs})
+        levels.append({
+            "layer": layer, "levelid": 100 + layer,
+            "by_theme": rows,
+            "need": sum(r["need"] for r in rows),
+            "have": sum(r["have"] for r in rows),
+            "done": all(r["done"] for r in rows),
+            "names": [c["name"] for r in rows for c in r["cards"]],
+        })
+        gap = sum(r["need"] - r["have"] for r in rows if not r["done"])
+        if gap:
+            open_gaps.append({"layer": layer, "levelid": 100 + layer,
+                              "gap": gap, "done": False})
+    # ⚠ 只认顶层 levelId：真机实测顶层 `levelId=204` 而 `levelData[0].levelid=102`
+    #   是上一关的旧残留记录（isget=0 也没通过），拿它当「当前关」会错推一整层。
+    levelid_now = state.get("levelId")
+    # 推荐打哪一关。卡最少的层不一定打得着 —— 小关号跨大关连续，
+    # 「服务端刚给的当前关」才是现在真能打的（2026-09-28 实证：levelId=204 → 第 4 层，
+    # 而 105 属于下一大关）。所以先保当前关，当前关那层已经齐了才退而挑 gap 最小的。
+    recommend = None
+    if open_gaps:
+        now_layer = int(levelid_now) % 100 if int(levelid_now or 0) else None
+        pick = next((g for g in open_gaps if g["layer"] == now_layer), None)
+        if pick is None:
+            pick = min(open_gaps, key=lambda g: (g["gap"], g["layer"]))
+        lv = next(l for l in levels if l["layer"] == pick["layer"])
+        recommend = dict(pick)
+        # 打的是「服务端给的当前关号」（如 levelId=204），不是按层号推出来的 104
+        if pick["layer"] == now_layer:
+            recommend["levelid"] = int(levelid_now)
+        recommend["names"] = lv["names"]
+        recommend["from_now"] = pick["layer"] == now_layer
+        recommend["why"] = (f"服务端给的当前关（{levelid_now}）正好就是第 {pick['layer']} 层，"
+                            f"一套只差 {pick['gap']} 张，打它最划算"
+                            if pick["layer"] == now_layer else
+                            f"第 {pick['layer']} 层一套只差 {pick['gap']} 张，打小关 "
+                            f"{pick['levelid']} 就能补齐（要这关已解锁）")
+    return {"levels": levels, "open": open_gaps, "recommend": recommend,
+            "levelid_now": levelid_now}
+
+
 async def sanguo_sell(session, box: int, index: int, card_id: int) -> dict:
     """卖掉某箱里某一格的层卡（sanguo act=5 {cards:'{箱子}_{卡位}_{卡id}'}）。
 
@@ -1375,7 +1475,7 @@ async def auto_sell_spare(session, state: dict, box: str = "ex",
     返回 {ok, box, sold:[…], failed, free_after, skipped}。
     """
     plan = plan_box(state, box)
-    if plan["free"] > keep_free:
+    if plan["free"] > keep_free or not plan["spare"]:
         return {"ok": True, "box": box, "skipped": True, "sold": [],
                 "free_after": plan["free"]}
     # 卡位 index 要回查该箱 real 下标（card_list 里没有 index 字段）
