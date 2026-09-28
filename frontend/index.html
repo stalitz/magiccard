@@ -1339,7 +1339,6 @@
           <div class="msub-bar" id="match-sub-bar">
             <button class="tab active" data-msub="home">猫窝日常</button>
             <button class="tab" data-msub="race">出战（比赛）</button>
-            <button class="tab" data-msub="pvp">竞技场 · 日榜</button>
             <button class="tab" data-msub="union">工会 · 公会战</button>
             <button class="tab" data-msub="xiyou">西游记</button>
             <button class="tab" data-msub="sanguo">三国战役</button>
@@ -1380,6 +1379,22 @@
               <button id="home-all" class="btn sm ok">一键全部（自动跑完）</button>
               <button id="claim-all" class="btn sm">一键领奖（各玩法奖励，零消耗）</button>
               <span id="home-all-st" class="hint"></span>
+            </div>
+            <!-- 竞技场（pvp）状态与操作：原本独占一个「竞技场 · 日榜」tab，
+                 2026-09-28 按用户定调并入猫窝日常——点赞/挑战都由「一键全部」跑，榜没有展示价值。 -->
+            <div class="lst" id="match-arena" style="margin:0 0 10px">
+              <div class="lst-head"><span class="t">竞技场 · 每日（pvp act=1 状态 / act=14 我的名次）</span>
+                <span class="cnt" id="match-arena-cnt"></span></div>
+              <div id="match-arena-box">
+                <div class="state-box"><span class="spinner"></span>正在读取竞技场…</div>
+              </div>
+              <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
+                <button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="领奖中">领竞技奖励</button>
+                <button class="btn sm" data-act="mm-flush" data-idle="刷对手中">刷对手</button>
+                <button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战中">挑战对手（消耗）</button>
+                <button class="btn sm" data-act="mm-arena-zan" data-idle="点赞中">点赞竞技榜（第一个可赞）</button>
+                <span class="hint" style="font-size:12px">竞技场点赞＝榜里第一个可赞对象，每天 1 次；「一键全部」已自动点，这里只是手动补点。</span>
+              </div>
             </div>
             <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 兑红宝石 → 竞技自动</b>
               （玩耍严格排在竞技之前）；糖果不够会先用积分换大糖果再喂。
@@ -1439,38 +1454,6 @@
             </div>
           </div>
           </div><!-- /msub-race（此处不能多关一层：再关会把 .lib 提前闭合，导致后面所有 msub 塌出布局） -->
-
-          <div id="msub-pvp" class="msub">
-            <div class="lib-toolbar" style="gap:8px;padding:8px 12px;flex-wrap:wrap">
-              <button id="match-pvp" class="btn sm" data-idle="刷新竞技场">刷新竞技场</button>
-              <button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="一键领奖">一键领奖</button>
-              <button class="btn sm ghost" data-act="mm-flush" data-idle="刷对手">刷对手</button>
-              <button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战首位">挑战首位（消耗）</button>
-              <span class="hint" style="font-size:12px">竞技场每天 4 场（surplus 为剩余），挑战走 pvp-fight；日榜可点赞。</span>
-            </div>
-            <div class="lib-body dg-cols">
-              <div class="dg-col" style="flex:1">
-                <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">竞技场状态（pvp act=1）</span>
-                    <span class="cnt" id="match-pvp-state-cnt"></span></div>
-                  <div id="match-pvp-state-box">
-                    <div class="state-box"><span class="spinner"></span>正在读取竞技场…</div>
-                  </div>
-                </div>
-              </div>
-              <div class="dg-col" style="flex:1.35">
-                <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t"
-                      title="游戏内「竞技场」的排行榜。注意：这是「竞技比赛榜」（pvp act=14）；
-                    「每日比赛榜」是另一个（competition act=9），两个榜每天各可赞 1 次">竞技榜 · 日榜（pvp act=14）</span>
-                    <span class="cnt" id="match-pvp-cnt"></span></div>
-                  <div id="match-pvp-box">
-                    <div class="state-box"><span class="spinner"></span>正在读取竞技榜…</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
 
           <div id="msub-union" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
@@ -1596,7 +1579,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928b"></script>
+<script src="/app.js?v=20260928c"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

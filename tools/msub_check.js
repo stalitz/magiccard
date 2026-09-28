@@ -39,8 +39,8 @@ w.alert = () => {};
 const assert = (c, m) => { console.log((c ? "  ✓ " : "  ✗ ") + m); if (!c) process.exitCode = 1; };
 const panel = (k) => w.document.getElementById("msub-" + k);
 // 2026-09-27：西游记 / 三国战役拆成独立 tab，key 列表要同步
-// 公会战并入工会、「各玩法一键」删除 → 6 个 tab
-const SUB_KEYS = ["home", "race", "pvp", "union", "xiyou", "sanguo"];
+// 2026-09-28：「竞技场 · 日榜」并入猫窝日常（榜单没展示价值，点赞/挑战都归一键全部）→ 5 个 tab
+const SUB_KEYS = ["home", "race", "union", "xiyou", "sanguo"];
 const onKeys = () => SUB_KEYS
   .filter((k) => panel(k) && panel(k).classList.contains("on"));
 
@@ -66,10 +66,13 @@ const onKeys = () => SUB_KEYS
   };
   assert(inSub("match-state-box", "race"), "比赛状态在 msub-race 内");
   assert(inSub("home-box", "home"), "猫窝 daily 在 msub-home 内");
-  assert(inSub("match-pvp-box", "pvp"), "PVP 日榜在 msub-pvp 内");
   assert(inSub("match-union-box", "union"), "工会在 msub-union 内");
   assert(inSub("match-gvg-box", "union"), "公会战合并进 msub-union（不再单独一个 tab）");
-  assert(inSub("match-pvp-state-box", "pvp"), "竞技场状态在 msub-pvp 内（与日榜同 tab）");
+  // 竞技场：2026-09-28 从独立 tab 并入猫窝日常，只留状态块 + 动作钮，不再列榜单
+  assert(inSub("match-arena-box", "home"), "竞技场状态块在「猫窝日常」内（原 msub-pvp 已删）");
+  assert(!inSub("match-arena-box", "pvp"), "不再存在 msub-pvp 容器");
+  assert(!!w.document.querySelector("#match-arena [data-act='mm-arena-zan']"),
+    "竞技场留了「点赞（第一个可赞）」手动入口");
 
   // 按钮归属（2026-09-26 定调）：顶部工具栏一个按钮都不留，功能按钮全部下沉到所属子模块
   const topBtns = w.document.querySelectorAll("#pane-match > .lib > .lib-toolbar button").length;
@@ -96,21 +99,24 @@ const onKeys = () => SUB_KEYS
   catch (e) { console.log("  切换页面失败:", e.message); }
   console.log("  本轮请求：", calls.map((c) => c.replace(BASE, "")).join(" , ") || "（无）");
   assert(calls.some((c) => c.includes("/api/home/state")), "已加载猫窝日常状态");
-  assert(!calls.some((c) => c.includes("/api/match/pvp")), "没有抢先加载 PVP 日榜");
+  // 竞技场状态块就在猫窝日常，日常停留就跟着拉（不再等切 tab）
+  assert(calls.some((c) => c.includes("/api/match/pvp")), "猫窝日常已带拉竞技场状态（act=14 我的名次）");
+  assert(calls.some((c) => c.includes("/api/match/pvp-extra")), "猫窝日常已带拉竞技场次数/对手");
   assert(!calls.some((c) => c.includes("/api/match/union")), "没有抢先加载工会");
   // 2026-09-27：西游记 / 三国战役各自一个 tab，进页面不许抢先拉
   assert(!calls.some((c) => c.includes("/api/match/sanguo")), "没有抢先加载三国战役");
   assert(!calls.some((c) => c.includes("/api/match/explore")), "没有抢先加载西游记");
 
-  console.log("== 点击 tab：切到「PVP 日榜」才拉 PVP ==");
+  console.log("== 切到「出战（比赛）」：只拉比赛自己的接口 ==");
   calls.length = 0;
   try {
-    await w.eval("(async()=>{ switchMatchSub('pvp'); await new Promise(r=>setTimeout(r,60)); })()");
+    await w.eval("(async()=>{ switchMatchSub('race'); await new Promise(r=>setTimeout(r,60)); })()");
   } catch (e) { console.log("  切换失败:", e.message); }
-  assert(onKeys().join(",") === "pvp", `只显示 PVP 子模块（当前：${onKeys().join(",")}）`);
-  assert(calls.some((c) => c.includes("/api/match/pvp")), "切过去才拉 PVP 接口");
-  assert(calls.some((c) => c.includes("/api/match/pvp-extra")), "同时拉竞技场状态（日榜 + 次数/对手）");
-  assert(!calls.some((c) => c.includes("/api/match/state")), "没把比赛状态又拉一遍");
+  assert(onKeys().join(",") === "race", `只显示出战子模块（当前：${onKeys().join(",")}）`);
+  assert(calls.some((c) => c.includes("/api/match/state")), "切过去才拉比赛状态");
+  assert(calls.some((c) => c.includes("/api/match/race-log")), "同时拉出战记录");
+  assert(!calls.some((c) => c.includes("/api/match/union")), "比赛 tab 不拉工会");
+  assert(!calls.some((c) => c.includes("/api/match/sanguo")), "比赛 tab 不拉三国");
 
   console.log("== 点击 tab：工会（含公会战，一个 tab 一次拉全） ==");
   calls.length = 0;

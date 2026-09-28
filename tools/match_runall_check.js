@@ -2,7 +2,7 @@
  * 每日比赛页冒烟（2026-09-26 v2）
  *
  * 验收四件事：
- *  ① 子玩法 tab 恢复：6 个 tab、默认停在「猫窝日常」（主界面）、比赛是子玩法之一
+ *  ① 子玩法 tab 恢复：默认停在「猫窝日常」（主界面）、比赛是子玩法之一
  *  ② 工具栏按钮绑的函数**全都真实存在**（上一版 feedAllCats 等绑了不存在的函数，点了必 ReferenceError）
  *  ③ 一键比赛确实会 confirm 消耗次数、逐场打完、并顺带领奖
  *  ④ 比赛状态只留比赛相关字段（talent/clover/dzs/season/unionid 不再渲染）
@@ -110,11 +110,22 @@ const PVP = {
                 { rank: 3, uin: 285416308, nick: "烟雨濛濛", score: 4895, ce: 144093 }],
   min_score: 2248, max_score: 4922,
 };
+// 竞技场状态（pvp act=1）：两个次数口径都整份透出，surplus / free_pvp_num 语义未定案
+const PVP_EXTRA = {
+  ok: true, code: 0,
+  state: { ok: true, code: 0, data: {
+    surplus: 4, free_pvp_num: 0, pvp_num: 0, flush_num: 1,
+    score: 312, revenge_num: 2, battle_arr: [3, 4, 2],
+    enemy_list: [{ uin: 10012, name: "沧海月明", ce: 312232798 }],
+  } },
+  store: { ok: true, code: 0, data: { list: [{ id: 1 }] } },
+};
 
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
   const payload = url.includes("/api/home/state") ? HOME_STATE
+    : url.includes("/api/match/pvp-extra") ? PVP_EXTRA
     : url.includes("/api/match/pvp") ? PVP
     : url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
     : url.includes("/api/match/explore") ? XIYOU
@@ -159,7 +170,9 @@ assert(!!$("match-sub-bar"), "二级 tab 栏 #match-sub-bar 存在");
 const tabs = [...w.document.querySelectorAll("#match-sub-bar .tab")].map((b) => b.getAttribute("data-msub"));
 // 2026-09-27：① 西游记 / 三国战役拆成两个独立 tab（原本挤在「公会战 · 西游三国」里）
 //             ② 公会战并入工会 tab、删除「各玩法一键」（功能归到各 tab）
-assert(tabs.join(",") === "home,race,pvp,union,xiyou,sanguo", "6 个子玩法 tab，猫窝日常排第一");
+// 2026-09-28：「竞技场 · 日榜」并入猫窝日常（榜单不展示，点赞/挑战都归一键全部）→ 5 个 tab
+assert(tabs.join(",") === "home,race,union,xiyou,sanguo", "5 个子玩法 tab，猫窝日常排第一");
+assert(!w.document.getElementById("msub-pvp"), "「竞技场 · 日榜」tab 已删除（状态并入猫窝日常）");
 assert(!w.document.getElementById("msub-gvg"), "公会战不再单独占一个 tab");
 assert(!w.document.getElementById("msub-modes"), "「各玩法一键」tab 已删除");
 assert(!!$("match-gvg-box").closest("#msub-union"), "公会战块并进了工会 tab");
@@ -177,10 +190,12 @@ assert([...w.document.querySelectorAll('#msub-xiyou [data-act="mm-claim"]')]
   .some((b) => b.getAttribute("data-only") === "explore"), "西游记领奖归到西游记 tab");
 assert([...w.document.querySelectorAll('#msub-sanguo [data-act="mm-claim"]')]
   .some((b) => b.getAttribute("data-only") === "sanguo"), "三国领奖归到三国 tab");
-assert([...w.document.querySelectorAll('#msub-pvp [data-act]')]
-  .map((b) => b.getAttribute("data-act")).join(",").indexOf("mm-fight-pvp") >= 0,
-  "竞技场挑战/刷对手归到「竞技场 · 日榜」tab");
-assert(!!$("match-pvp-state-box"), "竞技场状态块存在（日榜不再孤零零一个列表）");
+// 竞技场（2026-09-28 并入猫窝日常）：动作钮与状态块都住 #msub-home，榜单本身不渲染
+const homeActs = [...w.document.querySelectorAll('#msub-home [data-act]')]
+  .map((b) => b.getAttribute("data-act"));
+assert(["mm-claim", "mm-flush", "mm-fight-pvp", "mm-arena-zan"].every((a) => homeActs.includes(a))
+  && homeActs.length === 4, "竞技场 4 个动作钮都在「猫窝日常」里：" + homeActs.join(","));
+assert(!!$("match-arena-box").closest("#msub-home"), "竞技场状态块在猫窝日常页内");
 for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
 assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
 assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
@@ -221,21 +236,31 @@ w.eval(`(async () => {
 
 setTimeout(async () => {
   // ---------- 1.5) 竞技榜列表要和游戏里对得上（2026-09-28） ----------
-  console.log("\n[1.5] 竞技榜名次 / 可赞对象");
-  w.eval("loadMatchPvp()");
+  console.log("\n[1.5] 竞技场状态块（猫窝日常页，2026-09-28 从独立 tab 并入）");
+  const arenaBase = calls.length;   // 后面的全局断言还要数 run-all，这里不能清 calls
+  w.eval("loadMatchPvp(); loadMatchPvpExtra();");
   await new Promise((r) => setTimeout(r, 80));
-  const pvpTxt = $("match-pvp-box").textContent;
-  assert(/今日可点赞（pvp act=22）/.test(pvpTxt),
-    "「今日可点赞」单独成块（这 10 人都在前 50 名之外，混在榜单里根本看不见）");
-  const zanBlock = $("match-pvp-box").textContent;
-  assert(/迅驰/.test(zanBlock), "可赞块列出昵称，能与游戏「点赞」页逐条对照");
-  assert(/按分数降序/.test(pvpTxt), "榜单标明排序依据（服务端不返回名次，前端按 score 降序编号）");
-  assert(/不在榜内/.test(pvpTxt) && /2248/.test(pvpTxt),
-    "没进榜单时给真实原因（榜内最低分），不写「未进前 1000」这种臆断：" + pvpTxt.slice(0, 80));
-  assert(/榜单 1000 人 · 显示前 2/.test($("match-pvp-cnt").textContent),
-    "计数显示总人数与实际取回条数：" + $("match-pvp-cnt").textContent);
-  assert(/可赞/.test(pvpTxt) && /烟雨濛濛/.test(pvpTxt),
-    "榜单里可赞的人打「可赞」标记，不用再去数");
+  const arenaTxt = $("match-arena-box").textContent;
+  assert(!$("match-pvp-box"), "旧竞技榜列表容器已删除");
+  assert($("match-arena-box").querySelectorAll(".pk").length === 0,
+    "不再展开 100 人榜单，只留状态行");
+  assert(/不在榜内（榜内最低 2248，我的 1885）/.test(arenaTxt),
+    "没进榜单时给真实原因（榜内最低分），不写「未进前 1000」这种臆断");
+  assert(/今日可赞首位（点赞就点他）[\s\S]*迅驰（第 2 名 · 分数 4904）/.test(arenaTxt),
+    "标出「可赞首位」＝榜里第一个可赞对象，与游戏「点赞」页对得上");
+  assert(/我的分数 \/ 战力[\s\S]*1885 \/ 360/.test(arenaTxt), "我的分数/战力与游戏内一致");
+  assert($("match-arena-cnt").textContent === "剩余 4 · 我第 - 名 · 可赞 2 人",
+    "计数一次说清剩余场次/我的名次/可赞人数：" + $("match-arena-cnt").textContent);
+  assert(/当前对手（第一个）[\s\S]*沧海月明/.test(arenaTxt), "显示当前第一个对手");
+  assert(/battle_arr=\[3,4,2\] 语义未定位/.test(arenaTxt),
+    "未知语义字段只记录不解读");
+  // 手动补点：真点一次，确认走 /api/home/like（一键全部里那次才是主路径）
+  w.eval(`(async () => {
+    document.querySelector('#match-arena [data-act="mm-arena-zan"]').click();
+    await new Promise(r => setTimeout(r, 60));
+  })()`).catch((e) => errors.push(String(e)));
+  assert(calls.slice(arenaBase).some((c) => c.url.includes("/api/home/like")
+    && /arena/.test(c.body || "")), "「点赞竞技榜」真的调了 /api/home/like（target=arena）");
   assert(confirmed > 0, "一键比赛前弹确认框（会消耗次数）");
   const ra = calls.filter((c) => c.url.includes("/api/match/run-all"));
   assert(ra.length === 1, "调用了一次 /api/match/run-all");

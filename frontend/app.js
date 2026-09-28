@@ -3477,14 +3477,15 @@ function arrLen(x) {
 // 2026-09-27 二次整理：
 //  · 公会战并进「工会 · 公会战」（原本两个 tab 内容高度重复：都显示出兵与今日次数）
 //  · 「各玩法一键」删除 —— 领奖/刷对手/挑战/闯关已归到各玩法自己的 tab
-//  · PVP 日榜 tab 改「竞技场 · 日榜」，并入竞技场状态与操作（日榜只是其中一个视图）
-const MATCH_SUB_KEYS = ["home", "race", "pvp", "union", "xiyou", "sanguo"];
+//  · PVP 日榜 tab（2026-09-28 删）：榜单没有展示价值（点赞/挑战都已被「一键全部」自动跑掉），
+//    竞技场的**状态与操作**改挂到猫窝日常页的「竞技场 · 每日」块，只留状态行 + 4 个动作钮。
+const MATCH_SUB_KEYS = ["home", "race", "union", "xiyou", "sanguo"];
 const MATCH_SUB_LOAD = {
-  // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）
-  home: () => { loadHomeState(); loadMatchState(); },
+  // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）；
+  // 竞技场（pvp act=1 状态 + act=14 我的名次）的状态块也在本页，一起拉
+  home: () => { loadHomeState(); loadMatchState(); loadMatchPvp(); loadMatchPvpExtra(); },
   // 出战记录（#match-log-box）就在本面板，必须一起拉，否则永远停在「读取中…」
   race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
-  pvp: () => { loadMatchPvp(); loadMatchPvpExtra(); },
   // 工会 / 公会战 / 金卡限购 一个面板一起拉（公会战 act=22 依赖工会数据）
   union: () => { loadMatchUnion(); loadMatchUnionExtra(); loadMatchGold(); loadMatchGvg(); },
   // 西游记：小程序地图（8 张小地图＝套卡 1604..1611），只拉本玩法自己的接口
@@ -3515,90 +3516,56 @@ function switchMatchSub(key) {
   if (fn) fn();
 }
 
-function renderMatchPvp() {
-  const box = $("match-pvp-box"), cnt = $("match-pvp-cnt");
+// 竞技场在**猫窝日常页**的只读状态块（2026-09-28 从「竞技场 · 日榜」tab 并入）。
+// 只留状态行，不列榜单：点赞（点第一个可赞）与挑战都由「一键全部」自动跑掉
+// （cathome.like("arena") / cathome.arena_auto），榜单留着只是刷屏。
+function renderMatchArenaHome() {
+  const box = $("match-arena-box"), cnt = $("match-arena-cnt");
+  if (!box) return;
   const d = matchPvp || {};
-  if (!d.ok) {
-    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+  const x = matchPvpExtra || {};
+  const st = (x.state || {}).data || {};
+  if (d.ok === false && x.ok === false) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">` +
+      `${d.message || x.message || "读取失败"}</span></div>`;
+    if (cnt) cnt.textContent = "失败";
     return;
   }
-  // 榜里存的 uin 是纯数字，登录态里是补零格式（"0004821992"）——直接比永远匹配不上
-  const rawMe = String(window.__myUin || "");
-  const meUin = /^\d+$/.test(rawMe) ? String(Number(rawMe)) : rawMe;
-  const rows = d.list || [];
   const zan = d.zan_targets || [];
-  cnt.textContent = `榜单 ${d.total || 0} 人 · 显示前 ${rows.length}`;
-  box.innerHTML =
-    `<div class="state-box">` +
-    matchRow("我的分数 my_score", d.my_score) +
-    matchRow("我的战力 my_ce", d.my_ce) +
-    matchRow("榜内我的名次", d.my_rank ? `第 ${d.my_rank} 名`
-      : `不在榜内（榜内最低 ${d.min_score ?? "-"}，我的 ${d.my_score ?? "-"}）`) +
-    matchRow("今日已赞 my_zan_num", d.my_zan_num) +
-    matchRow("点赞位 zan_bit", d.zan_bit) +
-    matchRow("今日可赞对象", zan.length ? `${zan.length} 人` : "无") +
-    matchRow("榜单日期 day_ts", matchFmtTs(d.day_ts)) +
-    `</div>` +
-    // 可赞对象单独成块：这 10 人全都在前 50 名之外，混在榜单里根本看不见
-    (zan.length
-      ? `<div class="lst" style="max-height:none;padding:6px">
-           <div class="lst-head"><span class="t">今日可点赞（pvp act=22）</span></div>` +
-        zan.map((z) => `<div class="pk" style="margin-bottom:4px;border-color:#f0a020">
-            <div class="pk-bdg ok">${z.rank ?? "-"}</div>
-            <div style="flex:1"><b>${z.nick || "-"}</b>
-              <br><span style="color:var(--muted);font-size:12px">分数 ${z.score ?? "-"} · 战力 ${z.ce ?? "-"}</span></div>
-          </div>`).join("") +
-        `<div class="empty-tip" style="font-size:12px">游戏「竞技场 → 点赞」里能点的就是这批人，每日 1 次。</div>
-       </div>`
-      : "") +
-    `<div class="lst" style="max-height:none;padding:6px">` +
-    `<div class="empty-tip" style="font-size:12px">榜单顺序＝按分数降序（服务端不返回名次，前端自行编号，与游戏内一致）。</div>` +
-    (rows.length
-      ? rows.map((r) => {
-          const isMe = String(r.uin) === String(meUin);
-          const canZan = zan.some((z) => String(z.uin) === String(r.uin));
-          return `<div class="pk" style="margin-bottom:4px${isMe ? ";border-color:var(--qq-blue)" : ""}">
-            <div class="pk-bdg ${isMe ? "ok" : ""}">${r.rank ?? "-"}</div>
-            <div style="flex:1"><b>${r.nick || "-"}</b>${isMe ? " <span style='color:var(--qq-blue)'>（我）</span>" : ""}${canZan ? " <span style='color:#f0a020'>可赞</span>" : ""}
-              <br><span style="color:var(--muted);font-size:12px">分数 ${r.score ?? "-"} · 战力 ${r.ce ?? "-"} · ${matchFmtTs(r.ts)}</span></div>
-          </div>`;
-        }).join("")
-      : `<div class="empty-tip">榜单为空</div>`) +
-    `</div>`;
-}
-
-// 竞技场状态（pvp act=1）：次数口径与 cathome 一致，surplus=剩余、free_pvp_num=每日 4
-async function loadMatchPvpExtra() {
-  const r = await fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
-  matchPvpExtra = r;
-  renderMatchPvpState();
-  if (!r || r.ok === false) mlogFail("竞技场", r);
-}
-
-function renderMatchPvpState() {
-  const box = $("match-pvp-state-box"), cnt = $("match-pvp-state-cnt");
-  const d = matchPvpExtra || {};
-  const st = (d.state || {}).data || {};
-  if (!d.ok) {
-    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
-    cnt.textContent = "失败";
-    return;
-  }
   const enemies = st.enemy_list || [];
-  cnt.textContent = `剩余 ${st.surplus ?? "-"} / 每日免费 ${st.free_pvp_num ?? "-"}`;
-  const store = (d.store || {}).data || {};
+  const store = (x.store || {}).data || {};
+  if (cnt) {
+    cnt.textContent = `剩余 ${st.surplus ?? "-"} · 我第 ${d.my_rank ?? "-"} 名 · 可赞 ${zan.length || 0} 人`;
+  }
   box.innerHTML = `<div class="state-box">` +
     matchRow("今日剩余场次 surplus", st.surplus) +
     matchRow("每日免费 free_pvp_num", st.free_pvp_num) +
-    matchRow("付费次数 pvp_num", st.pvp_num) +
     matchRow("已刷对手 flush_num", st.flush_num) +
-    matchRow("我的积分 score", st.score) +
-    matchRow("可复仇 revenge_num", st.revenge_num) +
-    matchRow("当前对手（前 3）",
-      enemies.slice(0, 3).map((e) => `${e.name || e.uin}(${e.ce ?? "-"})`).join("、") || "-") +
-    matchRow("竞技场商店（act=? store）", (store.list || []).length ? `${(store.list || []).length} 项` : "-") +
-    `<div class="empty-tip" style="font-size:12px">battle_arr=[${(st.battle_arr || []).join(",")}] 语义未定位，只记录不解读。</div>` +
+    matchRow("我的名次（act=14）", d.ok
+      ? (d.my_rank ? `第 ${d.my_rank} 名`
+        : `不在榜内（榜内最低 ${d.min_score ?? "-"}，我的 ${d.my_score ?? "-"}）`)
+      : "-") +
+    matchRow("我的分数 / 战力", `${d.my_score ?? "-"} / ${d.my_ce ?? "-"}`) +
+    matchRow("今日已赞 / 可赞对象", `${d.my_zan_num ?? "-"} / ${zan.length || "无"}`) +
+    matchRow("今日可赞首位（点赞就点他）", zan.length
+      ? `${zan[0].nick || zan[0].uin}（第 ${zan[0].rank ?? "-"} 名 · 分数 ${zan[0].score ?? "-"}）`
+      : "无（今天已赞过）") +
+    matchRow("当前对手（第一个）", enemies.length
+      ? `${enemies[0].name || enemies[0].uin}（战力 ${enemies[0].ce ?? "-"}）`
+      : "-") +
+    matchRow("竞技场商店", (store.list || []).length ? `${(store.list || []).length} 项` : "-") +
+    `<div class="empty-tip" style="font-size:12px">` +
+    `battle_arr=[${(st.battle_arr || []).join(",")}] 语义未定位，只记录不解读。` +
+    `榜单共 ${d.total || 0} 人（服务端不返回名次，前端按分数降自行编号），这里不展开。</div>` +
     `</div>`;
+}
+
+// 竞技场状态（pvp act=1）：次数口径未定案，surplus / free_pvp_num 两个字段都整份透出
+async function loadMatchPvpExtra() {
+  const r = await fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchPvpExtra = r;
+  renderMatchArenaHome();
+  if (!r || r.ok === false) mlogFail("竞技场", r);
 }
 
 function renderMatchUnion() {
@@ -3825,11 +3792,11 @@ function renderMatchGold() {
 }
 
 async function loadMatchPvp() {
-  // top=100：实测今日可点赞的 10 人全在第 50 名之外，取 50 条一条可赞的都看不到
+  // top=100 只为少传几行：我的名次是在全量 1000 人上算的，跟 top 无关
   const r = await fetch("/api/match/pvp?top=100").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchPvp = r;
-  renderMatchPvp();
-  if (!r || r.ok === false) mlogFail("PVP 日榜", r);
+  renderMatchArenaHome();
+  if (!r || r.ok === false) mlogFail("竞技场", r);
 }
 
 async function loadMatchUnion() {
@@ -4018,7 +3985,7 @@ async function refreshAfterClaim(only) {
 }
 
 async function pvpFight() {
-  // 竞技场状态已在「竞技场 · 日榜」tab 自己拉过（/api/match/pvp-extra）
+  // 竞技场状态块就在猫窝日常页，走的就是 /api/match/pvp-extra
   const st = (matchPvpExtra && matchPvpExtra.state && matchPvpExtra.state.data) || {};
   const e0 = (st.enemy_list || [])[0];
   if (!e0) { mlog("[竞技场] 没有可挑战的对手", "warn"); return; }
@@ -4089,6 +4056,18 @@ function bindMatchModeActs() {
           await loadMatchPvpExtra(); await loadMatchPvp();
         } else if (act === "mm-fight-pvp") {
           await pvpFight();
+        } else if (act === "mm-arena-zan") {
+          // 点榜里第一个可赞对象（每天 1 次，已点过后端自动跳过）
+          const r = await fetch("/api/home/like", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target: "arena" }),
+          }).then((x) => x.json()).catch(() => null);
+          const dd = (r && r.data) || r || {};
+          mlog("[竞技场] 点赞 → " + (dd.ok === false
+            ? (dd.message || dd.code || "失败")
+            : (dd.content || dd.message || "已点（或今天已赞过）")),
+            dd.ok === false ? "" : "ok");
+          await loadMatchPvp(); await loadMatchPvpExtra(); await loadHomeState();
         } else if (act === "mm-fight-union") {
           await unionFight(); await loadMatchUnionExtra(); await loadMatchGvg();
         } else if (act === "mm-run-sg") {
@@ -4243,12 +4222,7 @@ function initMatchOnce() {
   bind("match-dressrace", (b) => busyBtn(b, "出战中…", "按最优装打一场")(equipThenRace()));
   bind("claim-all", (b) => busyBtn(b, "领奖中…", "一键领奖（各玩法奖励，零消耗）")(claimOnly()));
   // 各子玩法的刷新按钮
-  // 竞技场 = 状态（次数/对手）+ 日榜，一个按钮两个都刷
-  bind("match-pvp", async (b) => {
-    const restore = busyBtn(b, "读取中…", "刷新竞技场");
-    await loadMatchPvp(); await loadMatchPvpExtra();
-    restore();
-  });
+  // 竞技场状态块在猫窝日常页，走「一键全部」/数据委托刷新，这里不再单独放刷新钮
   // 工会 / 公会战已合并成一个 tab：一次刷新把工会信息、任务、金卡、公会战都带上
   bind("match-union", async (b) => {
     const restore = busyBtn(b, "读取中…", "刷新工会 / 公会战");
