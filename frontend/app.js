@@ -3920,15 +3920,10 @@ function renderMatchSanguoBox() {
   const ex = all.ex || {}, safe = all.safe || {};
   cnt.textContent = `关卡卡箱 ${ex.filled || 0}/${ex.capacity || 0} · 保险箱 ${safe.filled || 0}/${safe.capacity || 0}`;
 
-  // 缺哪几层由下面的层进度表讲清楚，这里只补层表说不了的一条：
-  // 缺的那层卡具体躺在保险箱哪一格（卖保险箱前必须知道）
-  const diag = (all.themes || [])
-    .filter((t) => (t.in_safe_only || []).length)
-    .map((t) => `<div style="color:var(--danger);margin:2px 0">${t.theme} 套缺的第 ` +
-      `${t.in_safe_only.join("/")} 层卡不在关卡卡箱里，保险箱压着：` +
-      `${safeCardsOf(safe, t.theme, t.in_safe_only)
-        .map((m) => m.name || "卡" + m.card_id).join("、")}。</div>`)
-    .join("");
+  // ⛔ 不再打印「某套缺的第 N 层卡保险箱压着：…」这类诊断：它把**已经收在保险箱里的卡**
+  // 说成「缺」（实测显示「缺的第 3/4 层，保险箱压着：岁在甲子、黄天当立…」—— 人家早有了，
+  // 只是躺在保险箱）。真实缺口由下面的层进度表按卡名列全，这里不重复、不误导。
+  const diag = "";
 
   box.innerHTML = `<div class="state-box">` +
     matchRow("当前大关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
@@ -3954,10 +3949,22 @@ function sgLayerPanel(L) {
       `建议打<b>小关 ${rec.levelid}</b>（第 ${rec.layer} 层）：` +
       `${rec.why}，比第 1 层那种 8 张一套的快得多。</div>`
     : `<div style="color:var(--ok,var(--muted,#888));margin:3px 0">每一层都齐了，可以继续上交了。</div>`;
+  // 「还差什么」只列**再打一张就能补齐**的卡（差 1 张的），其余整层表里有。
+  // 全列的话两套加一起 20 张，反而盖住真正该盯的目标（2026-09-28 实测 20 个卡名刷屏）。
+  const near = [];
+  (L.levels || []).forEach((lv) => (lv.by_theme || []).forEach((r) => {
+    if (r.need - r.have !== 1) return;
+    (r.missing || []).forEach((c) => near.push(c.name || "卡" + c.card_id));
+  }));
+  const lackHtml = near.length
+    ? `<div style="margin:3px 0">再打一张就能凑齐的：<b>${[...new Set(near)].join("、")}</b></div>`
+    : "";
   const rows = (L.levels || []).map((lv) => {
     const per = (lv.by_theme || []).map((r) => {
-      const tag = r.done ? "已齐" : (r.need - r.have) + " 张缺";
-      return `${r.theme} 套 ${r.have}/${r.need}（${tag}）`;
+      if (r.done) return `${r.theme} 套 ${r.have}/${r.need}（已齐）`;
+      // 直接点出还差哪几张的名字，别只给「差 1 张」让人自己猜
+      const lack = (r.missing || []).map((c) => c.name || ("卡" + c.card_id)).join("、");
+      return `${r.theme} 套 ${r.have}/${r.need}（还缺 ${lack}）`;
     }).join("；");
     // 推荐关号不一定等于 10N（当前关 204 属于第 4 层），别写成 104
     const mark = (rec && rec.layer === lv.layer)
@@ -3974,15 +3981,7 @@ function sgLayerPanel(L) {
     return matchRow(`第 ${lv.layer} 层 · 小关 ${lv.levelid}`,
       `${per}${mark}<br><span style="opacity:.7;font-size:11.5px">现在：${none}</span>`);
   }).join("");
-  return head + recHtml + rows;
-}
-
-// 某个箱里「属于这几层」的全部卡名（同层有多张同层卡时一张不漏）
-function safeCardsOf(plan, theme, layers) {
-  const want = new Set(layers);
-  return (plan.slots || [])
-    .filter((s) => s.theme === theme && want.has(s.layer) && s.theme === theme)
-    .flatMap((s) => s.cards || []).filter(Boolean);
+  return head + recHtml + lackHtml + rows;
 }
 
 async function sanguoSellSpare(bno) {

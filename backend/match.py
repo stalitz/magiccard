@@ -1388,24 +1388,35 @@ def plan_sg_layers(state: dict) -> dict:
     for s in spec.values():
         s["cards"].sort(key=lambda m: m["card_id"])
 
-    def have_of(plan, th, layer) -> int:
-        return sum(1 for s in plan["slots"]
-                   if s["theme"] == th and s["layer"] == layer)
+    def ids_of(plan, th, layer) -> set:
+        """该箱里属于 (套, 层) 的卡 **id 集合**（一张卡只算一次）。
 
-    levels, open_gaps = [], []
+        ⚠ 不能拿「组数」当张数：同一张卡可能同时在关卡卡箱和保险箱里各躺一份，
+        直接相加会把缺的卡顶掉 —— 2026-09-28 实测层 2 就是被 25106 双算成 5/5
+        「已齐」，真正缺的 25108「太平道」反而被藏起来了（用户当场纠正）。
+        """
+        return {s["keep"]["card_id"] for s in plan["slots"]
+                if s["theme"] == th and s["layer"] == layer}
+
+    levels, open_gaps, setgaps = [], [], []
     for layer in _SG_LAYERS:
         ths = sorted({k[0] for k in spec if k[1] == layer})
         rows = []
         for th in ths:
             s = spec.get((th, layer)) or {"need": 0, "cards": []}
-            he, hs = have_of(ex, th, layer), have_of(safe, th, layer)
-            have = min(s["need"], he + hs)
+            id_ex, id_safe = ids_of(ex, th, layer), ids_of(safe, th, layer)
+            have_ids = id_ex | id_safe      # 同一张卡两箱各一份只算一次
+            have = len(have_ids)
             rows.append({"theme": th, "need": s["need"], "have": have,
-                         "have_ex": he, "have_safe": hs,
+                         "have_ex": len(id_ex), "have_safe": len(id_safe),
                          "done": have >= s["need"],
                          "cards": s["cards"],
+                         # 还差哪几张（按卡名，前端直接列出来，不让人猜）
+                         "missing": [{"card_id": c["card_id"], "name": c["name"]}
+                                     for c in s["cards"]
+                                     if c["card_id"] not in have_ids],
                          # 一张都没有、且既不在关卡卡箱也不在保险箱 = 只能靠打出来
-                         "in_boxes": he + hs})
+                         "in_boxes": len(have_ids)})
         levels.append({
             "layer": layer, "levelid": 100 + layer,
             "by_theme": rows,
@@ -1415,6 +1426,16 @@ def plan_sg_layers(state: dict) -> dict:
             "names": [c["name"] for r in rows for c in r["cards"]],
         })
         gap = sum(r["need"] - r["have"] for r in rows if not r["done"])
+        # 「按层汇总两套」会掩盖「哪套真快齐了」—— 2026-09-28 实测层 4 表面只差 3 张，
+        # 那 3 张全是 1746 套的（1745 层 4 已齐），1745 真缺的层 2「太平道」/ 层 3
+        # 「天下大吉」反而排不上号。所以推荐再按「单套 + 层」摊一层。
+        for th in ths:
+            ms = [c for c in (spec.get((th, layer)) or {}).get("cards", [])
+                  if c["card_id"] not in (ids_of(ex, th, layer) | ids_of(safe, th, layer))]
+            if ms:
+                setgaps.append({"theme": th, "layer": layer,
+                                "levelid": 100 + layer, "gap": len(ms),
+                                "theme_layer_cards": ms})
         if gap:
             open_gaps.append({"layer": layer, "levelid": 100 + layer,
                               "gap": gap, "done": False})
@@ -1427,21 +1448,26 @@ def plan_sg_layers(state: dict) -> dict:
     recommend = None
     if open_gaps:
         now_layer = int(levelid_now) % 100 if int(levelid_now or 0) else None
-        pick = next((g for g in open_gaps if g["layer"] == now_layer), None)
-        if pick is None:
-            pick = min(open_gaps, key=lambda g: (g["gap"], g["layer"]))
-        lv = next(l for l in levels if l["layer"] == pick["layer"])
-        recommend = dict(pick)
+        # 只在「还没齐」的层里挑。当前关那层要是已经齐了，打它只会拿重复卡，
+        # 对用户「集齐」的目标毫无帮助（2026-09-28：层 4 已齐 3/3，缺的却在层 2/3）。
+        # 且只取层号 <= 当前关的层 —— 后面的小关未必解锁，挑了也是白挑。
+        cand = [g for g in setgaps
+                if now_layer is None or g["layer"] <= now_layer] or setgaps
+        pick = min(cand, key=lambda g: (g["gap"], g["layer"], g["theme"]))
+        recommend = {k: pick[k] for k in ("theme", "layer", "levelid", "gap")}
         # 打的是「服务端给的当前关号」（如 levelId=204），不是按层号推出来的 104
         if pick["layer"] == now_layer:
             recommend["levelid"] = int(levelid_now)
-        recommend["names"] = lv["names"]
+        # 直接告诉用户「补齐还差这几张」，别只给个层号让他自己猜
+        recommend["missing"] = recommend["names"] = \
+            [c["name"] for c in pick["theme_layer_cards"]]
         recommend["from_now"] = pick["layer"] == now_layer
-        recommend["why"] = (f"服务端给的当前关（{levelid_now}）正好就是第 {pick['layer']} 层，"
-                            f"一套只差 {pick['gap']} 张，打它最划算"
-                            if pick["layer"] == now_layer else
-                            f"第 {pick['layer']} 层一套只差 {pick['gap']} 张，打小关 "
-                            f"{pick['levelid']} 就能补齐（要这关已解锁）")
+        names = "、".join(recommend["missing"]) or "这张"
+        recommend["why"] = (f"第 {pick['layer']} 层还只差 {pick['gap']} 张"
+                            f"（缺 {names}），打小关 {recommend['levelid']} 就有机会补齐 —— "
+                            + (f"这正是服务端给的当前关（{levelid_now}）。"
+                               if pick["layer"] == now_layer else
+                               "这关在大关里排在前面，应该已解锁。"))
     return {"levels": levels, "open": open_gaps, "recommend": recommend,
             "levelid_now": levelid_now}
 

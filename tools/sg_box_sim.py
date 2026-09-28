@@ -244,21 +244,42 @@ async def main():
     check("第 4 层在关卡卡箱里一张都没有（只有保险箱压着那一张）",
           all(r["have_ex"] == 0 for r in lv[4]["by_theme"]),
           str([(r["theme"], r["have_ex"], r["have_safe"]) for r in lv[4]["by_theme"]]))
-    # STATE() 没有 levelId，推荐退化为「gap 最小那一层」= 第 5 层（只差 1 张）
-    check("没给当前关时退化为推 gap 最小的第 5 层",
-          bool(p6["recommend"]) and p6["recommend"]["layer"] == 5
+    # 用户口述「实际我少的是第 4 层的太平道和第 3 层的天下大吉」→ 真值口径。
+    # 注意太平道其实是**第 2 层**（card_lib pos=2502），用户只是层号记岔了。
+    def miss_of(p, theme, layer):
+        return [c["name"] for r in lv[layer]["by_theme"] if r["theme"] == theme
+                for c in r["missing"]]
+    check("1745 套第 2 层还缺「太平道」（唯一一张）",
+          miss_of(p6, 1745, 2) == ["太平道"], str(miss_of(p6, 1745, 2)))
+    check("1745 套第 3 层还缺「天下大吉」（唯一一张）",
+          miss_of(p6, 1745, 3) == ["天下大吉"], str(miss_of(p6, 1745, 3)))
+    check("1745 套第 1/4/5 层都已齐",
+          all(not miss_of(p6, 1745, L) for L in (1, 4, 5)),
+          str({L: miss_of(p6, 1745, L) for L in (1, 4, 5)}))
+    # 同张卡两箱各一份只算一次：层 2 实际 4/5，曾被 25106 双算成「已齐」
+    check("层 2 是 4/5 而不是 5/5（同一张卡两箱各一份不能重复计数）",
+          [r["have"] for r in lv[2]["by_theme"] if r["theme"] == 1745] == [4],
+          str([(r["theme"], r["have"], r["have_ex"], r["have_safe"])
+               for r in lv[2]["by_theme"]]))
+    # STATE() 没有 levelId，退化为「还差最少、层号最小」的第 2 层
+    check("没给当前关时推第 2 层（只差太平道 1 张）",
+          bool(p6["recommend"]) and p6["recommend"]["layer"] == 2
+          and p6["recommend"]["levelid"] == 102
           and p6["recommend"].get("from_now") is False,
           str(p6["recommend"]))
-    check("推荐理由里带小关号",
-          "小关 105" in (p6["recommend"] or {}).get("why", ""),
+    check("推荐理由里带小关号和缺的卡名",
+          "小关 102" in (p6["recommend"] or {}).get("why", "")
+          and "太平道" in (p6["recommend"] or {}).get("why", ""),
           (p6["recommend"] or {}).get("why", ""))
-    # 给了当前关 204（= 第 4 层）就必须先保当前关，别去推荐打不到的 105
+    # 给了当前关 204（= 第 4 层）：那层 1745 已齐，打它纯拿重复卡，
+    # 推荐要落在第 2/3 层这种「打了就能补齐」的关上，而不是死守当前关号
     st7 = STATE()
     st7["levelId"] = 204
     p7 = mt.plan_sg_layers(st7)
-    check("当前关 204 时推荐打 204 自己（不是 105）",
-          bool(p7["recommend"]) and p7["recommend"]["levelid"] == 204
-          and p7["recommend"].get("from_now") is True,
+    check("当前关 204 那层已齐时改推第 2 层（不是死守 204）",
+          bool(p7["recommend"]) and p7["recommend"]["layer"] == 2
+          and p7["recommend"]["levelid"] == 102
+          and p7["recommend"].get("from_now") is False,
           str(p7["recommend"]))
     # open 只按层号升序供展示，挑「打哪个关」由 recommend 按 gap 取最小
     check("open 覆盖所有没齐的层、按层号升序",
