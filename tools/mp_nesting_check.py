@@ -65,7 +65,7 @@ tmpl = appjs[_i:_i + 2200]
 opens = tmpl.count("<div") + tmpl.count("<span") - tmpl.count("</div>") - tmpl.count("</span>")
 print("renderMatchSanguoLevels 模板 opens-closes =", opens, "（0 表示配平）")
 
-for need in ['data-act="mm-run-sg"', 'data-idle="闯关 L${x.levelid}"', '关卡总数（act=9）']:
+for need in ['data-act="mm-run-sg"', 'data-idle="闯关 L${x.levelid}"', '关卡总数']:
     print(f"  含 {need}:", need in tmpl)
 # 已删的 modes tab 不能留下任何残留（按钮/元素/函数）
 for gone in ["match-modes-box", "match-modes-cnt", "loadMatchModes", "renderMatchModes", "modeCard(", "mm-props", "mm-reload"]:

@@ -195,7 +195,7 @@ const homeActs = [...w.document.querySelectorAll('#msub-home [data-act]')]
   .map((b) => b.getAttribute("data-act"));
 assert(["mm-claim", "mm-flush", "mm-fight-pvp", "mm-arena-zan"].every((a) => homeActs.includes(a))
   && homeActs.length === 4, "竞技场 4 个动作钮都在「猫窝日常」里：" + homeActs.join(","));
-assert(!!$("match-arena-box").closest("#msub-home"), "竞技场状态块在猫窝日常页内");
+assert(!$("match-arena"), "竞技场不再单占一个块（2026-09-28 用户定调）");
 for (const k of tabs) assert(!!$("msub-" + k), `面板 #msub-${k} 存在`);
 assert(!!$("msub-home").classList.contains("on"), "默认显示猫窝日常（主界面）");
 assert(!$("msub-race").classList.contains("on"), "比赛面板默认隐藏（子玩法）");
@@ -235,28 +235,26 @@ w.eval(`(async () => {
 })()`).catch((e) => errors.push(String(e)));
 
 setTimeout(async () => {
-  // ---------- 1.5) 竞技榜列表要和游戏里对得上（2026-09-28） ----------
-  console.log("\n[1.5] 竞技场状态块（猫窝日常页，2026-09-28 从独立 tab 并入）");
+  // ---------- 1.5) 竞技场信息并入「点赞」「竞技比赛」两块（2026-09-28 用户定调） ----------
+  console.log("\n[1.5] 竞技场信息归位（点赞块 + 竞技比赛块，不再单开块）");
   const arenaBase = calls.length;   // 后面的全局断言还要数 run-all，这里不能清 calls
-  w.eval("loadMatchPvp(); loadMatchPvpExtra();");
-  await new Promise((r) => setTimeout(r, 80));
-  const arenaTxt = $("match-arena-box").textContent;
+  assert(!$("match-arena"), "不再有独立的「竞技场 · 每日」块");
   assert(!$("match-pvp-box"), "旧竞技榜列表容器已删除");
-  assert($("match-arena-box").querySelectorAll(".pk").length === 0,
-    "不再展开 100 人榜单，只留状态行");
-  assert(/不在榜内（榜内最低 2248，我的 1885）/.test(arenaTxt),
-    "没进榜单时给真实原因（榜内最低分），不写「未进前 1000」这种臆断");
-  assert(/今日可赞首位（点赞就点他）[\s\S]*迅驰（第 2 名 · 分数 4904）/.test(arenaTxt),
-    "标出「可赞首位」＝榜里第一个可赞对象，与游戏「点赞」页对得上");
-  assert(/我的分数 \/ 战力[\s\S]*1885 \/ 360/.test(arenaTxt), "我的分数/战力与游戏内一致");
-  assert($("match-arena-cnt").textContent === "剩余 4 · 我第 - 名 · 可赞 2 人",
-    "计数一次说清剩余场次/我的名次/可赞人数：" + $("match-arena-cnt").textContent);
-  assert(/当前对手（第一个）[\s\S]*沧海月明/.test(arenaTxt), "显示当前第一个对手");
-  assert(/battle_arr=\[3,4,2\] 语义未定位/.test(arenaTxt),
-    "未知语义字段只记录不解读");
+  w.eval("loadHomeState(); loadMatchPvp(); loadMatchPvpExtra();");
+  await new Promise((r) => setTimeout(r, 80));
+  const likeTxt = $("home-like-st").textContent, arenaTxt = $("home-arena-st").textContent;
+  assert(/每日比赛榜 .*竞技比赛榜/.test(likeTxt), "「点赞」块仍显示两个榜的点赞状态：" + likeTxt);
+  assert(/今日可赞首位 迅驰（第 2 名）/.test(likeTxt),
+    "竞技榜「今日可赞首位」并入点赞块，与游戏「点赞」页对得上：" + likeTxt);
+  assert(/剩余 \d+ \/ 每日免费/.test(arenaTxt), "「竞技比赛」块显示剩余场次：" + arenaTxt);
+  assert(/我的名次 未上榜（榜内最低 2248）/.test(arenaTxt),
+    "没进榜单时给真实原因（榜内最低分），不写「未进前 1000」这种臆断：" + arenaTxt);
+  assert(/当前对手 沧海月明/.test(arenaTxt), "「竞技比赛」块显示当前第一个对手");
+  assert(!/act=|_num|battle_arr/.test(likeTxt + arenaTxt),
+    "两个状态行不含 act= / 字段名等代码标识：" + likeTxt + " | " + arenaTxt);
   // 手动补点：真点一次，确认走 /api/home/like（一键全部里那次才是主路径）
   w.eval(`(async () => {
-    document.querySelector('#match-arena [data-act="mm-arena-zan"]').click();
+    document.querySelector('#msub-home [data-act="mm-arena-zan"]').click();
     await new Promise(r => setTimeout(r, 60));
   })()`).catch((e) => errors.push(String(e)));
   assert(calls.slice(arenaBase).some((c) => c.url.includes("/api/home/like")
@@ -329,8 +327,8 @@ setTimeout(async () => {
   const ux = $("match-union-extra-box").textContent;
   // 「今日已出兵次数」两处同一个 num，合并后只在公会战块显示一次（去重）
   assert(!/今日已出兵次数/.test(ux), "工会任务块不再重复显示出兵次数（与公会战块去重）");
-  assert(/工会资金（act=16 data）11234/.test(ux), "工会资金显示真实值 11234");
-  assert(/工会商店（act=30）/.test(ux) && /80/.test(ux), "工会商店列出商品消耗");
+  assert(/工会资金11234/.test(ux), "工会资金显示真实值 11234");
+  assert(/工会商店/.test(ux) && /80/.test(ux), "工会商店列出商品消耗");
   // 公会战：进度对比条 + 今日已出兵次数
   const gv = $("match-gvg-box").textContent;
   assert(/我方 478,?555/.test(gv) && /敌方 595,?420/.test(gv), "公会战显示我方/敌方进度：" + gv.slice(0, 60));
@@ -351,14 +349,14 @@ setTimeout(async () => {
   assert(calls.some((c) => c.url.includes("/api/match/explore")), "西游记走自己的 /api/match/explore 端点");
   assert(calls.some((c) => /\/api\/match\/sanguo\?/.test(c.url)), "三国战役走 /api/match/sanguo（带任务）"
     + JSON.stringify(calls.map((c) => c.url).filter((u) => u.includes("sanguo"))));
-  assert(/当前关卡 levelid（currLevelData）\s*2/.test(xb), "西游记显示当前关卡：currLevelData.levelid=2");
-  assert(/材料 nlb \/ sjb \/ txd\s*1825 \/ 45840 \/ 170/.test(xb), "西游记显示真实材料数 1825/45840/170");
-  assert(/当前关 stepData 已收\s*1 \/ 1/.test(xb), "西游记统计 stepData 已收 1/1");
-  assert(/记录 logData\s*1 关，已过 0 关/.test(xb), "西游记 logData 统计（'已过'≠'已收'，不混算）");
+  assert(/当前关卡\s*2/.test(xb), "西游记显示当前关卡：2");
+  assert(/材料三种\s*1825 \/ 45840 \/ 170/.test(xb), "西游记显示真实材料数 1825/45840/170");
+  assert(/当前关已收步数\s*1 \/ 1/.test(xb), "西游记统计当前关已收 1/1");
+  assert(/闯关记录\s*1 关，已过 0 关/.test(xb), "西游记闯关记录统计（'已过'≠'已收'，不混算）");
   assert(/布阵 1 只/.test($("match-xiyou-team-cnt").textContent) && /猫 1 · 战力 9041/.test(xt),
     "西游记布阵块列出猫与战力：" + xt.slice(0, 40) + " | cnt=" + $("match-xiyou-team-cnt").textContent);
-  assert(/当前关卡 levelId\s*204/.test(sg) && /每日免费次数 freenum\s*0/.test(sg),
-    "三国战役显示 levelId 204 / freenum 0");
+  assert(/当前关卡\s*204/.test(sg) && /每日免费次数\s*0/.test(sg),
+    "三国战役显示当前关卡 204 / 每日免费 0");
   assert(/天赋分 \/ 天赋率\s*650 \/ 12/.test(sg), "三国战役显示天赋分/天赋率 650/12");
   assert(/2 关/.test($("match-sanguo-levels-cnt").textContent), "三国关卡表把字典摊平成 2 关："
     + $("match-sanguo-levels-cnt").textContent);

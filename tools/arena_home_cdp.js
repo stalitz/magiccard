@@ -70,19 +70,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await new Promise(r => setTimeout(r, 300));
     const bar = document.getElementById('match-sub-bar');
     const barR = bar.getBoundingClientRect();
-    const arena = document.getElementById('match-arena');
-    const aR = arena.getBoundingClientRect();
-    const box = document.getElementById('match-arena-box');
-    const btns = [...arena.querySelectorAll('[data-act]')].map(b => b.textContent.trim());
+    const like = document.getElementById('home-like-st');
+    const arena = document.getElementById('home-arena-st');
+    const lr = like.getBoundingClientRect(), ar = arena.getBoundingClientRect();
+    const bar2 = [...document.querySelectorAll('#msub-home .lib-toolbar')].pop();
+    const b2r = bar2.getBoundingClientRect();
+    const btns = [...bar2.querySelectorAll('[data-act]')].map(b => b.textContent.trim());
     return {
       tabs: [...bar.querySelectorAll('.tab')].map(b => b.textContent.trim()),
       barW: Math.round(barR.width), barH: Math.round(barR.height),
       barScrollW: bar.scrollWidth, barClientW: bar.clientWidth,
-      arenaW: Math.round(aR.width), arenaH: Math.round(aR.height),
-      arenaVisible: aR.width > 200 && aR.height > 60 && aR.top >= 0,
+      arenaW: Math.round(ar.width), arenaH: Math.round(ar.height),
+      arenaVisible: ar.width > 100 && ar.height > 10 && ar.top >= 0,
+      likeW: Math.round(lr.width), likeVisible: lr.width > 100 && lr.height > 10,
       btns,
-      cnt: (document.getElementById('match-arena-cnt') || {}).textContent || '',
-      boxText: box ? box.textContent.replace(/\\s+/g, ' ').slice(0, 260) : '(no box)',
+      likeText: like.textContent.trim(),
+      arenaText: arena.textContent.trim(),
+      btnBarH: Math.round(b2r.height), btnBarW: Math.round(b2r.width),
       oldPvpTab: !!document.getElementById('msub-pvp'),
       oldBox: !!document.getElementById('match-pvp-box'),
     };

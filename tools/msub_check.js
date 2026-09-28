@@ -68,11 +68,16 @@ const onKeys = () => SUB_KEYS
   assert(inSub("home-box", "home"), "猫窝 daily 在 msub-home 内");
   assert(inSub("match-union-box", "union"), "工会在 msub-union 内");
   assert(inSub("match-gvg-box", "union"), "公会战合并进 msub-union（不再单独一个 tab）");
-  // 竞技场：2026-09-28 从独立 tab 并入猫窝日常，只留状态块 + 动作钮，不再列榜单
-  assert(inSub("match-arena-box", "home"), "竞技场状态块在「猫窝日常」内（原 msub-pvp 已删）");
-  assert(!inSub("match-arena-box", "pvp"), "不再存在 msub-pvp 容器");
-  assert(!!w.document.querySelector("#match-arena [data-act='mm-arena-zan']"),
-    "竞技场留了「点赞（第一个可赞）」手动入口");
+  // 竞技场：不再单开块，状态拆进「点赞」「竞技比赛」两块，动作钮留在猫窝日常的动作条
+  assert(!w.document.getElementById("match-arena"), "竞技场不再单占一个块（原 msub-pvp / match-arena 已删）");
+  assert(!!w.document.getElementById("home-like-st"), "「点赞」块仍在（竞技榜可赞首位并入）");
+  assert(!!w.document.getElementById("home-arena-st"), "「竞技比赛」块仍在（场次/名次/对手并入）");
+  assert(!!w.document.querySelector("#msub-home [data-act='mm-arena-zan']"),
+    "竞技场留了「点赞竞技榜」手动入口");
+  for (const t of w.document.querySelectorAll("#msub-home .lst-head .t")) {
+    assert(!/act=|union |worldexplore|worldsanguo|members\b/.test(t.textContent),
+      "猫窝日常的标题不再暴露接口编号/字段名：" + t.textContent.trim());
+  }
 
   // 按钮归属（2026-09-26 定调）：顶部工具栏一个按钮都不留，功能按钮全部下沉到所属子模块
   const topBtns = w.document.querySelectorAll("#pane-match > .lib > .lib-toolbar button").length;

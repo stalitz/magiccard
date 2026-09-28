@@ -1097,7 +1097,7 @@
 
       <div id="pane-spirite" class="pane hidden">
         <div class="lib">
-          <!-- 三套玩法的状态**一次全部显示**（同一份 act=1 就含全部玩法状态）：
+          <!-- 三套玩法的状态**一次全部显示**（同一份接口就含全部玩法状态）：
                每格既是状态显示、也是玩法切换入口（点格即切）；**当前选中格**内还放该玩法
                专属操作（体力 / 刷新 / 手动收 / 单次历练 / 开始·停止自动），职责清晰，
                不再单列一行控制按钮。 -->
@@ -1189,11 +1189,11 @@
             <label class="check" title="只算参数、不发真实请求"><input type="checkbox" id="travel-dryrun"> 模拟</label>
             <label class="check" title="只收获已返回的猫、不出发空闲猫"><input type="checkbox" id="travel-harvestonly"> 只收获</label>
             <button id="travel-run" class="btn sm ok" title="收获已返回猫 + 用今日剩余免费次数出发空闲猫 + 收三叶草 + 去好友浇水 + 领每日任务">跑一轮</button>
-            <button id="travel-harvest" class="btn sm ok" title="手动收获：领取所有已返回猫的旅行礼物（act=23）">收获旅行</button>
+            <button id="travel-harvest" class="btn sm ok" title="手动收获：领取所有已返回猫的旅行礼物">收获旅行</button>
             <button id="travel-clover" class="btn sm">收三叶草</button>
-            <button id="travel-water" class="btn sm" title="只浇「已种三叶草且未成熟、今日未浇过」的好友（act=21，每个好友每天一次）">去浇水</button>
+            <button id="travel-water" class="btn sm" title="只浇「已种三叶草且未成熟、今日未浇过」的好友（每个好友每天一次）">去浇水</button>
             <button id="travel-tasks" class="btn sm">领每日任务</button>
-            <button id="travel-friends" class="btn sm" title="拉取「已开通猫咪旅行」的好友列表（只读，act=12）">好友列表</button>
+            <button id="travel-friends" class="btn sm" title="拉取「已开通猫咪旅行」的好友列表（只读）">好友列表</button>
             <button id="travel-refresh" class="btn sm primary">刷新状态</button>
             <span class="sep"></span>
             <button id="travel-auto-start" class="btn sm ok">开始自动</button>
@@ -1258,10 +1258,10 @@
                 <option value="4">超级炸药（格子上的）</option>
               </select>
             </label>
-            <button id="dig-collect" class="btn sm ok" title="act=18：收走所有已露出的礼物">一键收获</button>
+            <button id="dig-collect" class="btn sm ok" title="收走所有已露出的礼物">一键收获</button>
             <button id="dig-push" class="btn sm" title="在最深一行的空格扔一字型炸药（横扫5格），把未探索行炸开、地层往下推进">往下推进</button>
-            <button id="dig-daily-tools" class="btn sm" title="act=9：领每日道具（锄头/炸药）">领每日道具</button>
-            <button id="dig-daily-gift" class="btn sm" title="act=15：领每日礼包（可连领）">领每日礼包</button>
+            <button id="dig-daily-tools" class="btn sm" title="领每日道具（锄头/炸药）">领每日道具</button>
+            <button id="dig-daily-gift" class="btn sm" title="领每日礼包（可连领）">领每日礼包</button>
             <button id="dig-refresh" class="btn sm primary">刷新</button>
             <span class="sep"></span>
             <button id="dig-auto-start" class="btn sm ok">开始自动</button>
@@ -1295,13 +1295,13 @@
                   <span class="t">鉴定机（炼三色石）</span>
                   <div class="spacer"></div>
                   <button id="dig-jd-auto" class="btn sm ghost" title="收到期的产出，并给空槽按 蓝→绿→红 依次投石">自动一轮</button>
-                  <button id="dig-machines" class="btn sm ok" title="act=7：只收到期的槽">收获</button>
+                  <button id="dig-machines" class="btn sm ok" title="只收到期的槽">收获</button>
                 </div>
                 <div class="lst" id="dig-jd" style="padding:10px 12px">
                   <div class="empty-tip">点「刷新」加载鉴定机。</div>
                 </div>
                 <div class="relic-box" id="dig-relic">
-                  <div class="rb-head">文物上交（act=10：用古文物兑换挖地套卡）</div>
+                  <div class="rb-head">文物上交（用古文物兑换挖地套卡）</div>
                   <button id="relic-all" class="btn sm primary" type="button" style="align-self:flex-start">一键上交全部</button>
                   <span class="muted" style="font-size:12px">自动探测并上交仓库里<b>所有</b>文物（不用记编号）——刷新页面后仓库里的文物也能交。</span>
                   <div id="dig-relic-list" class="rel"></div>
@@ -1380,33 +1380,24 @@
               <button id="claim-all" class="btn sm">一键领奖（各玩法奖励，零消耗）</button>
               <span id="home-all-st" class="hint"></span>
             </div>
-            <!-- 竞技场（pvp）状态与操作：原本独占一个「竞技场 · 日榜」tab，
-                 2026-09-28 按用户定调并入猫窝日常——点赞/挑战都由「一键全部」跑，榜没有展示价值。 -->
-            <div class="lst" id="match-arena" style="margin:0 0 10px">
-              <div class="lst-head"><span class="t">竞技场 · 每日（pvp act=1 状态 / act=14 我的名次）</span>
-                <span class="cnt" id="match-arena-cnt"></span></div>
-              <div id="match-arena-box">
-                <div class="state-box"><span class="spinner"></span>正在读取竞技场…</div>
-              </div>
-              <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
-                <button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="领奖中">领竞技奖励</button>
-                <button class="btn sm" data-act="mm-flush" data-idle="刷对手中">刷对手</button>
-                <button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战中">挑战对手（消耗）</button>
-                <button class="btn sm" data-act="mm-arena-zan" data-idle="点赞中">点赞竞技榜（第一个可赞）</button>
-                <span class="hint" style="font-size:12px">竞技场点赞＝榜里第一个可赞对象，每天 1 次；「一键全部」已自动点，这里只是手动补点。</span>
-              </div>
+            <div class="lib-toolbar" style="gap:8px;padding:0 12px 8px;flex-wrap:wrap">
+              <b style="font-size:12px;color:var(--muted)">竞技场</b>
+              <button class="btn sm ok" data-act="mm-claim" data-only="pvp" data-idle="领奖中">领竞技奖励</button>
+              <button class="btn sm" data-act="mm-flush" data-idle="刷对手中">刷对手</button>
+              <button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战中">挑战对手（消耗）</button>
+              <button class="btn sm" data-act="mm-arena-zan" data-idle="点赞中">点赞竞技榜（第一个可赞）</button>
             </div>
             <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 兑红宝石 → 竞技自动</b>
               （玩耍严格排在竞技之前）；糖果不够会先用积分换大糖果再喂。
               今天的赞若已点过、免费扭蛋已抽过、红宝石已到上限，会自动跳过（不浪费次数）。<br>
-              衣柜锻造的写接口已定位（<b>act=29</b>，会真消耗材料），不在一键里自动锻 —— 先确认代价再手动锻。
+              衣柜锻造的写接口已定位（会真消耗材料），不在一键里自动锻 —— 先确认代价再手动锻。
               <b>领段位奖励</b>的写接口仍未抓到包，一键时跳过并在日志里说明。</div>
           </div>
 
           <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1">
               <div class="lst" style="max-height:none">
-                <div class="lst-head"><span class="t">出战猫咪（equip_arr 为 act=1 猫字段 4 件；每日比赛上台每次现场搭配，不读这里）</span>
+                <div class="lst-head"><span class="t">出战猫咪（每日比赛上台时现场搭配，这里只是参考）</span>
                   <span class="cnt" id="match-cats-cnt"></span></div>
                 <div id="match-cats" class="lst" style="max-height:none;padding:8px"></div>
               </div>
@@ -1475,7 +1466,7 @@
                   <div id="match-union-box"></div>
                 </div>
                 <div class="lst" style="max-height:none;margin-top:8px">
-                  <div class="lst-head"><span class="t">公会战（union act=22）</span>
+                  <div class="lst-head"><span class="t">公会战</span>
                     <span class="cnt" id="match-gvg-cnt"></span></div>
                   <div id="match-gvg-box">
                     <div class="state-box"><span class="spinner"></span>正在读取公会战…</div>
@@ -1486,19 +1477,19 @@
                   </div>
                 </div>
                 <div class="lst" style="max-height:none;margin-top:8px">
-                  <div class="lst-head"><span class="t">工会任务 / 碎片 / 商店（act=15/16/30）</span>
+                  <div class="lst-head"><span class="t">工会任务 / 碎片 / 商店</span>
                     <span class="cnt" id="match-union-extra-cnt"></span></div>
                   <div id="match-union-extra-box"></div>
                 </div>
               </div>
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">成员贡献榜（act=1 members）</span>
+                  <div class="lst-head"><span class="t">成员贡献榜</span>
                     <span class="cnt" id="match-union-mem-cnt"></span></div>
                   <div id="match-union-mem-box"></div>
                 </div>
                 <div class="lst" style="max-height:none;margin-top:8px">
-                  <div class="lst-head"><span class="t">金卡每日限购（act=20）</span>
+                  <div class="lst-head"><span class="t">金卡每日限购</span>
                     <span class="cnt" id="match-gold-cnt"></span></div>
                   <div id="match-gold-box"></div>
                 </div>
@@ -1514,7 +1505,7 @@
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1.15">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">西游记（worldexplore act=1）</span>
+                  <div class="lst-head"><span class="t">西游记</span>
                     <span class="cnt" id="match-xiyou-cnt"></span></div>
                   <div id="match-xiyou-box">
                     <div class="state-box"><span class="spinner"></span>正在读取西游记…</div>
@@ -1539,7 +1530,7 @@
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">三国战役（worldsanguo act=1）</span>
+                  <div class="lst-head"><span class="t">三国战役</span>
                     <span class="cnt" id="match-sanguo-cnt"></span></div>
                   <div id="match-sanguo-box">
                     <div class="state-box"><span class="spinner"></span>正在读取三国战役…</div>
@@ -1548,7 +1539,7 @@
               </div>
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">三国战役 · 关卡列表（act=9）</span>
+                  <div class="lst-head"><span class="t">三国战役 · 关卡列表</span>
                     <span class="cnt" id="match-sanguo-levels-cnt"></span></div>
                   <div id="match-sanguo-levels"><div class="state-box">读取中…</div></div>
                 </div>
@@ -1579,7 +1570,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928c"></script>
+<script src="/app.js?v=20260928d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

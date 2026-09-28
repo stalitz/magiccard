@@ -3371,7 +3371,7 @@ function renderMatchState() {
   if (!d.bound) {
     box.className = "state-box";
     box.innerHTML = `<span style="color:var(--warn)">该号未开通 / 暂无比赛数据：
-      <br>接口 act=1 返回空壳（travel_elf_arr 为空）。工会与 PVP 榜通常仍可读。</span>`;
+      <br>未开通的接口会返回空壳数据。工会与 PVP 榜通常仍可读。</span>`;
   } else {
     const n = (d.cats || []).length;
     box.className = "state-box";
@@ -3478,11 +3478,11 @@ function arrLen(x) {
 //  · 公会战并进「工会 · 公会战」（原本两个 tab 内容高度重复：都显示出兵与今日次数）
 //  · 「各玩法一键」删除 —— 领奖/刷对手/挑战/闯关已归到各玩法自己的 tab
 //  · PVP 日榜 tab（2026-09-28 删）：榜单没有展示价值（点赞/挑战都已被「一键全部」自动跑掉），
-//    竞技场的**状态与操作**改挂到猫窝日常页的「竞技场 · 每日」块，只留状态行 + 4 个动作钮。
+//    竞技场的**状态行与动作钮**并入猫窝日常页已有的「点赞」和「竞技比赛」两块，不再单开块。
 const MATCH_SUB_KEYS = ["home", "race", "union", "xiyou", "sanguo"];
 const MATCH_SUB_LOAD = {
   // 猫卡片的 equip_arr 列表就在猫窝日常里，所以这里也要拉一次比赛状态（act=1 只读）；
-  // 竞技场（pvp act=1 状态 + act=14 我的名次）的状态块也在本页，一起拉
+  // 竞技场状态行（「竞技比赛」块）与可赞首位（「点赞」块）都在本页，一起拉
   home: () => { loadHomeState(); loadMatchState(); loadMatchPvp(); loadMatchPvpExtra(); },
   // 出战记录（#match-log-box）就在本面板，必须一起拉，否则永远停在「读取中…」
   race: () => { loadMatchTheme(); loadMatchState(true); loadMatchLog(); },
@@ -3495,6 +3495,7 @@ const MATCH_SUB_LOAD = {
 };
 
 let homeInited = false;
+let homeStateCache = null;   // 最近一次 /api/home/state，供「点赞」「竞技比赛」两块拼状态行
 
 function matchStopPoll() {
   // 分模块定时器已合并为 matchSubTimer（按当前停留的子模块驱动）
@@ -3516,55 +3517,47 @@ function switchMatchSub(key) {
   if (fn) fn();
 }
 
-// 竞技场在**猫窝日常页**的只读状态块（2026-09-28 从「竞技场 · 日榜」tab 并入）。
-// 只留状态行，不列榜单：点赞（点第一个可赞）与挑战都由「一键全部」自动跑掉
-// （cathome.like("arena") / cathome.arena_auto），榜单留着只是刷屏。
-function renderMatchArenaHome() {
-  const box = $("match-arena-box"), cnt = $("match-arena-cnt");
-  if (!box) return;
-  const d = matchPvp || {};
-  const x = matchPvpExtra || {};
-  const st = (x.state || {}).data || {};
-  if (d.ok === false && x.ok === false) {
-    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">` +
-      `${d.message || x.message || "读取失败"}</span></div>`;
-    if (cnt) cnt.textContent = "失败";
-    return;
-  }
-  const zan = d.zan_targets || [];
-  const enemies = st.enemy_list || [];
-  const store = (x.store || {}).data || {};
-  if (cnt) {
-    cnt.textContent = `剩余 ${st.surplus ?? "-"} · 我第 ${d.my_rank ?? "-"} 名 · 可赞 ${zan.length || 0} 人`;
-  }
-  box.innerHTML = `<div class="state-box">` +
-    matchRow("今日剩余场次 surplus", st.surplus) +
-    matchRow("每日免费 free_pvp_num", st.free_pvp_num) +
-    matchRow("已刷对手 flush_num", st.flush_num) +
-    matchRow("我的名次（act=14）", d.ok
-      ? (d.my_rank ? `第 ${d.my_rank} 名`
-        : `不在榜内（榜内最低 ${d.min_score ?? "-"}，我的 ${d.my_score ?? "-"}）`)
-      : "-") +
-    matchRow("我的分数 / 战力", `${d.my_score ?? "-"} / ${d.my_ce ?? "-"}`) +
-    matchRow("今日已赞 / 可赞对象", `${d.my_zan_num ?? "-"} / ${zan.length || "无"}`) +
-    matchRow("今日可赞首位（点赞就点他）", zan.length
-      ? `${zan[0].nick || zan[0].uin}（第 ${zan[0].rank ?? "-"} 名 · 分数 ${zan[0].score ?? "-"}）`
-      : "无（今天已赞过）") +
-    matchRow("当前对手（第一个）", enemies.length
-      ? `${enemies[0].name || enemies[0].uin}（战力 ${enemies[0].ce ?? "-"}）`
-      : "-") +
-    matchRow("竞技场商店", (store.list || []).length ? `${(store.list || []).length} 项` : "-") +
-    `<div class="empty-tip" style="font-size:12px">` +
-    `battle_arr=[${(st.battle_arr || []).join(",")}] 语义未定位，只记录不解读。` +
-    `榜单共 ${d.total || 0} 人（服务端不返回名次，前端按分数降自行编号），这里不展开。</div>` +
-    `</div>`;
+// 竞技场不单开块（2026-09-28 用户定调）：点赞信息进猫窝日常的「点赞」块，
+// 场次/名次/对手信息进「竞技比赛」块 —— 这两块本来就有，不重复造一块。
+// 点赞（点第一个可赞）与挑战都由「一键全部」自动跑掉（cathome.like("arena") / arena_auto）。
+
+// 「点赞」块：每日比赛榜 + 竞技比赛榜的今日状态，外加竞技榜今日可赞首位
+function renderHomeLike() {
+  const st = $("home-like-st");
+  if (!st) return;
+  const d = homeStateCache || {};
+  const likes = d.likes || {};
+  const mark = (v) => (v === 1 ? "已点 ✓" : (v === 0 ? "未点 ✗" : "读取中…"));
+  const zan = (matchPvp && matchPvp.zan_targets) || [];
+  const first = zan.length
+    ? `${zan[0].nick || zan[0].uin}（第 ${zan[0].rank ?? "-"} 名）`
+    : "";
+  st.textContent = `每日比赛榜 ${mark(likes.match)} · 竞技比赛榜 ${mark(likes.arena)}` +
+    (first ? ` · 今日可赞首位 ${first}` : "");
 }
 
-// 竞技场状态（pvp act=1）：次数口径未定案，surplus / free_pvp_num 两个字段都整份透出
+// 「竞技比赛」块：次数来源/我的名次/当前对手（前两个来自猫窝状态，后两个来自竞技场接口）
+function renderHomeArena() {
+  const st = $("home-arena-st");
+  if (!st) return;
+  const d = homeStateCache || {};
+  const pv = d.pvp || {};
+  const rank = (matchPvp && matchPvp.ok !== false) ? matchPvp.my_rank : null;
+  const x = matchPvpExtra || {};
+  const es = ((x.state || {}).data || {}).enemy_list || [];
+  st.textContent = `剩余 ${pv.surplus ?? "-"} / 每日免费 ${pv.free_pvp_num ?? "-"}`
+    + ` · 已刷对手 ${pv.flush_num ?? "-"} · 我的名次 `
+    + (rank ? `第 ${rank} 名` : `未上榜（榜内最低 ${(matchPvp && matchPvp.min_score) || "-"}）`)
+    + ` · 我的战力 ${pv.my_ce ?? "-"}`
+    + (es.length ? ` · 当前对手 ${es[0].name || es[0].uin}` : "")
+    + (pv.surplus === 0 ? "（免费场次已用完）" : (pv.surplus > 0 ? "" : "（场次已用完）"));
+}
+
+// 竞技场状态（次数/对手）：两次语义未定案，surplus / free_pvp_num 两个字段都整份透出
 async function loadMatchPvpExtra() {
   const r = await fetch("/api/match/pvp-extra").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchPvpExtra = r;
-  renderMatchArenaHome();
+  renderHomeArena();
   if (!r || r.ok === false) mlogFail("竞技场", r);
 }
 
@@ -3576,10 +3569,10 @@ function renderMatchUnion() {
   box.innerHTML = `<div class="state-box">` +
     matchRow("工会名", d.union_name) +
     matchRow("工会 id", d.unionid) +
-    matchRow("等级 lv", d.lv) +
-    matchRow("贡献 exp", d.exp) +
+    matchRow("等级", d.lv) +
+    matchRow("贡献", d.exp) +
     matchRow("会员 / 上限", `${d.mem_num ?? "-"}/${d.max_num ?? "-"}`) +
-    matchRow("金币 coin / 碎片 chip", `${d.coin ?? "-"} / ${d.chip ?? "-"}`) +
+    matchRow("金币 / 碎片", `${d.coin ?? "-"} / ${d.chip ?? "-"}`) +
     matchRow("活跃度", d.union_activity) +
     matchRow("会长", d.patriarch_name) +
     matchRow("成员数", Object.keys(d.members || {}).length) +
@@ -3631,11 +3624,11 @@ function renderMatchUnionExtra() {
   if (cnt) cnt.textContent = `任务次数 ${t.num ?? "-"} · 工会资金 ${ch.data ?? "-"}`;
   box.innerHTML = `<div class="state-box">` +
     // 「今日已出兵次数」改由下方公会战块统一显示（两处同一个 num，不再重复）
-    matchRow("任务位 bits / 重置位", `${t.bits ?? "-"} / ${t.resetnum ?? "-"}`) +
-    matchRow("工会资金（act=16 data）", ch.data ?? "-") +
-    matchRow("工会商店（act=30）", (Array.isArray(items) && items.length)
+    matchRow("任务位 / 重置位", `${t.bits ?? "-"} / ${t.resetnum ?? "-"}`) +
+    matchRow("工会资金", ch.data ?? "-") +
+    matchRow("工会商店", (Array.isArray(items) && items.length)
       ? items.map((x) => `${x.consume}(${x.id})`).join(" · ") : "-") +
-    `</div><div class="empty-tip" style="font-size:12px">出兵次数＝act=15 的 num（出兵前 0、出兵后 1）；今日上限未知，界面不显示上限。</div>`;
+    `</div><div class="empty-tip" style="font-size:12px">出兵次数：出兵前 0、出兵后 1；今日上限未知，界面不显示上限。</div>`;
 }
 
 // 工会玩法动作：全部走 /api/match/union-*，完成后立刻刷新对应视图（项目铁律）。
@@ -3713,7 +3706,7 @@ function renderMatchGvgProgress(g) {
       </div>
       <div style="font-size:12px;margin-top:2px">进度占比 我方 ${pct}% · 敌方 ${100 - pct}%</div>
     </div>` +
-    matchRow("关卡领取位 levelgetbits", qt.length ? qt.join(" · ") : "-") +
+    matchRow("关卡领取位", qt.length ? qt.join(" · ") : "-") +
     (qt.length ? `<div class="empty-tip" style="font-size:12px">关卡领取位：0 表示还没领，非零表示此关卡已领过奖（未逐级验证，只记录）。</div>` : "");
 }
 
@@ -3729,20 +3722,20 @@ function renderMatchGvg() {
   cnt.textContent = `我方 Lv${g.level ?? "-"} · 敌方 Lv${g.e_levelid ?? "-"}`;
   box.innerHTML = `<div class="state-box">` +
     renderMatchGvgProgress(g) +
-    matchRow("我方等级 level", g.level) +
-    matchRow("我方进度 progress", g.progress) +
-    matchRow("我方关卡 inlv", g.inlv) +
-    matchRow("敌方等级 e_levelid", g.e_levelid) +
-    matchRow("敌方名称 e_name", g.e_name) +
-    matchRow("敌方工会 enemy_uinon", g.enemy_uinon) +
-    matchRow("敌方进度 e_progress", g.e_progress) +
-    matchRow("关卡领取位 levelgetbits", g.levelgetbits) +
-    matchRow("rank_bit / rank_bit2", `${g.level_rank_bit ?? "-"} / ${g.level_rank_bit2 ?? "-"}`) +
-    matchRow("last_lv", g.last_lv) +
-    matchRow("赛季礼包 season_gift", g.season_gift) +
-    matchRow("gift_record（已赠送记录）",
+    matchRow("我方等级", g.level) +
+    matchRow("我方进度", g.progress) +
+    matchRow("我方关卡", g.inlv) +
+    matchRow("敌方等级", g.e_levelid) +
+    matchRow("敌方名称", g.e_name) +
+    matchRow("敌方工会", g.enemy_uinon) +
+    matchRow("敌方进度", g.e_progress) +
+    matchRow("关卡领取位（原始）", g.levelgetbits) +
+    matchRow("排名位（语义未证实）", `${g.level_rank_bit ?? "-"} / ${g.level_rank_bit2 ?? "-"}`) +
+    matchRow("历史等级（语义未证实）", g.last_lv) +
+    matchRow("赛季礼包", g.season_gift) +
+    matchRow("已赠送记录",
       g.gift_record ? String(g.gift_record).split(",").filter(Boolean).length + " 条" : "-") +
-    matchRow("时间戳 ts", matchFmtTs(g.ts)) +
+    matchRow("更新时间", matchFmtTs(g.ts)) +
     `</div>`;
 }
 
@@ -3760,19 +3753,19 @@ function renderMatchSanguo() {
   const passed = logs.filter((x) => x && x.passData && x.passData.isget).length;
   cnt.textContent = `关卡 ${t.levelId ?? "-"} · 记录 ${logs.length}`;
   box.innerHTML = `<div class="state-box">` +
-    matchRow("当前关卡 levelId", t.levelId) +
-    matchRow("passId", t.passId) +
-    matchRow("每日免费次数 freenum", t.freenum) +
-    matchRow("已购 buynum", t.buynum) +
+    matchRow("当前关卡", t.levelId) +
+    matchRow("关卡进度号（语义未证实）", t.passId) +
+    matchRow("每日免费次数", t.freenum) +
+    matchRow("已购次数", t.buynum) +
     matchRow("天赋分 / 天赋率", `${t.talent_score ?? "-"} / ${t.talent_rate ?? "-"}`) +
-    matchRow("formation（技能等级）", (t.formation || []).map((f) => `id${f.id}·lv${f.lv}`).join("、") || "-") +
-    matchRow("关卡记录 logData", logs.length ? `${logs.length} 条，已通 ${passed} 关` : "-") +
-    matchRow("精灵（Travel_elf_arr）", (t.travel_elf_arr || []).length + " 只") +
-    matchRow("道具 img_items", (t.img_items || []).length ? `${(t.img_items || []).length} 种` : "-") +
-    matchRow("宝箱 ex / safe / new", `${t.ex_box_num ?? "-"} / ${t.safe_box_num ?? "-"} / ${t.new_box_num ?? "-"}`) +
-    matchRow("每日任务 task_detail",
-      (t.task_detail || []).length ? `${(t.task_detail || []).length} 项，bits=${t.task_bits}` : "（未拉）") +
-    matchRow("shoplist", (t.shoplist || []).length ? `${(t.shoplist || []).length} 项` : "-") +
+    matchRow("出战阵型（技能等级）", (t.formation || []).map((f) => `id${f.id}·lv${f.lv}`).join("、") || "-") +
+    matchRow("关卡记录", logs.length ? `${logs.length} 条，已通 ${passed} 关` : "-") +
+    matchRow("随行精灵", (t.travel_elf_arr || []).length + " 只") +
+    matchRow("道具", (t.img_items || []).length ? `${(t.img_items || []).length} 种` : "-") +
+    matchRow("宝箱三种（语义未证实）", `${t.ex_box_num ?? "-"} / ${t.safe_box_num ?? "-"} / ${t.new_box_num ?? "-"}`) +
+    matchRow("每日任务",
+      (t.task_detail || []).length ? `${(t.task_detail || []).length} 项` : "（未拉）") +
+    matchRow("商店", (t.shoplist || []).length ? `${(t.shoplist || []).length} 项` : "-") +
     `</div>`;
 }
 
@@ -3781,21 +3774,23 @@ function renderMatchGold() {
   const d = matchGold || {};
   if (!d.ok) { box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`; cnt.textContent = "失败"; return; }
   const g = d.data || {};
-  cnt.textContent = "act=20";
+  cnt.textContent = "金卡限购";
   let bought = 0;
   for (let i = 1; i <= 6; i++) { if (Number(g["gold_buy_id" + i]) > 0) bought++; }
   box.innerHTML = `<div class="state-box">` +
     matchRow("今日已购分组", bought ? `${bought} 组有购买记录` : "无") +
-    matchRow("gold_buy_id1..6",
+    matchRow("购买记录分组",
       [1, 2, 3, 4, 5, 6].map((i) => g["gold_buy_id" + i]).join(" / ")) +
     `</div><div class="empty-tip" style="font-size:12px">分组含义未证实，仅透出接口原值。</div>`;
 }
 
 async function loadMatchPvp() {
-  // top=100 只为少传几行：我的名次是在全量 1000 人上算的，跟 top 无关
-  const r = await fetch("/api/match/pvp?top=100").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  // 榜单不展示，只用来取「今日可赞首位」和「我的名次」；名次与可赞对象都在全量 1000 人上算，
+  // 跟取回多少条无关，故只取前 20 条（top 越小请求越轻）
+  const r = await fetch("/api/match/pvp?top=20").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchPvp = r;
-  renderMatchArenaHome();
+  renderHomeLike();
+  renderHomeArena();
   if (!r || r.ok === false) mlogFail("竞技场", r);
 }
 
@@ -3855,19 +3850,19 @@ function renderMatchXiyou() {
   const logGot = logs.filter((g) => g && (g.passData || {}).isget).length;
   cnt.textContent = `关卡 ${cur.levelid ?? "-"} · 材料 ${d.nlb ?? "-"}/${d.sjb ?? "-"}`;
   box.innerHTML = `<div class="state-box">` +
-    matchRow("当前关卡 levelid（currLevelData）", cur.levelid) +
-    matchRow("关卡 type / 剩余 time / targetbit",
+    matchRow("当前关卡", cur.levelid) +
+    matchRow("关卡状态 / 剩余时间 / 领取位",
       `${cur.type ?? "-"} / ${cur.time ?? "-"} / ${cur.targetbit ?? "-"}`) +
-    matchRow("当前关 stepData 已收", `${got} / ${steps.length || "-"}`) +
-    matchRow("记录 logData", logs.length ? `${logs.length} 关，已过 ${logGot} 关` : "-") +
-    matchRow("宝箱 ex / new / safe", `${d.ex_box_num ?? "-"} / ${d.new_box_num ?? "-"} / ${d.safe_box_num ?? "-"}`) +
-    matchRow("材料 nlb / sjb / txd", `${d.nlb ?? "-"} / ${d.sjb ?? "-"} / ${d.txd ?? "-"}`) +
-    matchRow("关卡上限 maxLevelId", d.maxLevelId) +
-    matchRow("freepowerbit", (d.freepowerbit || []).map((x) => JSON.stringify(x)).join(" ") || "-") +
-    matchRow("luckydata", (d.luckydata || []).map((x) => `id${x.id}=${x.value}`).join("、") || "-") +
-    matchRow("商店 shoplist", (d.shoplist || []).length ? `${(d.shoplist || []).length} 项` : "-") +
-    matchRow("每日任务 task_detail",
-      (d.task_detail || []).length ? `${(d.task_detail || []).length} 项，bits=${d.task_bits || "-"}` : "（未拉）") +
+    matchRow("当前关已收步数", `${got} / ${steps.length || "-"}`) +
+    matchRow("闯关记录", logs.length ? `${logs.length} 关，已过 ${logGot} 关` : "-") +
+    matchRow("宝箱三种（语义未证实）", `${d.ex_box_num ?? "-"} / ${d.new_box_num ?? "-"} / ${d.safe_box_num ?? "-"}`) +
+    matchRow("材料三种", `${d.nlb ?? "-"} / ${d.sjb ?? "-"} / ${d.txd ?? "-"}`) +
+    matchRow("关卡上限", d.maxLevelId) +
+    matchRow("免费体力位（语义未证实）", (d.freepowerbit || []).map((x) => JSON.stringify(x)).join(" ") || "-") +
+    matchRow("幸运数据（语义未证实）", (d.luckydata || []).map((x) => `id${x.id}=${x.value}`).join("、") || "-") +
+    matchRow("商店", (d.shoplist || []).length ? `${(d.shoplist || []).length} 项` : "-") +
+    matchRow("每日任务",
+      (d.task_detail || []).length ? `${(d.task_detail || []).length} 项` : "（未拉）") +
     `</div>`;
 }
 
@@ -3884,7 +3879,7 @@ function renderMatchXiyouTeam() {
   const rows = fl.map((f) =>
     `<div class="rv"><span class="k">猫 ${f.catid} · 战力 ${f.ce}</span><span class="v">装 ${f.eqlist || "-"}</span></div>`).join("");
   box.innerHTML = `<div class="state-box">${rows || "-"}` +
-    `<div class="rv"><span class="k">布阵条数 formationList</span><span class="v">${fl.length}</span></div></div>`;
+    `<div class="rv"><span class="k">布阵条数</span><span class="v">${fl.length}</span></div></div>`;
 }
 
 // 三国战役关卡表（sanguo act=9）：只读，字段语义未证实 → 只报条数与原始关卡号
@@ -3914,8 +3909,8 @@ function renderMatchSanguoLevels() {
   // 闯关按钮从「各玩法一键」搬到这里：合法关卡 id 从 101 起（1~9 会被判「错误的关卡ID」）
   const runs = lv.filter((x) => Number(x.levelid) >= 101).slice(0, 3);
   box.innerHTML = `<div class="state-box">${head || "-"}` +
-    `<div class="rv"><span class="k">关卡总数（act=9）</span><span class="v">${lv.length}</span></div>` +
-    (lv.length > 12 ? `<div class="empty-tip" style="font-size:12px">只列前 12 条，其余字段原样在 act=9 响应里。</div>` : "") +
+    `<div class="rv"><span class="k">关卡总数</span><span class="v">${lv.length}</span></div>` +
+    (lv.length > 12 ? `<div class="empty-tip" style="font-size:12px">只列前 12 条，其余关卡的字段原样返回、未解读。</div>` : "") +
     `</div>` +
     (runs.length ? `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
       runs.map((x) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${x.levelid}" data-idle="闯关 L${x.levelid}">闯关 L${x.levelid}（消耗）</button>`).join("") +
@@ -4101,21 +4096,22 @@ async function loadHomeState() {
   try {
     d = await fetch("/api/home/state").then((x) => x.json());
   } catch (e) { st.textContent = "读取失败：" + e; return; }
-  if (!d || d.ok === false) { st.textContent = "读取失败：" + (d && d.message || "?"); return; }
-  const mark = (v) => (v === 1 ? "已点 ✓" : "未点 ✗");
-  $("home-like-st").textContent =
-    `每日比赛榜 ${mark(d.likes.match)} · 竞技比赛榜 ${mark(d.likes.arena)}`;
+  if (!d || d.ok === false) {
+    st.textContent = "读取失败：" + (d && d.message || "?");
+    homeStateCache = null;
+    renderHomeLike(); renderHomeArena();
+    return;
+  }
+  homeStateCache = d;
+  renderHomeLike();
   $("home-gacha-st").textContent =
     `免费抽 ${d.gacha.free_used ? "已用" : "可用"} · 积分 ${d.gacha.score ?? "-"}`;
   $("home-cat-st").textContent =
     (d.cats || []).map((c) => `${c.elf_id}:${c.mood ?? "?"}`).join(" · ") +
     `（目标 80）心情不足会自动喂`;
-  const pv = d.pvp || {};
-  $("home-arena-st").textContent =
-    `剩余 ${pv.surplus ?? "-"} / 每日免费 ${pv.free_pvp_num ?? "-"}` +
-    ` · 已刷对手 ${pv.flush_num ?? "-"} · 付费 ${pv.pvp_num ?? "-"} · 我的战力 ${pv.my_ce ?? "-"}` +
-    (pv.surplus === 0 ? "（免费场次已用完）" : (pv.surplus > 0 ? "（还能打）" : ""));
-  // 金币福利：act=21 兑红宝石后计数落在 gold_buy_id2（编号与 act 参数不一致，见 cathome.py 注释）
+  // 「竞技比赛」块的状态行由 renderHomeArena 拼（还要叠加竞技场接口的名次与对手）
+  renderHomeArena();
+  // 金币福利：兑红宝石后计数落在 gold_buy_id2（具体字段含义见后端 cathome.py 注释）
   const gi = (d.gold && d.gold.items) || [];
   const ruby = gi.find((g) => g.id === 2) || {};
   const bought = ruby.bought ?? 0;
