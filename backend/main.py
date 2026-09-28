@@ -2663,7 +2663,47 @@ async def match_sanguo_raid(req: dict | None = None):
     req = req or {}
     lv = req.get("levelid")
     return await mt.run_sanguo_raid(_session, int(lv) if lv else None,
-                                    feed=bool(req.get("feed", True)))
+                                    feed=bool(req.get("feed", True)),
+                                    clear_box=bool(req.get("clear_box", True)))
+
+
+@app.get("/api/match/sanguo-box")
+async def match_sanguo_box():
+    """三国关卡卡箱（只读）：ex_box 里每层攒了几张、缺哪层、同层多余的可卖哪些。
+
+    纯只读，不碰卡。界面据此提示「还差第 N 层」和一键卖多余旧卡。
+    """
+    if err := _require_login():
+        return err
+    st = await mt.sanguo_state(_session)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
+    lv = (st.get("levelData") or [{}])[0]
+    return {"ok": True, "levelid": lv.get("levelid"), "freenum": st.get("freenum"),
+            "plan": mt.plan_ex_box(st),
+            "dropitem": lv.get("dropitem"), "pass": lv.get("passData"),
+            "steps": lv.get("stepData")}
+
+
+@app.post("/api/match/sanguo-sell")
+async def match_sanguo_sell(req: dict):
+    """卖掉关卡卡箱里指定格的层卡（act=5），换三国币。传 {index, card_id}。
+
+    index / card_id 必须和 /api/match/sanguo-box 读到的对得上，否则服务端回 -311。
+    """
+    if err := _require_login():
+        return err
+    idx, cid = req.get("index"), req.get("card_id")
+    if idx is None or cid is None:
+        return {"ok": False, "message": "缺少 index / card_id"}
+    r = await mt.sanguo_sell_ex(_session, int(idx), int(cid))
+    if not r.get("ok"):
+        return {"ok": False, "message": r.get("message") or "卖卡失败"}
+    d = r.get("data") or {}
+    if d.get("code") not in (0, None):
+        return {"ok": False, "message": str(d.get("desc") or d.get("code"))}
+    return {"ok": True, "content": d.get("content"), "index": int(idx),
+            "card_id": int(cid), "ex_box_free": d.get("ex_box_num")}
 
 
 @app.post("/api/match/pvp-fight")

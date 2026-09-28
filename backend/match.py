@@ -286,6 +286,10 @@ async def sanguo_state(session, want_task: bool = False) -> dict:
     for k in ("levelId", "passId", "freenum", "buynum", "talent_score", "talent_rate",
               "levelData", "formation", "logData", "travel_elf_arr", "img_items",
               "ex_box_num", "safe_box_num", "new_box_num", "shoplist", "ispoup",
+              # 关卡卡箱内容（2026-09-28 补）：ex_box_data 15 位 = 当前大关攒的层卡，
+              # safe_box_data 12 位 = 保险箱。只有 act=5 的响应也带这两项，但 act=1
+              # 同一次返回里就有，省一次请求。
+              "ex_box_data", "safe_box_data",
               "tick", "sjb", "nlb", "txd"):
         if k in d:
             out[k] = d[k]
@@ -1218,6 +1222,129 @@ async def sanguo_lineup(session, levelid: int) -> dict:
     return await _act(session, EP_WORLD_SANGUO, 16, levelid=int(levelid), cats="0|0|0|0")
 
 
+# ---------------------------------------------------------------------------
+# 三国「关卡卡箱」= ex_box（15 格，装当前大关攒的层卡）
+#
+# 机制（2026-09-28 用户口述 + bisai2.har 真机实证）：
+#   - 每一小关打过 → 随机给一张**层卡**进 ex_box；
+#   - ex_box 满了就打不了（出战前必须先腾位）；
+#   - 同一「层」（card_list 第 4 字段，如 1502／2502／3502）只需要留最新的一张，
+#     旧的要卖掉换三国币（act=5），否则新卡没地方放；
+#   - 某套的每一层都齐了才「上交」进下一大关（上交接口未实证，见 _sg_handin TODO）。
+# ---------------------------------------------------------------------------
+
+_SG_CARDS: dict | None = None
+
+
+def _sg_cards() -> dict:
+    """卡库快照：{card_id: [id, theme, 名字, 位置值, ...]}。只认 data/card_lib.json。"""
+    global _SG_CARDS
+    if _SG_CARDS is None:
+        lib = _ujson.loads((_upath(__file__).resolve().parent.parent / "data"
+                            / "card_lib.json").read_text(encoding="utf-8"))
+        _SG_CARDS = {int(c[0]): c for c in lib["card_list"]}
+    return _SG_CARDS
+
+
+def _sg_meta(card_id) -> dict:
+    """一张层卡的可读信息：名字 / 所属套 / 位置值 / 层号。查不到就如实留空。"""
+    cid = int(card_id)
+    c = _sg_cards().get(cid)
+    if not c:
+        return {"card_id": cid, "theme": None, "name": None, "slot": None,
+                "layer": None}
+    slot = int(c[3])
+    return {"card_id": cid, "theme": int(c[1]), "name": str(c[2]), "slot": slot,
+            "layer": slot // 1000}
+
+
+def plan_ex_box(state: dict) -> dict:
+    """只读推演关卡卡箱：哪些层齐了、缺哪层、哪些是同层里可以卖掉的多余旧卡。
+
+    纯函数（不联网），便于离线验证。规则只有一条、且来自用户口述：
+    **同一位置值（同一层）只留 ts 最新的一张，其余算多余。**
+    """
+    ex = state.get("ex_box_data") or []
+    cap = int(state.get("ex_box_num") or len(ex) or 0)
+    slots: dict = {}          # slot(位置值) -> [卡信息]
+    for i, x in enumerate(ex):
+        cid = int(x.get("card_id") or 0)
+        if not cid:
+            continue
+        m = _sg_meta(cid)
+        m["index"] = i        # 卡位下标（act=5 卖卡要按它定位）
+        if m["slot"] is None:      # 卡库里没有（不该发生）就按原样归到 0
+            m["slot"] = 0
+            m["layer"] = None
+            m["name"] = f"卡{cid}"
+        m["ts"] = int(x.get("ts") or 0)
+        slots.setdefault(m["slot"], []).append(m)
+    by_slot = []
+    spare = []
+    for slot, arr in sorted(slots.items(), key=lambda kv: -kv[1][0]["ts"]):
+        arr.sort(key=lambda m: -m["ts"])
+        keep, redundant = arr[0], arr[1:]
+        by_slot.append({"slot": slot, "layer": keep["layer"], "theme": keep["theme"],
+                        "keep": keep, "count": len(arr)})
+        spare.extend(redundant)
+    themes = sorted({m["theme"] for m in
+                     [a for arr in slots.values() for a in arr] if m["theme"]})
+    return {
+        "capacity": cap,
+        "filled": sum(len(a) for a in slots.values()),
+        "free": max(0, cap - sum(len(a) for a in slots.values())),
+        "slots": by_slot,               # 按「层」分组，最新那张是 keep
+        "spare": spare,                 # 同层多出来的旧卡（可卖，换三国币）
+        "themes": themes,
+    }
+
+
+async def sanguo_sell_ex(session, index: int, card_id: int) -> dict:
+    """卖掉（上交）关卡卡箱里某一格的层卡（sanguo act=5 {cards:'0_{index}_{card_id}'}）。
+
+    实证（2026-09-28，bisai2.har 00:41:34）：请求 `cards=0_5_25097` → 该卡位立刻
+    从 {card_id:25097} 变成 {card_id:0}（被清空），同时 `content=48_1614_100`
+    （100 三国币）。参数三段是 **`{箱子}_{卡位 index}_{卡 id}`**，index 与 card_id
+    必须和 ex_box_data 对得上，否则服务端回 `code -311 卡牌有变化,交易失败~`
+    （今天实测：ex_box 第 5 位已经不是 25097，照抄就 -311，卡箱纹丝不动）。
+    只卖关卡卡箱（箱子 0），不动保险箱。
+    """
+    return await _act(session, EP_WORLD_SANGUO, 5,
+                      cards=f"0_{int(index)}_{int(card_id)}")
+
+
+async def auto_sell_spare(session, state: dict, keep_free: int = 1) -> dict:
+    """出战前腾卡箱：把 ex_box 里同层的多余旧卡卖掉，至少留 `keep_free` 格。
+
+    只在「卡箱将满」时才动手（free <= keep_free），绝不在还有空位时主动卖卡。
+    返回 {ok, sold:[…], free_after, skipped}。
+    """
+    plan = plan_ex_box(state)
+    if plan["free"] > keep_free:
+        return {"ok": True, "skipped": True, "sold": [], "free_after": plan["free"]}
+    # 卡位 index 要回查 ex_box_data 的真实下标（card_list 里没有 index 字段）
+    ex = state.get("ex_box_data") or []
+    idx = {int(x.get("card_id") or 0): i for i, x in enumerate(ex)}
+    sold, failed = [], None
+    for m in plan["spare"]:
+        i = idx.get(m["card_id"], -1)
+        if i < 0:
+            continue
+        r = await sanguo_sell_ex(session, i, m["card_id"])
+        d = r.get("data")
+        okc = bool(r.get("ok")) and (d.get("code") if isinstance(d, dict) else None) in (0, None)
+        sold.append({"index": i, "card_id": m["card_id"], "name": m["name"],
+                     "slot": m["slot"], "ok": okc,
+                     "content": (d or {}).get("content") if isinstance(d, dict) else None,
+                     "desc": (d or {}).get("desc") if isinstance(d, dict) else
+                     r.get("message")})
+        if not okc:
+            failed = sold[-1]
+            break
+    after = plan_ex_box(await sanguo_state(session))["free"]
+    return {"ok": True, "sold": sold, "failed": failed, "free_after": after}
+
+
 async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0,
                      feed: bool = True) -> dict:
     """三国闯关（sanguo act=11 {mode, levelid, eqs, cats}）。
@@ -1279,8 +1406,12 @@ def _sanguo_battle_text(d: dict) -> str:
     return "；".join(x for x in bits if x)
 
 
-async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True) -> dict:
+async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True,
+                          clear_box: bool = True) -> dict:
     """三国「一键出战」：用**真实阵容**连打到今日次数用尽（每天 SGUO_DAILY_MAX 次）。
+
+    出战前先把关卡卡箱腾出空位（`clear_box`，用户口述：卡箱满不能出战，多余的层卡
+    要卖掉换三国币、只留最新那张）。只在卡箱只剩很少空位时才动手，日志逐张记录。
 
     铁律落地（2026-09-28 补）：
       - `freenum` 是「今日已打次数」而非剩余量，所以剩余 = SGUO_DAILY_MAX - freenum；
@@ -1298,6 +1429,13 @@ async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True
     st = await sanguo_state(session)
     if not st.get("ok"):
         return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
+    box_before = plan_ex_box(st)
+    box_sold = []
+    if clear_box and box_before["free"] <= 1 and box_before["spare"]:
+        r = await auto_sell_spare(st, keep_free=1)
+        box_sold = r.get("sold") or []
+        st = await sanguo_state(session)   # 卖完立刻回读，后续步骤用真实卡箱
+        box_before = plan_ex_box(st)
     used = int(st.get("freenum") or 0)
     cur_level = st.get("levelId")
     if levelid is None or levelid == 0:
@@ -1343,7 +1481,13 @@ async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True
     out = {"ok": True, "levelid": int(levelid), "used_before": used,
            "used_after": (await sanguo_state(session)).get("freenum"),
            "daily_max": SGUO_DAILY_MAX, "rounds": rounds,
-           "played": sum(1 for x in rounds if x.get("ok"))}
+           "played": sum(1 for x in rounds if x.get("ok")),
+           "box": {"free_before": box_before.get("free"),
+                   "free_after": plan_ex_box(
+                       await sanguo_state(session)).get("free"),
+                   "sold": box_sold,
+                   "note": ("同层多余的旧卡已卖掉腾位置" if box_sold else
+                            "卡箱未清空位，未动卡" if clear_box else "未检查卡箱")}}
     _save_sanguo_raid(out)
     return out
 

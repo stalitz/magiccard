@@ -1549,6 +1549,7 @@
           <div id="msub-sanguo" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
               <button id="match-sanguo" class="btn sm">刷新三国战役</button>
+              <button class="btn sm" data-act="mm-sgbox">刷新关卡卡箱</button>
               <button class="btn sm ok" data-act="mm-raid-sg" data-idle="一键出战（出战中…）">一键出战（今日剩余 3 次）</button>
               <button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>
             </div>
@@ -1567,6 +1568,16 @@
                   <div class="lst-head"><span class="t">三国战役 · 关卡列表</span>
                     <span class="cnt" id="match-sanguo-levels-cnt"></span></div>
                   <div id="match-sanguo-levels"><div class="state-box">读取中…</div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="lib-body" style="grid-template-columns:minmax(0,1fr);margin-top:8px">
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">关卡卡箱（当前大关攒的层卡）</span>
+                  <span class="cnt" id="match-sgbox-cnt"></span></div>
+                <div id="match-sgbox-box">
+                  <div class="state-box"><span class="spinner"></span>正在读取关卡卡箱…</div>
                 </div>
               </div>
             </div>
@@ -1595,7 +1606,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928j"></script>
+<script src="/app.js?v=20260928k"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

@@ -3782,11 +3782,11 @@ function renderMatchSanguo() {
       `${Math.max(0, SGUO_DAILY_MAX - Number(t.freenum || 0))} 次`) +
     matchRow("已购次数", t.buynum) +
     matchRow("天赋分 / 天赋率", `${t.talent_score ?? "-"} / ${t.talent_rate ?? "-"}`) +
-    matchRow("出战阵型（技能等级）", (t.formation || []).map((f) => `id${f.id}·lv${f.lv}`).join("、") || "-") +
+    matchRow("出战阵型（技能等级）", (t.formation || []).map((f, i) => `槽${i + 1}·Lv${f.lv}`).join("、") || "-") +
     matchRow("关卡记录", logs.length ? `${logs.length} 条，已通 ${passed} 关` : "-") +
     matchRow("随行精灵", (t.travel_elf_arr || []).length + " 只") +
     matchRow("道具", (t.img_items || []).length ? `${(t.img_items || []).length} 种` : "-") +
-    matchRow("宝箱三种（语义未证实）", `${t.ex_box_num ?? "-"} / ${t.safe_box_num ?? "-"} / ${t.new_box_num ?? "-"}`) +
+    matchRow("关卡卡箱 / 保险箱", `${(t.ex_box_data || []).filter((x) => x && x.card_id).length} / ${t.ex_box_num ?? "-"} 格 · ${t.safe_box_num ?? "-"} 格`) +
     matchRow("每日任务",
       (t.task_detail || []).length ? `${(t.task_detail || []).length} 项` : "（未拉）") +
     matchRow("商店", (t.shoplist || []).length ? `${(t.shoplist || []).length} 项` : "-") +
@@ -3869,7 +3869,96 @@ async function loadMatchSanguo(withTask = false) {
   const r = await fetch(url).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchSanguo = r;
   renderMatchSanguo();
+  loadMatchSanguoBox();   // 顺带刷新关卡卡箱（一次读取，不额外请求状态接口）
   if (!r || r.ok === false) mlogFail("三国战役", r);
+}
+
+// ---------- 三国「关卡卡箱」：层卡 / 缺层 / 同层多余可卖 ----------
+let matchSgBox = null;
+
+async function loadMatchSanguoBox() {
+  const r = await fetch("/api/match/sanguo-box")
+    .then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  matchSgBox = r;
+  renderMatchSanguoBox();
+}
+
+function renderMatchSanguoBox() {
+  const box = $("match-sgbox-box"), cnt = $("match-sgbox-cnt");
+  const d = matchSgBox || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const p = d.plan || {};
+  const cap = p.capacity || 0, filled = p.filled || 0, free = p.free || 0;
+  // 层：card_list 第 4 字段（如 1502）前一位是层号，后两位是套内编号
+  const have = new Set((p.slots || []).map((s) => s.layer).filter((x) => x !== null));
+  const allLayers = [...have].sort((a, b) => a - b);
+  const spare = p.spare || [];
+  const miss = missingLayerOf(p);
+  cnt.textContent = `卡箱 ${filled}/${cap}，空 ${free} 格 · 已有层 ${allLayers.length ? allLayers.join("/") : "-"}` +
+    (spare.length ? ` · 多余 ${spare.length} 张` : "");
+
+  const layerRows = (p.slots || []).map((s) => {
+    const keep = s.keep || {};
+    const extra = s.count > 1 ? `（本层共 ${s.count} 张，留新的「${keep.name || "?"}」）` : "";
+    return matchRow(`第 ${s.layer} 层`, `${keep.name || "?"}${extra}`);
+  }).join("");
+
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("当前大关 / 掉落", `${d.levelid ?? "-"} / ${d.dropitem || "-"}`) +
+    matchRow("卡箱余量", `${filled} / ${cap} 格，空 ${free} 格`) +
+    (free <= 1
+      ? `<div style="color:var(--danger);margin:4px 0">卡箱快满了：再拿一张层卡就没有位置，出战前得先卖掉同层多余的旧卡。</div>`
+      : `<div style="margin:4px 0">卡箱还有 ${free} 格空位，暂不用处理。</div>`) +
+    layerRows +
+    (spare.length
+      ? matchRow("同层多余（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
+        `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all">卖掉多余的 ${spare.length} 张（换三国币，每张 100）</button></div>`
+      : matchRow("同层多余（可卖）", "无，每层都只留了最新那张")) +
+    `<div style="opacity:.7;margin:4px 0;font-size:11.5px">` +
+    `每打过一小关会给一张层卡进卡箱；集齐某一套的全部层才能上交、进入下一大关。` +
+    `现在缺第 ${miss.join("、") || "?"} 层。</div>` +
+    `</div>`;
+}
+
+// 缺哪一层：已持有层的最大连续区间断在哪儿（缺层 4 就报 4）
+function missingLayerOf(p) {
+  const layers = [...new Set((p.slots || []).map((s) => s.layer)
+    .filter((x) => x !== null))].sort((a, b) => a - b);
+  if (!layers.length) return [];
+  const out = [];
+  for (let i = 0; i < layers.length - 1; i++) {
+    if (layers[i + 1] - layers[i] > 1) out.push(layers[i] + 1);
+  }
+  if (layers.length && layers[0] > 1) out.unshift(1);
+  return out;
+}
+
+async function sanguoSellSpare() {
+  const p = (matchSgBox || {}).plan || {};
+  const list = p.spare || [];
+  if (!list.length) { log("关卡卡箱没有多余层卡可卖"); return; }
+  if (!confirm(`卖掉同层多余的 ${list.length} 张层卡（留最新那张，换三国币）？\n` +
+    list.map((s) => `  第 ${s.layer} 层 · ${s.name || "卡" + s.card_id}`).join("\n") +
+    `\n卖完卡箱会空出格子，才能继续接新给的层卡。`)) return;
+  const done = [];
+  for (const s of list) {
+    const r = await fetch("/api/match/sanguo-sell", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: s.index, card_id: s.card_id }),
+    }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+    if (!r || r.ok === false) {
+      log(`卖掉「${s.name || s.card_id}」失败：${(r && r.message) || "服务端拒绝"}（已停手，后面的没动）`);
+      break;
+    }
+    done.push(`${s.name || s.card_id} → ${r.content || "三国币"}`);
+    log(`关卡卡箱卖卡：${s.name || s.card_id}（第 ${s.layer} 层）→ ${r.content || "三国币"}`);
+  }
+  if (done.length) log(`本轮卖掉 ${done.length} 张：${done.join("、")}`);
+  await loadMatchSanguoBox();
 }
 
 // ---------- 西游记（worldexplore act=1）· 与三国战役完全独立的玩法 ----------
@@ -4116,6 +4205,10 @@ function bindMatchModeActs() {
           await sanguoRun(parseInt(b.dataset.levelid, 10));
         } else if (act === "mm-raid-sg") {
           await sanguoRaid();
+        } else if (act === "mm-sgbox") {
+          await loadMatchSanguoBox();
+        } else if (act === "mm-sgsell-all") {
+          await sanguoSellSpare();
         }
       } finally {
         restore();
