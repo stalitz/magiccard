@@ -92,7 +92,23 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     window.fetch = (u) => {
       const url = String(u);
       const payload = url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
-        : url.includes("/api/match/explore") ? XIYOU
+        // 2026-09-28：前端改拉 /api/match/xiyou，且 raw 是后端 plan_xiyou() 的输出，
+        // 直接把 act=1 原始包塞进去会整块渲染成「-」→ 这里照 plan 形状包一层。
+        : url.includes("/api/match/xiyou") ? (() => {
+          const c = (XIYOU.currLevelData || [])[0] || {}, st = c.stepData || [];
+          const lv = c.levelid || XIYOU.maxLevelId || 0;
+          return { ok: true, raw: {
+            level: lv, theme: 1603 + lv, theme_name: "天宫", maxlevel: XIYOU.maxLevelId || lv,
+            run: { running: true, remain: 82800, total: st.length,
+                   got: st.filter((x) => x.isget).length,
+                   pending: st.map((x, i) => (x.isget ? -1 : i)).filter((i) => i >= 0), steps: [] },
+            boxes: { new: { filled: 0, capacity: XIYOU.new_box_num, free: XIYOU.new_box_num, items: [] },
+                     safe: { filled: 0, capacity: XIYOU.safe_box_num, free: XIYOU.safe_box_num, items: [] },
+                     ex: { filled: 0, capacity: XIYOU.ex_box_num, free: XIYOU.ex_box_num, items: [] } },
+            dupes: [], tasks: (XIYOU.task_detail || []).map((t, i) => ({ id: i, type: t.type, cnt: t.cnt, done: !!t.cnt, claimable: false })),
+            gap: { theme: 1603 + lv, name: "天宫", have: 18, need: 21, missing: [], layers: [] },
+            formation: XIYOU.formationList || [], logs: XIYOU.logData || [] } };
+        })()
         : url.includes("/api/match/sanguo") ? SANGUO
         : url.includes("/api/match/union") ? { ok:true, code:0, union_name:"搞起耍", mem_num:29,
             members:{"1006409757":"4,1790402280,紫旋の梦蝶,6213,96,1_81_1,202680,180,1790402552,3,35"} }
@@ -114,10 +130,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   })()`);
   }
 
-  const measure = async (key, file, boxId, cntId) => {
+  // 2026-09-28：二级 tab 只有 5 个（home/race/union/xiyou/sanguo）—— pvp、gvg 早就
+  // 并进 union 面板了，没有 msub-pvp / msub-union 这类 id，拼字符串必然 null。
+  // 所以这里直接传**面板 id**，不再从 key 拼。
+  const measure = async (sub, file, boxId, cntId) => {
+    const key = sub;
     await evaluate(`(async () => {
       switchPane('match');
-      switchMatchSub(${JSON.stringify(key)});
+      switchMatchSub(${JSON.stringify(sub)});
       await loadMatchState(true);
       await new Promise(r => setTimeout(r, 260));
       return document.getElementById('msub-${key}').textContent.slice(0, 60);
@@ -144,9 +164,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     fs.writeFileSync(`${OUT}/${file}.png`, Buffer.from(shot.result.data, "base64"));
   };
 
-  // 2026-09-27 整理后：6 个 tab（公会战并入工会、各玩法一键删除）
-  await measure("pvp", "pvp", "match-pvp-state-box", "match-pvp-state-cnt");
-  await measure("union", "union", "match-gvg-box", "match-gvg-cnt");
+  // 2026-09-28：实测 tab 顺序 = 猫窝日常 / 出战（比赛）/ 工会·公会战 / 西游记 / 三国战役
+  await measure("union", "union", "match-union-box", "match-union-cnt");
   await measure("xiyou", "xiyou", "match-xiyou-box", "match-xiyou-cnt");
   await measure("sanguo", "sanguo", "match-sanguo-box", "match-sanguo-cnt");
   console.log("\n截图已存到 " + OUT);

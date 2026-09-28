@@ -56,8 +56,10 @@ EP_MINI_GET     = "card_mini_get"                # 集卡册进度：<Node theme
 # 定位过程：card_run_base.version_list 里有 XiYouModule_v_41.swf / SanGuoModule_v_14.swf
 # → 解压取字符串，在其中找到 cgi 名 card_worldexplore / card_worldsanguo（SWF 内另有
 #   card_travel_elf_competition = 每日比赛）。两者 act=1 均返回 code=0 真实 JSON。
-EP_WORLD_XIYOU  = "card_worldexplore"            # 西游大地图（8 张小地图＝套卡 1604..1611）
 EP_WORLD_SANGUO = "card_worldsanguo"             # 三国大地图（9 张小地图＝套卡 1745..1756）
+# ⚠️ 西游 = EP_WORLD_EXPLORE（下面的定义），**不存在第二个「EP_WORLD_XIYOU」**：
+#    早先两个名字同值并存，是纯粹的坑源。2026-09-28 xiyou.har 实证后统一到
+#    EP_WORLD_EXPLORE，写了探索玩法（backend/xiyou.py）。
 EP_TRAVEL_MATCH = "card_travel_elf_competition"  # 每日比赛（猫咪旅行·精灵比赛）
 # 2026-09-25 bisai.har 实证（每日比赛抓包）：
 #   card_travel_elf_pvp    act=14,rank_id=0  → PVP 日榜（1000 人，78KB）

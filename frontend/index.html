@@ -1523,23 +1523,37 @@
           </div>
 
           <div id="msub-xiyou" class="msub">
-            <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
-              <button id="match-xiyou" class="btn sm">刷新西游记</button>
-              <button class="btn sm ok" data-act="mm-claim" data-only="explore" data-idle="一键领奖">一键领奖</button>
+            <div class="lib-toolbar" style="gap:8px;padding:8px 12px;flex-wrap:wrap">
+              <button id="match-xiyou" class="btn sm">刷新</button>
+              <button id="match-xy-run" class="btn sm ok" data-idle="探索跑完中…">一键探索（出发 + 收满 + 领奖）</button>
+              <button id="match-xy-start" class="btn sm danger" data-idle="出发中…">出发探索（高级 · 消耗）</button>
+              <button id="match-xy-get" class="btn sm" data-idle="收获中…">收满收获（24 个）</button>
+              <button id="match-xy-task" class="btn sm" data-idle="领奖中…">领任务奖</button>
+              <button id="match-xy-sell" class="btn sm" data-idle="腾空间中…">卖重复卡腾空间</button>
             </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1.15">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">西游记</span>
+                  <div class="lst-head"><span class="t">西游记 · 探索</span>
                     <span class="cnt" id="match-xiyou-cnt"></span></div>
                   <div id="match-xiyou-box">
                     <div class="state-box"><span class="spinner"></span>正在读取西游记…</div>
                   </div>
                 </div>
+                <div class="lst" style="max-height:none;margin-top:8px">
+                  <div class="lst-head"><span class="t">卡箱（重复的可卖掉腾空间）</span>
+                    <span class="cnt" id="match-xy-box-cnt"></span></div>
+                  <div id="match-xy-box"></div>
+                </div>
               </div>
               <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
-                  <div class="lst-head"><span class="t">西游记 · 布阵与记录</span>
+                  <div class="lst-head"><span class="t">还差什么 / 每日任务</span>
+                    <span class="cnt" id="match-xy-gap-cnt"></span></div>
+                  <div id="match-xy-gap"></div>
+                </div>
+                <div class="lst" style="max-height:none;margin-top:8px">
+                  <div class="lst-head"><span class="t">布阵与记录</span>
                     <span class="cnt" id="match-xiyou-team-cnt"></span></div>
                   <div id="match-xiyou-team"><div class="state-box">读取中…</div></div>
                 </div>
@@ -1607,7 +1621,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928p"></script>
+<script src="/app.js?v=20260928q"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

@@ -121,6 +121,38 @@ const PVP_EXTRA = {
   store: { ok: true, code: 0, data: { list: [{ id: 1 }] } },
 };
 
+/**
+ * 西游 /api/match/xiyou 的 mock。
+ *
+ * ⚠️ 后端这条路由返回的 `raw` 是 **plan_xiyou() 的输出**，不是 act=1 原始包
+ *    （原始包没有 level/run/gap 这些键，直接喂给前端会整块渲染成「-」）。
+ *    python 在 jsdom 里跑不了，所以这里照 plan 的字段形状手搓一份最小数据，
+ *    只为验「渲染对不对」；plan_xiyou 的算法本身由 tools/xiyou_sim.py 覆盖。
+ */
+function XIYOU_PLAN() {
+  const s = XIYOU, cld = (s.currLevelData || [])[0] || {}, steps = cld.stepData || [];
+  const lv = cld.levelid || s.maxLevelId || 0;
+  return {
+    level: lv, theme: 1603 + lv, theme_name: "天宫", maxlevel: s.maxLevelId || lv,
+    run: { running: true, remain: 82800, total: steps.length,
+           got: steps.filter((x) => x.isget).length,
+           pending: steps.map((x, i) => (x.isget ? -1 : i)).filter((i) => i >= 0), steps: [] },
+    boxes: {
+      new: { filled: 0, capacity: s.new_box_num, free: s.new_box_num, items: [] },
+      safe: { filled: 0, capacity: s.safe_box_num, free: s.safe_box_num, items: [] },
+      ex: { filled: 0, capacity: s.ex_box_num, free: s.ex_box_num, items: [] } },
+    dupes: [],
+    gap: { theme: 1603 + lv, name: "天宫", have: 18, need: 21,
+           missing: [{ name: "兜率宫", game_layer: 2 },
+                     { name: "玉帝王母", game_layer: 3 },
+                     { name: "太上老君", game_layer: 3 }],
+           layers: [{ game_layer: 2, missing: ["兜率宫"] },
+                    { game_layer: 3, missing: ["玉帝王母", "太上老君"] }] },
+    tasks: (s.task_detail || []).map((t, i) => ({ id: i, type: t.type, cnt: t.cnt, done: !!t.cnt, claimable: false })),
+    formation: s.formationList || [], logs: s.logData || [],
+  };
+}
+
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
@@ -128,7 +160,7 @@ w.fetch = (u, opt) => {
     : url.includes("/api/match/pvp-extra") ? PVP_EXTRA
     : url.includes("/api/match/pvp") ? PVP
     : url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
-    : url.includes("/api/match/explore") ? XIYOU
+    : url.includes("/api/match/xiyou") ? { ok: true, raw: XIYOU_PLAN() }
     : url.includes("/api/match/sanguo") ? SANGUO
     : url.includes("/api/match/union-extra") ? UNION_EXTRA
     : url.includes("/api/match/union") ? UNION
@@ -189,8 +221,12 @@ assert(!!$("match-xiyou-box").closest("#msub-xiyou"), "西游记状态块归位�
 const raceActs = [...w.document.querySelectorAll('#msub-race [data-act="mm-claim"]')]
   .map((b) => b.getAttribute("data-only"));
 assert(raceActs.indexOf("comp") >= 0, "每日比赛领奖归到「出战（比赛）」tab");
-assert([...w.document.querySelectorAll('#msub-xiyou [data-act="mm-claim"]')]
-  .some((b) => b.getAttribute("data-only") === "explore"), "西游记领奖归到西游记 tab");
+// 2026-09-28：西游改版后领奖动作从「一键领奖(data-only=explore)」换成
+// 「领任务奖(mm-xy-task)」，断言跟着换成新契约（老断言必挂）。
+// 「领任务奖」钮是动态渲染的（只有可领的任务才出按钮），所以查静态的 #match-xy-task
+assert(!!$("match-xy-task") && !!$("match-xy-task").closest("#msub-xiyou")
+  && [...w.document.querySelectorAll('#msub-xiyou [data-act="mm-claim"]')].length === 0,
+  "西游记领奖归到西游记 tab（领任务奖按钮在西游面板内）");
 assert([...w.document.querySelectorAll('#msub-sanguo [data-act="mm-claim"]')]
   .some((b) => b.getAttribute("data-only") === "sanguo"), "三国领奖归到三国 tab");
 // 竞技场（2026-09-28 并入猫窝日常）：动作钮与状态块都住 #msub-home，榜单本身不渲染
@@ -362,16 +398,25 @@ setTimeout(async () => {
   w.eval("(async () => { await loadMatchXiyou(true); await loadMatchSanguo(true); await loadMatchSanguoLevels(); })()");
   await new Promise((r) => setTimeout(r, 60));
   const xb = $("match-xiyou-box").textContent;
+  await w.eval("(async()=>{ window.__xy = await fetch('/api/match/xiyou?want_task=1').then(x=>x.json()); })()");
+  await w.eval("(async()=>{ await loadMatchXiyou(true); })()");
   const xt = $("match-xiyou-team").textContent;
   const sg = $("match-sanguo-box").textContent;
   const lvTxt = $("match-sanguo-levels").textContent;
-  assert(calls.some((c) => c.url.includes("/api/match/explore")), "西游记走自己的 /api/match/explore 端点");
+  assert(calls.some((c) => c.url.includes("/api/match/xiyou")), "西游记走自己的 /api/match/xiyou 端点");
   assert(calls.some((c) => /\/api\/match\/sanguo\?/.test(c.url)), "三国战役走 /api/match/sanguo（带任务）"
     + JSON.stringify(calls.map((c) => c.url).filter((u) => u.includes("sanguo"))));
-  assert(/当前关卡\s*2/.test(xb), "西游记显示当前关卡：2");
-  assert(/材料三种\s*1825 \/ 45840 \/ 170/.test(xb), "西游记显示真实材料数 1825/45840/170");
-  assert(/当前关已收步数\s*1 \/ 1/.test(xb), "西游记统计当前关已收 1/1");
-  assert(/闯关记录\s*1 关，已过 0 关/.test(xb), "西游记闯关记录统计（'已过'≠'已收'，不混算）");
+  // 2026-09-28 西游改版后的界面契约（旧断言里的「材料三种 / 闯关记录」已随改版下线）
+  const xy1 = $("match-xiyou-box").textContent;      // 总览：大关 / 进度 / 缺卡
+  const xy2 = $("match-xy-box").textContent;         // 卡箱：三箱张数 + 重复卡
+  const xy3 = $("match-xy-gap").textContent;         // 缺口按层 + 每日任务
+  assert(/当前大关.*第 2 关（天宫），上限第 2 关/.test(xy1), "西游记显示当前大关与套名：" + xy1.slice(0, 60));
+  assert(/可收收获点.*1 \/ 1 已收/.test(xy1), "西游记显示收获点进度（1/1 已收）："
+    + (xy1.match(/可收收获点[^可缺]*/) || [""])[0].slice(0, 40));
+  assert(/探索状态.*（出发后 24 小时内有效）|探索状态.*还没出发/.test(xy1),
+    "西游记显示探索状态（24 小时口径）");
+  assert(/天宫/.test(xy3) && /还差什么|天宫：/.test(xy3 + xy1), "西游记按套算出还差什么：" + xy3.slice(0, 60));
+  assert(/探索收获箱.*保险箱/.test(xy2), "西游记列出探索收获箱与保险箱：" + xy2.slice(0, 60));
   assert(/布阵 1 只/.test($("match-xiyou-team-cnt").textContent) && /猫 1 · 战力 9041/.test(xt),
     "西游记布阵块列出猫与战力：" + xt.slice(0, 40) + " | cnt=" + $("match-xiyou-team-cnt").textContent);
   // 次数按服务端当次返回值，不做死值断言（jsdom 里拿到的是真实接口的 freenum）

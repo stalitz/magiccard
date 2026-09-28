@@ -139,7 +139,8 @@ const onKeys = () => SUB_KEYS
     await w.eval("(async()=>{ switchMatchSub('xiyou'); await new Promise(r=>setTimeout(r,60)); })()");
   } catch (e) { console.log("  切换失败:", e.message); }
   assert(onKeys().join(",") === "xiyou", "只显示西游记子模块");
-  assert(calls.some((c) => c.includes("/api/match/explore")), "西游记只拉 explore 端点");
+  // 2026-09-28：西游子模块改拉 /api/match/xiyou（一次拿全三箱 + 任务 + 进度）
+  assert(calls.some((c) => c.includes("/api/match/xiyou")), "西游记只拉 xiyou 端点");
   assert(!calls.some((c) => c.includes("/api/match/sanguo")), "西游记 tab 不碰三国端点");
 
   calls.length = 0;
@@ -148,7 +149,7 @@ const onKeys = () => SUB_KEYS
   } catch (e) { console.log("  切换失败:", e.message); }
   assert(onKeys().join(",") === "sanguo", "只显示三国战役子模块");
   assert(calls.some((c) => c.includes("/api/match/sanguo")), "三国战役只拉 sanguo 端点");
-  assert(!calls.some((c) => c.includes("/api/match/explore")), "三国 tab 不碰西游端点");
+  assert(!calls.some((c) => c.includes("/api/match/xiyou")), "三国 tab 不碰西游端点");
 
   console.log("== 渲染不报错 ==");
   try {

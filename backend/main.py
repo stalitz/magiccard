@@ -36,11 +36,12 @@ from . import gift as gf
 from . import travel_elf_auto as te
 from . import dig_auto as dg
 from . import match as mt
+from . import xiyou as xy
 from . import cathome as ch
 from . import cat_dress as cd
 from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
                         EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
-                        EP_WORLD_XIYOU, EP_WORLD_SANGUO)
+                        EP_WORLD_EXPLORE, EP_WORLD_SANGUO)
 from .spirite_auto import SPIRITE_MAPS, get_engine, plain_uin
 
 # 复用 mc_api 里已配好 handler 的 logger（那边 propagate=False，root 不带 handler）
@@ -1355,7 +1356,7 @@ async def world_status(w: str = "xiyou"):
     """
     if err := _require_login():
         return err
-    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_XIYOU
+    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_EXPLORE
     try:
         r = await _session.post(ep, act=1)
         data = r.get("data") or {}
@@ -1388,7 +1389,7 @@ async def world_levels(w: str = "sanguo"):
     """猫咪探险关卡进度表（三国 act=9 / 西游同族 act），只读。"""
     if err := _require_login():
         return err
-    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_XIYOU
+    ep = EP_WORLD_SANGUO if w == "sanguo" else EP_WORLD_EXPLORE
     try:
         r = await _session.post(ep, act=9)
         # parse_response 会把整个响应体塞进 r["data"]，真正的关卡数组是 data["data"]
@@ -2305,6 +2306,126 @@ async def match_explore(want_task: int = 0):
         return err
     try:
         return await mt.explore_state(_session, want_task=bool(want_task))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+# ---- 西游记探索（2026-09-28 xiyou.har 实证的写操作，与三国是两套独立玩法）----
+
+@app.get("/api/match/xiyou")
+async def match_xiyou(want_task: int = 1):
+    """西游记探索总览（只读）：当前大关 / 探索倒计时 / 三个卡箱 / 重复卡 / 缺哪几张。
+
+    纯只读不碰卡；界面据此显示「还差什么」和一键卖重复卡腾空间。
+    """
+    if err := _require_login():
+        return err
+    try:
+        st = await xy.xiyou_state(_session, want_task=bool(want_task))
+        if not st.get("ok"):
+            return {"ok": False, "message": st.get("message") or "读取西游记探索失败"}
+        return {"ok": True, "raw": xy.plan_xiyou(st),
+                "power": st.get("freepowerbit") or [], "vlb": st.get("vlb")}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"异常：{e}"}
+
+
+@app.post("/api/match/xiyou-start")
+async def match_xiyou_start(req: dict | None = None):
+    """出发探索（act=5 type=3 time=5 levelid teamid=0）。**消耗一次探索机会**。"""
+    if err := _require_login():
+        return err
+    req = req or {}
+    st = await xy.xiyou_state(_session)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "状态读取失败"}
+    lv = req.get("levelid") or xy.plan_xiyou(st)["level"] or st.get("maxLevelId")
+    r = await xy.xiyou_start(_session, int(lv or 0),
+                             etype=int(req.get("type", 3)),
+                             etime=int(req.get("time", 5)))
+    if not r["ok"]:
+        return {"ok": False, "message": r.get("desc") or f"出发失败 code={r.get('code')}"}
+    return {"ok": True, "content": r.get("content"), "levelData": r.get("levelData")}
+
+
+@app.post("/api/match/xiyou-get")
+async def match_xiyou_get(req: dict):
+    """收一个收获点（act=6 levelid+index）。"""
+    if err := _require_login():
+        return err
+    idx = req.get("index")
+    if idx is None:
+        return {"ok": False, "message": "缺少 index"}
+    st = await xy.xiyou_state(_session)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "状态读取失败"}
+    lv = req.get("levelid") or xy.plan_xiyou(st)["level"] or st.get("maxLevelId")
+    r = await xy.xiyou_get(_session, int(lv or 0), int(idx))
+    if not r["ok"]:
+        return {"ok": False, "message": r.get("desc") or f"code={r.get('code')}"}
+    return {"ok": True, "index": int(idx), "content": r.get("content")}
+
+
+@app.post("/api/match/xiyou-sell")
+async def match_xiyou_sell(req: dict):
+    """卖探索收获箱里的卡（act=9）。传 {index, card_id}；box 缺省 2（收获箱）。
+
+    ⚠️ 只有收获箱（box=2）的卖法有抓包实证；关卡卡箱/保险箱没抓到样本，传别的
+    箱号能否生效未证实，所以后端默认只认 2。
+    """
+    if err := _require_login():
+        return err
+    idx, cid = req.get("index"), req.get("card_id")
+    if idx is None or cid is None:
+        return {"ok": False, "message": "缺少 index / card_id"}
+    box = int(req.get("box") if req.get("box") is not None else 2)
+    if box != 2:
+        return {"ok": False, "message": "只支持探索收获箱（box=2），其余箱未实证"}
+    r = await xy.xiyou_sell(_session, box, int(idx), int(cid),
+                            snap=f"2_{int(idx)}_{int(cid)}",
+                            snap_num=req.get("new_box_num"))
+    if not r["ok"]:
+        return {"ok": False, "message": r.get("desc") or f"code={r.get('code')}"}
+    d = r.get("data") or {}
+    return {"ok": True, "content": r.get("content"), "index": int(idx),
+            "card_id": int(cid),
+            "box": {k: d.get(k) for k in ("ex_box_num", "new_box_num", "safe_box_num")}}
+
+
+@app.post("/api/match/xiyou-task")
+async def match_xiyou_task(req: dict | None = None):
+    """领每日任务奖（act=16 id=N）。零消耗。传 {id}；不传则领所有已完成的。"""
+    if err := _require_login():
+        return err
+    req = req or {}
+    st = await xy.xiyou_state(_session, want_task=True)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "状态读取失败"}
+    t = xy.plan_xiyou(st)
+    ids = [int(req["id"])] if req.get("id") is not None else [
+        int(x["id"]) for x in t["tasks"] if x.get("done")]
+    got = []
+    for i in ids:
+        r = await xy.xiyou_claim_task(_session, i)
+        got.append({"id": i, "ok": r["ok"],
+                    "content": r.get("content") or r.get("desc") or ""})
+    return {"ok": True, "claimed": got}
+
+
+@app.post("/api/match/xiyou-run")
+async def match_xiyou_run(req: dict | None = None):
+    """西游记一键：出发 → 收满 24 个收获点（卡箱满先卖重复卡）→ 领任务奖。
+
+    每一步都看服务端返回，失败即停并写明原因；结果落盘 data/xiyou_run.json。
+    """
+    if err := _require_login():
+        return err
+    req = req or {}
+    try:
+        return await xy.run_xiyou(_session,
+                                  do_start=bool(req.get("start", True)),
+                                  do_get=bool(req.get("get", True)),
+                                  do_task=bool(req.get("task", True)))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 

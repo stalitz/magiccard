@@ -4014,14 +4014,24 @@ async function sanguoSellSpare(bno) {
   await loadMatchSanguoBox();
 }
 
-// ---------- 西游记（worldexplore act=1）· 与三国战役完全独立的玩法 ----------
+// ---------- 西游记探索（card_worldexplore）· 与三国战役完全独立的玩法 ----------
+// 接口口径见 backend/xiyou.py：act=5 出发 / act=6 收收获点 / act=9 卖重复卡 /
+// act=16 领任务奖。所有对外层号都用「游戏界口径」（第 1 层＝boss 只有 1 张）。
 async function loadMatchXiyou(withTask = false) {
-  const url = "/api/match/explore" + (withTask ? "?want_task=1" : "");
+  const url = "/api/match/xiyou" + (withTask ? "?want_task=1" : "");
   const r = await fetch(url).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchXiyou = r;
   renderMatchXiyou();
+  renderMatchXiyouBox();
+  renderMatchXiyouGap();
   renderMatchXiyouTeam();
-  if (!r || r.ok === false) mlogFail("西游记", r);
+  if (!r || r.ok === false) mlogFail("西游记探索", r);
+}
+
+function xyHms(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分`;
 }
 
 function renderMatchXiyou() {
@@ -4032,43 +4042,114 @@ function renderMatchXiyou() {
     cnt.textContent = "失败";
     return;
   }
-  const cur = (d.currLevelData || [])[0] || {};
-  const logs = d.logData || [];
-  const steps = cur.stepData || [];
-  const got = steps.filter((s) => s && s.isget).length;
-  const logGot = logs.filter((g) => g && (g.passData || {}).isget).length;
-  cnt.textContent = `关卡 ${cur.levelid ?? "-"} · 材料 ${d.nlb ?? "-"}/${d.sjb ?? "-"}`;
+  const p = d.raw || {}, run = p.run || {}, g = p.gap || {};
+  cnt.textContent = `第 ${p.level ?? "-"} 关 · ${p.theme_name || "-"} · ${run.running ? "探索中" : "待出发"}`;
   box.innerHTML = `<div class="state-box">` +
-    matchRow("当前关卡", cur.levelid) +
-    matchRow("关卡状态 / 剩余时间 / 领取位",
-      `${cur.type ?? "-"} / ${cur.time ?? "-"} / ${cur.targetbit ?? "-"}`) +
-    matchRow("当前关已收步数", `${got} / ${steps.length || "-"}`) +
-    matchRow("闯关记录", logs.length ? `${logs.length} 关，已过 ${logGot} 关` : "-") +
-    matchRow("宝箱三种（语义未证实）", `${d.ex_box_num ?? "-"} / ${d.new_box_num ?? "-"} / ${d.safe_box_num ?? "-"}`) +
-    matchRow("材料三种", `${d.nlb ?? "-"} / ${d.sjb ?? "-"} / ${d.txd ?? "-"}`) +
-    matchRow("关卡上限", d.maxLevelId) +
-    matchRow("免费体力位（语义未证实）", (d.freepowerbit || []).map((x) => JSON.stringify(x)).join(" ") || "-") +
-    matchRow("幸运数据（语义未证实）", (d.luckydata || []).map((x) => `id${x.id}=${x.value}`).join("、") || "-") +
-    matchRow("商店", (d.shoplist || []).length ? `${(d.shoplist || []).length} 项` : "-") +
-    matchRow("每日任务",
-      (d.task_detail || []).length ? `${(d.task_detail || []).length} 项` : "（未拉）") +
-    `</div>`;
+    matchRow("当前大关", `第 ${p.level ?? "-"} 关（${p.theme_name || "-"}），上限第 ${p.maxlevel ?? "-"} 关`) +
+    matchRow("探索状态",
+      run.running ? `进行中，还剩 ${xyHms(run.remain)}（出发后 24 小时内有效）` : "还没出发（或已收完）") +
+    matchRow("可收收获点", run.total ? `${run.got} / ${run.total} 已收${run.pending && run.pending.length ? `，还剩 ${run.pending.length} 个` : "，已全收"}` : "-") +
+    matchRow("还差什么", g.need ? `${g.name || ""} ${g.have}/${g.need}` : "-") +
+    (g.missing && g.missing.length
+      ? matchRow("缺的卡", g.missing.map((m) => `${m.name}（第 ${m.game_layer} 层）`).join("、"))
+      : matchRow("缺的卡", g.need ? "一个都不缺，可以上交了" : "-")) +
+    `</div>` +
+    (run.pending && run.pending.length
+      ? `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
+        run.pending.slice(0, 12).map((i) =>
+          `<button class="btn sm" data-act="mm-xy-get" data-idx="${i}" data-idle="收集中…">收第 ${i + 1} 个</button>`).join("") +
+        (run.pending.length > 12 ? `<span class="hint">…共 ${run.pending.length} 个</span>` : "") +
+        `</div>` : "");
 }
 
-function renderMatchXiyouTeam() {
-  const box = $("match-xiyou-team"), cnt = $("match-xiyou-team-cnt");
+function renderMatchXiyouBox() {
+  const box = $("match-xy-box"), cnt = $("match-xy-box-cnt");
   const d = matchXiyou || {};
-  const fl = d.formationList || [];
   if (!d.ok) {
     box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
     cnt.textContent = "失败";
     return;
   }
-  cnt.textContent = `布阵 ${fl.length} 只`;
+  const p = d.raw || {}, bs = p.boxes || {};
+  const label = { new: "探索收获箱", safe: "保险箱", ex: "关卡卡箱" };
+  let free = 0, tot = 0;
+  const rows = Object.keys(bs).map((k) => {
+    const v = bs[k] || {};
+    free += Number(v.free || 0); tot += Number(v.filled || 0);
+    return matchRow(label[k] || k,
+      `${v.filled ?? 0} 张${v.capacity ? ` / ${v.capacity}` : ""}${v.free ? `（空 ${v.free} 格）` : ""}`);
+  }).join("");
+  const dupes = p.dupes || [];
+  const drows = dupes.map((x) =>
+    `<div class="rv"><span class="k">${x.name} × ${x.count}</span>` +
+    `<span class="v">${x.boxes.join("+")} 各一份` +
+    (x.boxes[0] === x.boxes[1] ? "" : `，可卖第 2 份`) + `</span></div>`).join("");
+  cnt.textContent = `共 ${tot} 张 / 空 ${free} 格 · 重复 ${dupes.length} 组`;
+  box.innerHTML = `<div class="state-box">${rows || "-"}</div>` +
+    (dupes.length
+      ? `<div class="rv" style="border-top:1px solid var(--line)"><span class="k" style="font-weight:600">重复卡（卖掉腾空间，找不回来）</span><span class="v">${dupes.length} 组</span></div>` +
+        drows +
+        `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
+        dupes.slice(0, 10).map((x, i) => {
+          const s = (x.sell || [])[0];
+          if (!s) return "";
+          return `<button class="btn sm danger" data-act="mm-xy-sell" data-idx="${s.index}" ` +
+            `data-cid="${s.card_id}" data-idle="卖卡中…">卖 ${x.name}（第 ${i + 1} 份）</button>`;
+        }).join("") + `</div>`
+      : `<div class="rv" style="border-top:1px solid var(--line)"><span class="k">重复卡</span><span class="v">没有重复的</span></div>`);
+}
+
+function renderMatchXiyouGap() {
+  const box = $("match-xy-gap"), cnt = $("match-xy-gap-cnt");
+  const d = matchXiyou || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const p = d.raw || {}, g = p.gap || {}, tasks = p.tasks || [];
+  const rows = (g.layers || []).map((L) =>
+    `<div class="rv"><span class="k">第 ${L.game_layer} 层 缺</span>` +
+    `<span class="v">${L.missing.join("、")}</span></div>`).join("");
+  const trows = tasks.map((t) =>
+    `<div class="rv"><span class="k">任务 ${t.id}（完成 ${t.cnt}）</span>` +
+    `<span class="v">${t.done ? (t.claimable ? "可领奖" : "已领") : "未完成"}</span></div>`).join("");
+  cnt.textContent = `${tasks.filter((t) => t.claimable).length} 个任务可领`;
+  box.innerHTML = `<div class="state-box">` +
+    matchRow("当前大关套", `${g.name || "-"}：${g.have ?? 0}/${g.need ?? 0}`) +
+    `</div>` +
+    (rows || `<div class="rv"><span class="k">缺的卡</span><span class="v">按层看：没有缺的</span></div>`) +
+    `<div class="rv" style="border-top:1px solid var(--line)"><span class="k" style="font-weight:600">每日任务</span><span class="v">${tasks.length} 个</span></div>` +
+    (trows || `<div class="rv"><span class="k">任务</span><span class="v">（未拉）</span></div>`) +
+    (tasks.filter((t) => t.claimable).length
+      ? `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
+        tasks.filter((t) => t.claimable).map((t) =>
+          `<button class="btn sm ok" data-act="mm-xy-task" data-id="${t.id}" data-idle="领奖中…">领任务奖 ${t.id}</button>`).join("") +
+        `</div>` : "");
+}
+
+function renderMatchXiyouTeam() {
+  const box = $("match-xiyou-team"), cnt = $("match-xiyou-team-cnt");
+  const d = matchXiyou || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  // 布阵的猫与「最近探索」都在 plan 里（formation / logs），不再读顶层老字段
+  const raw = d.raw || {};
+  const fl = raw.formation || [];
+  const logs = (raw.logs || []).slice(0, 4);
+  cnt.textContent = `布阵 ${fl.length} 只 · 记录 ${logs.length}`;
   const rows = fl.map((f) =>
     `<div class="rv"><span class="k">猫 ${f.catid} · 战力 ${f.ce}</span><span class="v">装 ${f.eqlist || "-"}</span></div>`).join("");
-  box.innerHTML = `<div class="state-box">${rows || "-"}` +
-    `<div class="rv"><span class="k">布阵条数</span><span class="v">${fl.length}</span></div></div>`;
+  const lrows = logs.map((x) => {
+    const got = (x.stepData || []).filter((s) => s && s.isget).length;
+    return `<div class="rv"><span class="k">第 ${x.levelid ?? "-"} 关 · ${x.startts || "-"}</span>` +
+      `<span class="v">收获 ${got}/${(x.stepData || []).length}</span></div>`;
+  }).join("");
+  box.innerHTML = `<div class="state-box"><div class="rv" style="font-weight:600">布阵</div>${rows || "-"}
+    <div class="rv" style="border-top:1px solid var(--line);font-weight:600">最近探索</div>${lrows || "-"}</div>`;
 }
 
 // 三国战役关卡表（sanguo act=9）：只读，字段语义未证实 → 只报条数与原始关卡号
@@ -4262,12 +4343,48 @@ function bindMatchModeActs() {
           await loadMatchSanguoBox();
         } else if (act === "mm-sgsell-all") {
           await sanguoSellSpare(parseInt(b.dataset.box || "0", 10));
+        } else if (act === "mm-xy-get") {
+          await xyPost("/api/match/xiyou-get", { index: parseInt(b.dataset.idx, 10) },
+            "收第 " + (parseInt(b.dataset.idx, 10) + 1) + " 个收获点");
+        } else if (act === "mm-xy-sell") {
+          await xyPost("/api/match/xiyou-sell",
+            { index: parseInt(b.dataset.idx, 10), card_id: parseInt(b.dataset.cid, 10) },
+            "卖出 " + (b.dataset.cid || "卡"));
+        } else if (act === "mm-xy-task") {
+          await xyPost("/api/match/xiyou-task", { id: parseInt(b.dataset.id, 10) },
+            "任务奖 " + (b.dataset.id ?? ""));
         }
       } finally {
         restore();
       }
     })();
   });
+}
+
+// ---------- 西游记探索的写操作（后端 backend/xiyou.py，参数全有抓包实证）----------
+async function xyPost(url, body, what) {
+  const r = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  const msg = r && r.message ? r.message
+    : (r && r.content ? String(r.content) : (r && r.ok ? "完成" : "失败"));
+  mlog("[西游记] " + what + " → " + msg, r && r.ok === false ? "" : "ok");
+  await loadMatchXiyou(true);
+  return r;
+}
+
+async function xySellAllDupes() {
+  const p = ((matchXiyou || {}).raw) || {};
+  const dupes = p.dupes || [];
+  if (!dupes.length) { mlog("[西游记] 没有重复的卡，不用腾空间", "ok"); return; }
+  if (!confirm(`卖掉这 ${dupes.length} 组重复卡的第 2 份（共 ${dupes.reduce((a, x) => a + (x.sell || []).length, 0)} 张）？卖掉就找不回来了。`)) return;
+  for (const x of dupes) {
+    for (const s of (x.sell || [])) {
+      await xyPost("/api/match/xiyou-sell",
+        { index: s.index, card_id: s.card_id }, "卖 " + x.name);
+    }
+  }
 }
 
 // 全量一键领奖：与子块「一键领奖」同一端点，only 传空 = 全跑
@@ -4443,9 +4560,45 @@ function initMatchOnce() {
     restore();
   });
   bind("match-xiyou", async (b) => {
-    const restore = busyBtn(b, "读取中…", "刷新西游记");
+    const restore = busyBtn(b, "读取中…", "刷新");
     await loadMatchXiyou(true);
-    mlog("[每日比赛] 西游记已刷新", "ok");
+    mlog("[每日比赛] 西游记探索已刷新", "ok");
+    restore();
+  });
+  bind("match-xy-run", async (b) => {
+    const restore = busyBtn(b, "探索跑完中…", "一键探索");
+    const r = await fetch("/api/match/xiyou-run", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+    const steps = (r && r.steps) || [];
+    mlog("[西游记] 一键探索：出发 / 收满 / 领奖 → " +
+      (steps.length ? steps.map((s) => `${s.step}${s.ok ? " 成功" : " 失败：" + (s.note || "")}`).join("；") : "没有可做的步骤"),
+      r && r.ok === false ? "" : "ok");
+    await loadMatchXiyou(true);
+    restore();
+  });
+  bind("match-xy-start", async (b) => {
+    if (!confirm("出发一次高级探索？会消耗一次探索机会，探索最长 24 小时。")) return;
+    const restore = busyBtn(b, "出发中…", "出发探索");
+    await xyPost("/api/match/xiyou-start", {}, "出发探索");
+    restore();
+  });
+  bind("match-xy-get", async (b) => {
+    const restore = busyBtn(b, "收集中…", "收满收获");
+    const p = ((matchXiyou || {}).raw || {}).run || {};
+    const list = (p.pending || []).slice();
+    for (const i of list) await xyPost("/api/match/xiyou-get", { index: i }, "收第 " + (i + 1) + " 个收获点");
+    if (!list.length) mlog("[西游记] 当前没有可收的收获点", "ok");
+    restore();
+  });
+  bind("match-xy-task", async (b) => {
+    const restore = busyBtn(b, "领奖中…", "领任务奖");
+    await xyPost("/api/match/xiyou-task", {}, "领任务奖");
+    restore();
+  });
+  bind("match-xy-sell", async (b) => {
+    const restore = busyBtn(b, "腾空间中…", "卖重复卡腾空间");
+    await xySellAllDupes();
     restore();
   });
   bindMatchModeActs();
