@@ -3347,6 +3347,10 @@ let matchState = null, matchTheme = null, matchPvp = null, matchUnion = null,
     matchSanguoLevels = null; // 三国战役关卡列表（sanguo act=9）
 let matchSubTimer = null;
 
+// 三国每日出战次数（实证：act=1 的 freenum 是「今日已出战次数」，0→3 封顶；
+// 与后端 match.SGUO_DAILY_MAX 同源，前端只用来算「还能打几次」）
+const SGUO_DAILY_MAX = 3;
+
 // ---- 每日比赛页的子模块：每个子模块 = 一组相关卡片 + 自己的接口 ----
 // 切到哪个才拉哪个，定时也只刷新当前停留的子模块（避免一次进页面打 8 个接口）。
 function matchFmtTs(ts) {
@@ -3772,7 +3776,10 @@ function renderMatchSanguo() {
   box.innerHTML = `<div class="state-box">` +
     matchRow("当前关卡", t.levelId) +
     matchRow("关卡进度号（语义未证实）", t.passId) +
-    matchRow("每日免费次数", t.freenum) +
+    matchRow("今日已出战", t.freenum === undefined || t.freenum === null ? "-" :
+      `${t.freenum} / ${SGUO_DAILY_MAX} 次`) +
+    matchRow("今日可再出战", t.freenum === undefined || t.freenum === null ? "-" :
+      `${Math.max(0, SGUO_DAILY_MAX - Number(t.freenum || 0))} 次`) +
     matchRow("已购次数", t.buynum) +
     matchRow("天赋分 / 天赋率", `${t.talent_score ?? "-"} / ${t.talent_rate ?? "-"}`) +
     matchRow("出战阵型（技能等级）", (t.formation || []).map((f) => `id${f.id}·lv${f.lv}`).join("、") || "-") +
@@ -3784,6 +3791,12 @@ function renderMatchSanguo() {
       (t.task_detail || []).length ? `${(t.task_detail || []).length} 项` : "（未拉）") +
     matchRow("商店", (t.shoplist || []).length ? `${(t.shoplist || []).length} 项` : "-") +
     `</div>`;
+  // 「一键出战」按钮文案跟真实剩余次数走（服务端 act=1 的 freenum = 今日已出战次数）
+  const left = Math.max(0, SGUO_DAILY_MAX - Number(t.freenum || 0));
+  const rb = document.querySelector("[data-act='mm-raid-sg']");
+  if (rb && rb.dataset.idle !== "出战中…") {
+    rb.textContent = left ? `一键出战（今日剩 ${left} 次）` : "一键出战（今日已出满）";
+  }
 }
 
 function renderMatchGold() {
@@ -3832,6 +3845,23 @@ async function loadMatchGvg() {
   matchGvg = r;
   renderMatchGvg();
   if (!r || r.ok === false) mlogFail("公会战", r);
+}
+
+// 三国一键出战：连打到今日次数用尽（后端内部每轮重读真实阵容，次数由服务端回读）
+async function sanguoRaid() {
+  const r = await fetch("/api/match/sanguo-raid", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  }).then((x) => x.json()).catch(() => null);
+  if (!r || r.ok === false) {
+    mlog("[三国] 一键出战失败：" + ((r && r.message) || "网络异常"), "err");
+    return;
+  }
+  if (r.skipped) { mlog("[三国] " + (r.message || "今日已出满，无需再出"), "warn"); return; }
+  const rs = (r.rounds || []).map((x) => `第${x.no}场 ${x.ok ? (x.text || "成功") : (x.msg || "失败")}`);
+  mlog(`[三国] 一键出战：关卡 L${r.levelid} 出战 ${r.played} / ${(r.rounds || []).length} 场` +
+    `（今日 ${r.used_before}→${r.used_after} 次）` + (rs.length ? "｜" + rs.join("；") : ""),
+    r.played ? "ok" : "");
+  await loadMatchSanguo(true); await loadMatchSanguoLevels();
 }
 
 async function loadMatchSanguo(withTask = false) {
@@ -4084,6 +4114,8 @@ function bindMatchModeActs() {
           await unionFight(); await loadMatchUnionExtra(); await loadMatchGvg();
         } else if (act === "mm-run-sg") {
           await sanguoRun(parseInt(b.dataset.levelid, 10));
+        } else if (act === "mm-raid-sg") {
+          await sanguoRaid();
         }
       } finally {
         restore();

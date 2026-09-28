@@ -1236,6 +1236,118 @@ async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0
                       cats="|".join(str(int(c)) for c in cats) + "|")
 
 
+# 三国每日闯关次数上限。**实证来源（2026-09-28 读 bisai2.har 真机序列）**：
+#   act=1 的 `freenum` 是「**今日已闯关次数**」，随每次 act=11 成功后 +1，
+#   0 → 1 → 2 → 3 后封顶不再涨（同批 `buynum` 恒 0）；用户口述「每天 3 次」。
+#   所以「剩余次数 = SGUO_DAILY_MAX - freenum」，不能拿 freenum 当剩余量用。
+SGUO_DAILY_MAX = 3
+
+_SGUO_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "sanguo_raid.json"
+
+
+def _save_sanguo_raid(payload: dict) -> None:
+    """把最近一次「三国一键出战」写进 data/sanguo_raid.json（只留最近 20 次）。"""
+    try:
+        hist = []
+        if _SGUO_RUN_LOG.exists():
+            loaded = _ujson.loads(_SGUO_RUN_LOG.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                hist = loaded
+        row = dict(payload)
+        row["ts"] = _utime.strftime("%F %T")
+        hist.append(row)
+        _SGUO_RUN_LOG.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+    except Exception:  # 落盘失败不影响主流程
+        pass
+
+
+def _sanguo_battle_text(d: dict) -> str:
+    """把 act=11 的战斗结果压成一句中文（字段缺失就留空，不编造）。"""
+    bd = (d.get("battle_data") or {}).get("attack_accounts") or {}
+    win = bd.get("iswin")
+    bits = [f"{'胜' if win == 1 else '负' if win is not None else '?'}"
+            if win is not None else ""]
+    if bd.get("total_score") is not None:
+        bits.append(f"总分 {bd.get('total_score')}")
+    if d.get("boss_reduce_hp"):
+        bits.append(f"boss 掉血 {d.get('boss_reduce_hp')}")
+    if d.get("percent"):
+        bits.append(f"进度 {d.get('percent')}%")
+    if d.get("content"):
+        bits.append(f"奖励 {d.get('content')}")
+    return "；".join(x for x in bits if x)
+
+
+async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True) -> dict:
+    """三国「一键出战」：用**真实阵容**连打到今日次数用尽（每天 SGUO_DAILY_MAX 次）。
+
+    铁律落地（2026-09-28 补）：
+      - `freenum` 是「今日已打次数」而非剩余量，所以剩余 = SGUO_DAILY_MAX - freenum；
+      - 每轮都**重新读一次 act=16 阵容**再提交 act=11（HAR 序列：读阵容 → 闯关 →
+        读主界面 → …），本地不自减次数；
+      - 服务端返回失败即停并记 reason，不做「换一个继续」的猜测性重试；
+      - 今日已打满 → 直接 skipped，一次请求都不发，不烧次数。
+
+    HAR 实证（bisai2.har 真机，mode 恒 0）：
+      - act=16 {levelid, cats:'0|0|0|0'} → elf_list 4 只猫（id + equip_list 4 件）；
+      - act=11 {mode, levelid, eqs（N×4 平铺、尾随 |）, cats（猫 id 序、尾随 |）}
+        → base_score / battle_data.attack_accounts{iswin,total_score,talent_rate} /
+          attack_elf_list / boss_reduce_hp / percent / content。
+    """
+    st = await sanguo_state(session)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
+    used = int(st.get("freenum") or 0)
+    cur_level = st.get("levelId")
+    if levelid is None or levelid == 0:
+        levelid = cur_level
+    if not levelid:
+        return {"ok": False, "message": "没读到当前关卡号，未做闯关"}
+    left = SGUO_DAILY_MAX - used
+    if left <= 0:
+        return {"ok": True, "skipped": True,
+                "message": f"今日已出战 {used}/{SGUO_DAILY_MAX} 次，不再消耗",
+                "used": used, "rounds": 0}
+    rounds, i = [], 0
+    for i in range(left):
+        lu = await sanguo_lineup(session, levelid)
+        d = lu.get("data")
+        d = d if isinstance(d, dict) else {}
+        lcode = d.get("code") if "code" in d else lu.get("code")
+        if lcode not in (0, None):
+            rounds.append({"no": i + 1, "ok": False,
+                           "msg": f"阵容读取失败 code={lcode} "
+                                  f"{d.get('desc') or lu.get('desc') or ''}".strip()})
+            break
+        elves = d.get("elf_list") or []
+        cats = [int(e.get("id")) for e in elves if e.get("id") is not None]
+        eqs: list = []
+        for e in elves:
+            eqs.extend(int(x) for x in (e.get("equip_list") or []))
+        if not cats or len(eqs) != len(cats) * 4:
+            rounds.append({"no": i + 1, "ok": False,
+                           "msg": f"阵容异常 cats={len(cats)} eqs={len(eqs)}，未提交"})
+            break
+        r = await sanguo_run(session, levelid, cats, eqs, mode=0,
+                             feed=(feed and i == 0))
+        rd = r.get("data") if isinstance(r.get("data"), dict) else {}
+        ok = bool(r.get("ok")) and rd.get("code") in (0, None)
+        rounds.append({"no": i + 1, "ok": ok,
+                       "levelid": int(levelid), "cats": cats, "eq_count": len(eqs),
+                       "text": _sanguo_battle_text(rd) if ok else
+                               (rd.get("desc") or r.get("message") or f"code={rd.get('code')}"),
+                       "code": rd.get("code") if "code" in rd else r.get("code")})
+        if not ok:
+            break
+    out = {"ok": True, "levelid": int(levelid), "used_before": used,
+           "used_after": (await sanguo_state(session)).get("freenum"),
+           "daily_max": SGUO_DAILY_MAX, "rounds": rounds,
+           "played": sum(1 for x in rounds if x.get("ok"))}
+    _save_sanguo_raid(out)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 各玩法「状态属性」字段表（2026-09-26）
 # 每个玩法子块单独取自己玩法的字段：来源接口 -> 分组 -> (中文名, 原 key)

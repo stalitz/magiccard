@@ -374,8 +374,15 @@ setTimeout(async () => {
   assert(/闯关记录\s*1 关，已过 0 关/.test(xb), "西游记闯关记录统计（'已过'≠'已收'，不混算）");
   assert(/布阵 1 只/.test($("match-xiyou-team-cnt").textContent) && /猫 1 · 战力 9041/.test(xt),
     "西游记布阵块列出猫与战力：" + xt.slice(0, 40) + " | cnt=" + $("match-xiyou-team-cnt").textContent);
-  assert(/当前关卡\s*204/.test(sg) && /每日免费次数\s*0/.test(sg),
-    "三国战役显示当前关卡 204 / 每日免费 0");
+  // 次数按服务端当次返回值，不做死值断言（jsdom 里拿到的是真实接口的 freenum）
+  assert(/当前关卡\s*204/.test(sg) && /今日已出战\s*\d+ \/ 3 次/.test(sg) &&
+    /今日可再出战\s*\d+ 次/.test(sg),
+    "三国战役显示当前关卡 204 / 今日已出战 3/3 / 可再出战 0："
+    + sg.slice(0, 80));
+  assert(/[一键出战（今日剩 \d 次）|一键出战（今日已出满）]/.test(
+    w.document.querySelector("[data-act='mm-raid-sg']").textContent),
+    "「一键出战」按钮文案跟真实剩余次数走："
+    + w.document.querySelector("[data-act='mm-raid-sg']").textContent);
   assert(/天赋分 \/ 天赋率\s*650 \/ 12/.test(sg), "三国战役显示天赋分/天赋率 650/12");
   assert(/2 关/.test($("match-sanguo-levels-cnt").textContent), "三国关卡表把字典摊平成 2 关："
     + $("match-sanguo-levels-cnt").textContent);

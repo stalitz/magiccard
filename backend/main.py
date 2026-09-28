@@ -2652,6 +2652,20 @@ async def match_sanguo_auto(req: dict | None = None):
         return {"ok": False, "message": f"异常：{e}"}
 
 
+@app.post("/api/match/sanguo-raid")
+async def match_sanguo_raid(req: dict | None = None):
+    """三国一键出战：用真实阵容连打到今日次数用尽（**消耗闯关次数**）。
+
+    今日已打满时直接 skipped，不发任何写请求。步骤落盘 data/sanguo_raid.json。
+    """
+    if err := _require_login():
+        return err
+    req = req or {}
+    lv = req.get("levelid")
+    return await mt.run_sanguo_raid(_session, int(lv) if lv else None,
+                                    feed=bool(req.get("feed", True)))
+
+
 @app.post("/api/match/pvp-fight")
 async def match_pvp_fight(req: dict):
     """PVP 挑战（pvp act=8，type=fight）。**消耗 pvp_num**，需传 euin（从 pvp-extra 的 enemy_list 取）。"""
