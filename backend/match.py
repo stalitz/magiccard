@@ -972,10 +972,13 @@ async def pvp_zan(session, rank_uin: str, rank_idx: int = 0) -> dict:
 # ---------- 工会 / 公会战 ----------
 
 async def union_task(session) -> dict:
-    """工会任务/出兵次数（union act=15）。读：num / resetnum / bits。
+    """工会任务/出兵计数（union act=15）。读：num / resetnum / bits。
 
-    2026-09-27 实跑：**`num` 是今日已出兵次数** —— 出兵前读 num=0，出兵一次后再读
-    num=1。`resetnum` 恒 0、`bits` 恒 0（个人任务位，未见可领变化）。
+    num 口径**存疑**（2026-09-28 修正）：同日出兵前 0、出兵后 1 曾实证；但 09-28
+    num=3 而当天自动出兵仅 1 次（union_run 落盘），说明它可能跨日累计、也可能含
+    手动点击的出兵 —— **不能当「今日已出兵次数」用**，界面已改为只显示
+    「出兵计数 N（非游戏内挑战 3/3）」。
+    `resetnum` 恒 3、`bits` 恒 0。
     """
     return await _act(session, EP_TRAVEL_UNION, 15)
 
@@ -1003,7 +1006,12 @@ async def union_claim(session) -> dict:
 
 async def union_fight(session, optype: int = 4, uptype: int = 1,
                       feed: bool = True) -> dict:
-    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。
+    """出兵（union act=21 {optype, uptype}）。
+
+    ⚠ 2026-09-28 用户实证：**这不是游戏内公会战的「挑战」（3/3 那个）** ——
+    出兵跑了 3 次，游戏挑战次数仍 3/3 满的。实测效果：工会金币 +2、exp 增长，
+    且 act=22 的 gift_record 里多次出现自己 uin（疑似助威/送礼类动作）。
+    游戏内挑战的写接口未定位；要接它必须先抓包，禁止盲试写接口（会烧真实次数）。
 
     出兵带猫与装备（同族 act=23/act=11 的 cats/eqs 语义），所以出兵前按用户定调
     先把猫喂到 MOOD_TARGET。
@@ -1099,11 +1107,11 @@ async def run_union(session, do_zan: bool = True, do_fight: bool = True,
     每一步都以**服务端返回**判定成败（项目铁律：不拿本地推测当结果），
     失败即停并记录 reason，不继续下一步。
 
-    已知（2026-09-27 实跑）：
+    已知（2026-09-27 实跑，09-28 修正口径）：
       - 领奖 act=17 返回 ok/code/data；点赞 act=14 逐个发，零消耗；
       - 出兵 act=21 {optype:4, uptype:1} → {"code":0,"coin":4053,"exp":72580,"lv":0}，
-        工会金币 coin 4051 → 4053；出兵次数不显示在 act=22，只能看 act=15 的
-        `num` 变化（0 → 1），所以**每日上限未知 → 不循环，一次为止**。
+        工会金币 coin 4051 → 4053；**act=21 不是游戏内公会战挑战（3/3 未消耗）**，
+        act=15 `num` 口径存疑（可能跨日累计），所以**每日上限未知 → 不循环，一次为止**。
     """
     steps, fights = [], 0
     before = await union_info(session)

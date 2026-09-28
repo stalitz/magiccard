@@ -345,12 +345,15 @@ setTimeout(async () => {
   assert(!/今日已出兵次数/.test(ux), "工会任务块不再重复显示出兵次数（与公会战块去重）");
   assert(/工会资金11234/.test(ux), "工会资金显示真实值 11234");
   assert(/工会商店/.test(ux) && /80/.test(ux), "工会商店列出商品消耗");
-  // 公会战：进度对比条 + 今日已出兵次数
+  // 公会战：进度对比条 + 出兵计数（2026-09-28 改口径：num 不是游戏内挑战 3/3，
+  // 也不确定是否每日清零，界面只显示「出兵计数 N（非游戏内挑战 3/3）」）
   const gv = $("match-gvg-box").textContent;
   assert(/我方 478,?555/.test(gv) && /敌方 595,?420/.test(gv), "公会战显示我方/敌方进度：" + gv.slice(0, 60));
   assert(/进度占比 我方 4[45]%/.test(gv), "公会战进度占比算对（478555/(478555+595420)≈45%）");
-  assert(/今日已出兵 1 次/.test($("match-gvg-fightcnt").textContent),
-    "公会战区显示今日已出兵次数：" + $("match-gvg-fightcnt").textContent);
+  assert(/出兵计数 1（非游戏内挑战 3\/3）/.test($("match-gvg-fightcnt").textContent),
+    "公会战区显示出兵计数（不写「今日」口径）：" + $("match-gvg-fightcnt").textContent);
+  assert(!/今日已出兵/.test($("match-gvg-fightcnt").textContent + ux),
+    "界面不再出现「今日已出兵」字样（口径未证实）");
   assert(!/每日上限|上限\s*\d/.test($("match-union-extra-box").textContent),
     "不臆造出兵每日上限（界面不出现「上限 N」这类数字）");
 

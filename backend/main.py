@@ -2673,7 +2673,7 @@ async def match_pvp_flush():
 
 @app.post("/api/match/union-fight")
 async def match_union_fight(req: dict | None = None):
-    """公会战出兵（union act=21 {optype, uptype}）。**消耗出兵次数**。"""
+    """出兵（union act=21 {optype, uptype}）。非游戏内公会战挑战（3/3 未消耗实证）。"""
     if err := _require_login():
         return err
     req = req or {}

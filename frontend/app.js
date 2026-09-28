@@ -3641,7 +3641,7 @@ function renderMatchUnionExtra() {
     matchRow("工会资金", ch.data ?? "-") +
     matchRow("工会商店", (Array.isArray(items) && items.length)
       ? items.map((x) => `${x.consume}(${x.id})`).join(" · ") : "-") +
-    `</div><div class="empty-tip" style="font-size:12px">出兵次数：出兵前 0、出兵后 1；今日上限未知，界面不显示上限。</div>`;
+    `</div><div class="empty-tip" style="font-size:12px">出兵计数：只如实显示，口径待核实（不是游戏内挑战 3/3 的次数，是否每日清零未证实）；上限未知，界面不显示。</div>`;
 }
 
 // 工会玩法动作：全部走 /api/match/union-*，完成后立刻刷新对应视图（项目铁律）。
@@ -3677,13 +3677,15 @@ async function unionZan() {
 }
 
 async function unionFight() {
-  if (!confirm("公会战出兵会消耗出兵次数，确认？")) return { ok: false, message: "已取消" };
+  if (!confirm("出兵不是游戏内公会战的「挑战」（3/3 那个，接口未定位）；实测效果是工会金币 +2。确认出兵？")) {
+    return { ok: false, message: "已取消" };
+  }
   return await unionAct($("union-fight"), "/api/match/union-all",
-    { zan: false, fight: true }, "出兵", "[工会] 公会战出兵完成");
+    { zan: false, fight: true }, "出兵", "[工会] 出兵完成");
 }
 
 async function unionAll() {
-  if (!confirm("一键工会 = 领奖 + 全员点赞 + 公会战出兵（出兵消耗次数），确认？")) {
+  if (!confirm("一键工会 = 领奖 + 全员点赞 + 出兵（出兵不是游戏内挑战 3/3，实测工会金币 +2），确认？")) {
     return { ok: false, message: "已取消" };
   }
   const r = await unionAct($("union-all"), "/api/match/union-all",
@@ -3696,12 +3698,14 @@ async function unionAll() {
   return r;
 }
 
-// 公会战：我方 vs 敌方进度条 + 今日已出兵次数（data/cat_equip 无关，纯展示）
+// 公会战：出兵计数展示（data/cat_equip 无关，纯展示）
+// ⚠ 2026-09-28 用户实证：游戏内公会战挑战 3/3 一场没用，但这里 num 已走到 3 ——
+//   num 不是游戏内挑战次数，「今日」口径也未证实（可能跨日累计）。只如实显示计数，不解读。
 function renderGvgFightCnt() {
   const g = $("match-gvg-fightcnt");
   if (!g) return;
   const num = (matchUnionExtra && matchUnionExtra.task && matchUnionExtra.task.data || {}).num;
-  g.textContent = num === undefined || num === null ? "" : `今日已出兵 ${num} 次`;
+  g.textContent = num === undefined || num === null ? "" : `出兵计数 ${num}（非游戏内挑战 3/3）`;
   g.style.marginLeft = "6px";
 }
 
