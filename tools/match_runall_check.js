@@ -97,11 +97,25 @@ const SANGUO_EXTRA = { ok: true,
   levels: { ok: true, code: 0, data: {
     101: { levelid: 101, bossid: 101, dropitem: "92_38_6" },
     102: { levelid: 102, bossid: 102, dropitem: "92_38_5" } } }, lineup: null };
+// 竞技榜（card_travel_elf_pvp act=14）：服务端不返回名次、数组还是乱序的，
+// 后端要按 score 降序重新编号；可赞的 10 人全在第 50 名之外 → 默认取 100 条。
+const PVP = {
+  ok: true, code: 0, day_ts: 1790524800, total: 1000, rank_id: 0,
+  list: [
+    { rank: 999, uin: 32650660, nick: "迅驰", score: 4904, ce: 138768, ts: 1790510364 },
+    { rank: 3, uin: 285416308, nick: "烟雨濛濛", score: 4895, ce: 144093, ts: 1790510338, zan: 9672 },
+  ],
+  my_rank: null, my_score: 1885, my_ce: 360, my_zan_num: 0, zan_bit: 0,
+  zan_targets: [{ rank: 2, uin: 32650660, nick: "迅驰", score: 4904, ce: 138768 },
+                { rank: 3, uin: 285416308, nick: "烟雨濛濛", score: 4895, ce: 144093 }],
+  min_score: 2248, max_score: 4922,
+};
 
 w.fetch = (u, opt) => {
   const url = String(u).startsWith("http") ? String(u) : BASE + String(u);
   calls.push({ url, body: opt && opt.body });
   const payload = url.includes("/api/home/state") ? HOME_STATE
+    : url.includes("/api/match/pvp") ? PVP
     : url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
     : url.includes("/api/match/explore") ? XIYOU
     : url.includes("/api/match/sanguo") ? SANGUO
@@ -206,6 +220,22 @@ w.eval(`(async () => {
 })()`).catch((e) => errors.push(String(e)));
 
 setTimeout(async () => {
+  // ---------- 1.5) 竞技榜列表要和游戏里对得上（2026-09-28） ----------
+  console.log("\n[1.5] 竞技榜名次 / 可赞对象");
+  w.eval("loadMatchPvp()");
+  await new Promise((r) => setTimeout(r, 80));
+  const pvpTxt = $("match-pvp-box").textContent;
+  assert(/今日可点赞（pvp act=22）/.test(pvpTxt),
+    "「今日可点赞」单独成块（这 10 人都在前 50 名之外，混在榜单里根本看不见）");
+  const zanBlock = $("match-pvp-box").textContent;
+  assert(/迅驰/.test(zanBlock), "可赞块列出昵称，能与游戏「点赞」页逐条对照");
+  assert(/按分数降序/.test(pvpTxt), "榜单标明排序依据（服务端不返回名次，前端按 score 降序编号）");
+  assert(/不在榜内/.test(pvpTxt) && /2248/.test(pvpTxt),
+    "没进榜单时给真实原因（榜内最低分），不写「未进前 1000」这种臆断：" + pvpTxt.slice(0, 80));
+  assert(/榜单 1000 人 · 显示前 2/.test($("match-pvp-cnt").textContent),
+    "计数显示总人数与实际取回条数：" + $("match-pvp-cnt").textContent);
+  assert(/可赞/.test(pvpTxt) && /烟雨濛濛/.test(pvpTxt),
+    "榜单里可赞的人打「可赞」标记，不用再去数");
   assert(confirmed > 0, "一键比赛前弹确认框（会消耗次数）");
   const ra = calls.filter((c) => c.url.includes("/api/match/run-all"));
   assert(ra.length === 1, "调用了一次 /api/match/run-all");
