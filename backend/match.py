@@ -144,12 +144,18 @@ async def match_state(session, want_equip: bool = False) -> dict:
     return out
 
 
-async def pvp_rank(session, rank_id: int = 0, top: int = 50) -> dict:
-    """PVP 日榜（card_travel_elf_pvp act=14，rank_id=0）。只读。
+async def pvp_rank(session, rank_id: int = 0, top: int = 100) -> dict:
+    """PVP 竞技榜（card_travel_elf_pvp act=14，rank_id=0）。只读。
 
-    HAR 实测：list 共 1000 人，字段 uin/nick/score/ce(战力)/ts/getzan/zan。
-    zan 非空的 ~10 人＝**今日可点赞对象**；zan/getzan 只为这 10 人返回。
-    day_ts = 榜单所属日的 0:00（HAR 中为当天）。
+    2026-09-28 真机实测：list 共 1000 人，每行只有
+    uin/nick/score/ce(战力)/ts/getzan/zan ——
+      · **服务端不返回名次**，数组顺序也不是按 score 排的（前 12 条
+        score＝2257/2969/2287/2407…完全乱序），而游戏客户端显示的榜单是
+        按 score 降序的名次 → 这里在展示层按 score 降序后自行编号。
+      · **zan 非空的约 10 人＝今日可点赞对象**（实测下标 18/85/171/211/278/
+        400/543/683/703/797），且全部在第 50 名之外 —— 只取前 50 条会一条
+        可赞的都看不到（这正是「和游戏里的列表对不上」的直接原因）。
+    day_ts = 榜单所属日的 0:00。
     """
     try:
         r = await session.post(EP_TRAVEL_PVP, act=14, rank_id=rank_id)
@@ -160,35 +166,41 @@ async def pvp_rank(session, rank_id: int = 0, top: int = 50) -> dict:
     if not isinstance(rows, list):
         return {"ok": False, "code": r.get("code"),
                 "message": r.get("message") or "读取 PVP 榜失败"}
-    me = str(session.uin or "")
+    # ⚠️ 榜里存的 uin 是纯数字，session.uin 是补零格式（"0004821992"），
+    #    直接字符串比对永远匹配不上（my_rank 恒为 None）
+    me = _plain_uin(session)
     my_rank = None
     for i, x in enumerate(rows, 1):
         if str(x.get("uin")) == me:
             my_rank = i
             break
-    lite = []
-    for x in rows[: max(0, int(top or 50))]:
-        lite.append({
-            "rank": None, "uin": x.get("uin"), "nick": x.get("nick"),
-            "score": x.get("score"), "ce": x.get("ce"), "ts": x.get("ts"),
-        })
-    # 榜单里的 position 只是取了前 N 条的序号，补上真实名次
-    for i in range(len(lite)):
-        if my_rank and (i + 1) <= my_rank:
-            lite[i]["rank"] = i + 1
+    ordered = sorted(rows, key=lambda x: int(x.get("score") or 0), reverse=True)
+    lite = [{
+        "rank": i, "uin": x.get("uin"), "nick": x.get("nick"),
+        "score": x.get("score"), "ce": x.get("ce"), "ts": x.get("ts"),
+        "zan": x.get("zan"),
+    } for i, x in enumerate(ordered[: max(0, int(top or 100))], 1)]
+    # 可赞对象明细（游戏「点赞」页看到的就是这批），带上榜内名次/昵称便于对照
+    zan_targets = [{
+        "rank": i, "uin": x.get("uin"), "nick": x.get("nick"),
+        "score": x.get("score"), "ce": x.get("ce"),
+    } for i, x in enumerate(ordered, 1) if x.get("zan") is not None]
+    scores = [int(x.get("score") or 0) for x in rows]
     return {
         "ok": True, "code": r.get("code"),
         "day_ts": d.get("day_ts"),
         "total": len(rows),
         "list": lite,
-        "my_rank": my_rank,
+        "rank_id": rank_id,
+        "my_rank": my_rank,            # None = 我的分数没进这份 1000 人名单
         "my_score": d.get("my_score"),
         "my_ce": d.get("my_ce"),
         "my_rankbits": d.get("my_rankbits"),
         "my_zan_num": d.get("my_zan_num"),
         "zan_bit": d.get("zan_bit"),
-        "zan_targets": [x.get("uin") for x in rows if x.get("zan") is not None][:20],
-        "rank_id": rank_id,
+        "zan_targets": zan_targets[:30],
+        "min_score": min(scores) if scores else None,   # 榜内最低分
+        "max_score": max(scores) if scores else None,
     }
 
 

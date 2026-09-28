@@ -3522,26 +3522,44 @@ function renderMatchPvp() {
     box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
     return;
   }
-  const meUin = (window.__myUin || "");
+  // 榜里存的 uin 是纯数字，登录态里是补零格式（"0004821992"）——直接比永远匹配不上
+  const rawMe = String(window.__myUin || "");
+  const meUin = /^\d+$/.test(rawMe) ? String(Number(rawMe)) : rawMe;
   const rows = d.list || [];
-  cnt.textContent = `榜单 ${d.total || 0} 人`;
+  const zan = d.zan_targets || [];
+  cnt.textContent = `榜单 ${d.total || 0} 人 · 显示前 ${rows.length}`;
   box.innerHTML =
     `<div class="state-box">` +
     matchRow("我的分数 my_score", d.my_score) +
     matchRow("我的战力 my_ce", d.my_ce) +
-    matchRow("榜内我的名次", d.my_rank ? `第 ${d.my_rank} 名` : "未进前 1000") +
+    matchRow("榜内我的名次", d.my_rank ? `第 ${d.my_rank} 名`
+      : `不在榜内（榜内最低 ${d.min_score ?? "-"}，我的 ${d.my_score ?? "-"}）`) +
     matchRow("今日已赞 my_zan_num", d.my_zan_num) +
     matchRow("点赞位 zan_bit", d.zan_bit) +
-    matchRow("今日可赞对象", (d.zan_targets || []).length ? `${(d.zan_targets || []).length} 人` : "无") +
+    matchRow("今日可赞对象", zan.length ? `${zan.length} 人` : "无") +
     matchRow("榜单日期 day_ts", matchFmtTs(d.day_ts)) +
     `</div>` +
+    // 可赞对象单独成块：这 10 人全都在前 50 名之外，混在榜单里根本看不见
+    (zan.length
+      ? `<div class="lst" style="max-height:none;padding:6px">
+           <div class="lst-head"><span class="t">今日可点赞（pvp act=22）</span></div>` +
+        zan.map((z) => `<div class="pk" style="margin-bottom:4px;border-color:#f0a020">
+            <div class="pk-bdg ok">${z.rank ?? "-"}</div>
+            <div style="flex:1"><b>${z.nick || "-"}</b>
+              <br><span style="color:var(--muted);font-size:12px">分数 ${z.score ?? "-"} · 战力 ${z.ce ?? "-"}</span></div>
+          </div>`).join("") +
+        `<div class="empty-tip" style="font-size:12px">游戏「竞技场 → 点赞」里能点的就是这批人，每日 1 次。</div>
+       </div>`
+      : "") +
     `<div class="lst" style="max-height:none;padding:6px">` +
+    `<div class="empty-tip" style="font-size:12px">榜单顺序＝按分数降序（服务端不返回名次，前端自行编号，与游戏内一致）。</div>` +
     (rows.length
       ? rows.map((r) => {
           const isMe = String(r.uin) === String(meUin);
+          const canZan = zan.some((z) => String(z.uin) === String(r.uin));
           return `<div class="pk" style="margin-bottom:4px${isMe ? ";border-color:var(--qq-blue)" : ""}">
-            <div class="pk-bdg ${isMe ? "ok" : ""}">${r.rank || r.rank === 0 ? r.rank : "-"}</div>
-            <div style="flex:1"><b>${r.nick || "-"}</b>${isMe ? " <span style='color:var(--qq-blue)'>（我）</span>" : ""}
+            <div class="pk-bdg ${isMe ? "ok" : ""}">${r.rank ?? "-"}</div>
+            <div style="flex:1"><b>${r.nick || "-"}</b>${isMe ? " <span style='color:var(--qq-blue)'>（我）</span>" : ""}${canZan ? " <span style='color:#f0a020'>可赞</span>" : ""}
               <br><span style="color:var(--muted);font-size:12px">分数 ${r.score ?? "-"} · 战力 ${r.ce ?? "-"} · ${matchFmtTs(r.ts)}</span></div>
           </div>`;
         }).join("")
@@ -3807,7 +3825,8 @@ function renderMatchGold() {
 }
 
 async function loadMatchPvp() {
-  const r = await fetch("/api/match/pvp?top=50").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
+  // top=100：实测今日可点赞的 10 人全在第 50 名之外，取 50 条一条可赞的都看不到
+  const r = await fetch("/api/match/pvp?top=100").then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchPvp = r;
   renderMatchPvp();
   if (!r || r.ok === false) mlogFail("PVP 日榜", r);

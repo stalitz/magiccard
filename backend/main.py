@@ -2239,8 +2239,12 @@ async def match_state(want_equip: bool = False):
 
 
 @app.get("/api/match/pvp")
-async def match_pvp(top: int = 50, rank_id: int = 0):
-    """PVP 日榜；top 控制返回条数（HAR 实测榜单本身有 1000 人）。"""
+async def match_pvp(top: int = 100, rank_id: int = 0):
+    """竞技场 · 竞技榜（card_travel_elf_pvp act=14）；top 控制返回条数。
+
+    默认 100：实测今日可点赞的 10 人全在第 50 名之外，取 50 条会一条可赞的
+    都看不到（2026-09-28 用户反馈「和游戏里的列表对不上」）。
+    """
     if err := _require_login():
         return err
     try:
