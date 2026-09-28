@@ -72,12 +72,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     });
     const rowEl = box.querySelector('.cat-row');
     const row = rowEl ? rowEl.getBoundingClientRect() : null;
+    // 整行自适应复查：外层白块应铺满 msub-home 的内容宽（此前 dg-cols 三栏模板只给了 1/3 栏）
+    const wrap = box.parentElement;
+    const pane = document.getElementById('msub-home');
     return {
       n: cards.length,
       rects: rects,
       lines: new Set(rects.map(function (q) { return q.y; })).size,
       rowW: row ? Math.round(row.width) : null,
       boxW: Math.round(box.getBoundingClientRect().width),
+      wrapW: Math.round(wrap.getBoundingClientRect().width),
+      paneW: Math.round(pane.getBoundingClientRect().width),
       txt: box.textContent.replace(/\\s+/g, ' ').trim().slice(0, 500),
       hasHash: box.textContent.indexOf('#') >= 0
     };
@@ -118,6 +123,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   console.log("卡片数 " + r.n + "，占 " + r.lines + " 行");
   console.log("容器宽 " + r.boxW + " / 横排宽 " + r.rowW);
+  console.log("外层块宽 " + r.wrapW + " / 页面内容宽 " + r.paneW);
+  if (r.wrapW && r.paneW && r.wrapW >= r.paneW - 4) console.log("OK 出战猫咪块已铺满整行（" + r.wrapW + "/" + r.paneW + "）");
+  else console.log("BAD 出战猫咪块没铺满（" + r.wrapW + " < " + r.paneW + "）");
   console.log("卡片 rect：" + JSON.stringify(r.rects));
   console.log("文本：" + r.txt);
   if (r.n >= 2 && r.lines === 1) console.log("OK 宽屏 " + r.n + " 只猫排成一行（容器 " + r.boxW + "，卡宽 " + r.rects[0].w + "px）");
