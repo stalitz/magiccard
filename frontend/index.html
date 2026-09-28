@@ -424,6 +424,20 @@
     .dg-col>.lpanel{min-height:240px}
   }
 
+  /* 出战（比赛）页专用两栏：左列叠「我的比赛状态 + 今日主题与最优穿装」，
+     右列单独放「出战记录（最近 10 场）」——记录很长，不占满整行。
+     必须写自己的类并连带覆盖上面两档断点，否则会被 dg-cols 的三栏模板顶回去。 */
+  .lib-body.dg-cols.cols-2{grid-template-columns:minmax(0,1.05fr) minmax(296px,.9fr);
+    grid-template-areas:"grid side"}
+  @media (max-width:1240px){
+    .lib-body.dg-cols.cols-2{grid-template-columns:minmax(0,1fr) minmax(280px,.9fr);
+      grid-template-rows:minmax(0,1fr) minmax(0,1fr);grid-template-areas:"grid side" "side side"}
+  }
+  @media (max-width:1080px){
+    .lib-body.dg-cols.cols-2{grid-template-columns:minmax(0,1fr);grid-template-rows:auto;
+      grid-template-areas:"grid" "side";overflow-y:auto}
+  }
+
   /* 鉴定机（jd_macs） */
   .jd-m{border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin-bottom:8px}
   .jd-h{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px;
@@ -1429,15 +1443,9 @@
             <button id="match-refresh" class="btn sm">刷新状态</button>
             <button class="btn sm ok" data-act="mm-claim" data-only="comp" data-idle="领奖">领奖（每日比赛）</button>
           </div>
-          <div class="lib-body dg-cols">
-            <div class="dg-col" style="flex:1.15">
-              <div class="lst" style="max-height:none">
-                <div class="lst-head"><span class="t">今日主题与最优穿装</span>
-                  <span class="cnt" id="match-theme-cnt"></span></div>
-                <div id="match-theme-box" class="state-box">
-                  <span class="spinner"></span>正在读取今日主题…</div>
-              </div>
-            </div>
+          <!-- 左列：比赛状态在上、今日主题在下（用户要的状态优先）；右列：出战记录单独一列，
+               记录很长不再占满整行。改这里前先读 CSS 里的 .lib-body.dg-cols.cols-2。 -->
+          <div class="lib-body dg-cols cols-2">
             <div class="dg-col" style="flex:1">
               <div class="lst" style="max-height:none">
                 <div class="lst-head"><span class="t">我的比赛状态</span>
@@ -1445,10 +1453,13 @@
                 <div id="match-state-box" class="state-box">
                   <span class="spinner"></span>正在读取比赛状态…</div>
               </div>
+              <div class="lst" style="max-height:none">
+                <div class="lst-head"><span class="t">今日主题与最优穿装</span>
+                  <span class="cnt" id="match-theme-cnt"></span></div>
+                <div id="match-theme-box" class="state-box">
+                  <span class="spinner"></span>正在读取今日主题…</div>
+              </div>
             </div>
-          </div>
-
-          <div class="lib-body dg-cols">
             <div class="dg-col" style="flex:1">
               <div class="lst" style="max-height:none">
                 <div class="lst-head"><span class="t">出战记录（最近 10 场）</span>
@@ -1583,7 +1594,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928g"></script>
+<script src="/app.js?v=20260928h"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
