@@ -3402,7 +3402,7 @@ function renderMatchState() {
           <div class="cat-lv">${lv} 级 · 星 ${c.star ?? "-"}</div>
           <div class="cat-meta">心情 ${c.mood ?? "-"} · 运动 ${c.motion ?? "-"} · 表演 ${c.perform ?? "-"}
             <br><span class="cat-sk">技能 ${skl || "-"}</span></div>
-          <div class="cat-w" title="装扮名取官方配置；进阶款未收录时显示部位，id ${eq.join("/")}">穿戴：${wear.join("、") || "—"}</div>
+          <div class="cat-w" title="穿戴：${wear.join("、") || "—"}\n装扮名取官方配置；进阶款未收录时显示部位\n原始 id ${eq.join("/")}">穿戴：${wear.join("、") || "—"}</div>
         </div>`;
       }).join("") + `</div>`
     : `<div class="empty-tip">暂无猫咪数据${d.bound ? "" : "（该号未开通比赛模块）"}</div>`;

@@ -183,14 +183,19 @@
   .stat-card h3{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:12px;
     text-transform:uppercase;letter-spacing:.4px}
   .state-box{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
-  /* 出战猫咪：4 只横排刚好放得下，不必竖着堆 */
-  .cat-row{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:8px}
-  .cat-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px;font-size:12px}
+  /* 出战猫咪：固定 4 列横排。
+     曾用 auto-fill+minmax(158px)，容器窄于 4*158+gap 时第 4 只会折到第二行；
+     改 minmax(0,1fr) 让它随容器压缩，任何宽度都保持一行。 */
+  .cat-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+  .cat-card{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 10px;font-size:12px;min-width:0;overflow:hidden}
   .cat-n{font-weight:700;font-size:12.5px;margin-bottom:3px}
   .cat-lv{color:var(--muted);font-size:11.5px}
   .cat-meta{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.5}
   .cat-sk{color:#0a7d43}
-  .cat-w{color:var(--text);font-size:11.5px;margin-top:4px;word-break:break-all}
+  /* 4 列固定后卡片会被压窄（容器 360px 时只剩 80px），穿戴文字最多显示 3 行，
+     完整清单在 title 里 —— 不换行会把卡片撑得老高，破坏「一行放下」 */
+  .cat-w{color:var(--text);font-size:11.5px;margin-top:4px;word-break:break-all;
+    display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
   .stat-chip{background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
   .stat-chip .k{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
   .stat-chip .v{font-size:15px;font-weight:700;color:var(--text)}
@@ -1578,7 +1583,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928e"></script>
+<script src="/app.js?v=20260928f"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

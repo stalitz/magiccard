@@ -96,14 +96,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   fs.writeFileSync("/tmp/mc_cats/cats.png", Buffer.from(shot.result.data, "base64"));
   console.log("截图已存 /tmp/mc_cats/cats.png");
 
-  ws.close();
   if (!r || r.err) { console.log("取值失败：", JSON.stringify(r)); process.exit(1); }
+  // 窄容器复查：折行的根因是容器宽度（auto-fill+minmax(158px) 放不下 4 列就换行），
+  // 与视口无关，所以直接把 #match-cats 压到 360px 量（比 Emulation 覆盖稳）。
+  const rn = await evaluate(`(async () => {
+    const box = document.getElementById('match-cats');
+    const wrap = box.parentElement;            // .lst
+    const oldW = wrap.style.width;
+    wrap.style.width = '360px';
+    await new Promise(r => setTimeout(r, 200));
+    const rects = [].slice.call(box.querySelectorAll('.cat-card')).map(function (c) {
+      var q = c.getBoundingClientRect();
+      return { y: Math.round(q.y), w: Math.round(q.width) };
+    });
+    const out = { lines: new Set(rects.map(function (q) { return q.y; })).size,
+                  n: rects.length, w: rects.length ? rects[0].w : 0,
+                  boxW: Math.round(box.getBoundingClientRect().width) };
+    wrap.style.width = oldW;
+    return out;
+  })()`);
+
   console.log("卡片数 " + r.n + "，占 " + r.lines + " 行");
   console.log("容器宽 " + r.boxW + " / 横排宽 " + r.rowW);
   console.log("卡片 rect：" + JSON.stringify(r.rects));
   console.log("文本：" + r.txt);
-  if (r.n >= 2 && r.lines === 1) console.log("OK " + r.n + " 只猫排成一行（卡宽 " + r.rects[0].w + "px）");
-  else console.log("BAD 不是单行：" + r.lines + " 行");
+  if (r.n >= 2 && r.lines === 1) console.log("OK 宽屏 " + r.n + " 只猫排成一行（容器 " + r.boxW + "，卡宽 " + r.rects[0].w + "px）");
+  else console.log("BAD 宽屏不是单行：" + r.lines + " 行（容器 " + r.boxW + "）");
+  if (rn && rn.n >= 2 && rn.lines === 1) console.log("OK 窄容器 360px 仍是单行（容器 " + rn.boxW + "，卡宽 " + rn.w + "px）");
+  else console.log("BAD 窄容器 360px 折行：" + (rn ? rn.lines + " 行" : "取值失败"));
   console.log(r.hasHash ? "BAD 文本仍含 # 编号" : "OK 无 # 编号");
+
+  ws.close();
   process.exit(0);
 })();
