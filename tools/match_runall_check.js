@@ -97,6 +97,28 @@ const SANGUO_EXTRA = { ok: true,
   levels: { ok: true, code: 0, data: {
     101: { levelid: 101, bossid: 101, dropitem: "92_38_6" },
     102: { levelid: 102, bossid: 102, dropitem: "92_38_5" } } }, lineup: null };
+// /api/match/sanguo-box：后端 plan_sg_layers 的输出（大关下拉的数据源）。
+// chapters 是真机口径：第 1 大关黄巾之乱 19/21（缺 2、建议打 102）、
+// 第 2 大关虎牢关 3/21（建议打 203）、第 3 大关起未解锁（disabled）。
+const SANGUO_BOX = {
+  ok: true, levelid: 204, dropitem: "92_36_6", freenum: 0,
+  box: { ex: { filled: 9, capacity: 15, free: 6, slots: [] },
+         safe: { filled: 12, capacity: 12, free: 0, slots: [] } },
+  layers: {
+    recommend: { theme: 1745, chapter: 1, layer: 2, g: 4, levelid: 102, gap: 1,
+      missing: ["太平道"], names: ["太平道"],
+      why: "第 1 大关黄巾之乱的游戏第 4 层还只差 1 张（缺 太平道），打这一档的小关就能补齐。" },
+    levels: [
+      { layer: 1, g: 5, levelid: 201, need: 16, have: 9, done: false, by_theme: [] },
+      { layer: 2, g: 4, levelid: 202, need: 10, have: 5, done: false, by_theme: [] }],
+    chapters: [
+      { chapter: 1, theme: 1745, name: "黄巾之乱", need: 21, have: 19, gap: 2,
+        done: false, unlocked: true, levelid: 102, layer: 2 },
+      { chapter: 2, theme: 1746, name: "虎牢关", need: 21, have: 3, gap: 18,
+        done: false, unlocked: true, levelid: 203, layer: 3 },
+      { chapter: 3, theme: 1747, name: "界桥之战", need: 30, have: 0, gap: 30,
+        done: false, unlocked: false, levelid: 304, layer: 4 }] },
+};
 // 竞技榜（card_travel_elf_pvp act=14）：服务端不返回名次、数组还是乱序的，
 // 后端要按 score 降序重新编号；可赞的 10 人全在第 50 名之外 → 默认取 100 条。
 const PVP = {
@@ -149,6 +171,12 @@ function XIYOU_PLAN() {
            layers: [{ game_layer: 2, missing: ["兜率宫"] },
                     { game_layer: 3, missing: ["玉帝王母", "太上老君"] }] },
     tasks: (s.task_detail || []).map((t, i) => ({ id: i, type: t.type, cnt: t.cnt, done: !!t.cnt, claimable: false })),
+    // 大关下拉的数据源（后端 plan_xiyou 输出）
+    chapters: [
+      { chapter: 1, levelid: 1, theme: 1604, name: "花果山", need: 21, have: 2, gap: 19,
+        done: false, current: false, missing: [] },
+      { chapter: 2, levelid: 2, theme: 1605, name: "天宫", need: 21, have: 18, gap: 3,
+        done: false, current: true, missing: [] }],
     formation: s.formationList || [], logs: s.logData || [],
   };
 }
@@ -160,6 +188,7 @@ w.fetch = (u, opt) => {
     : url.includes("/api/match/pvp-extra") ? PVP_EXTRA
     : url.includes("/api/match/pvp") ? PVP
     : url.includes("/api/match/sanguo-extra") ? SANGUO_EXTRA
+    : url.includes("/api/match/sanguo-box") ? SANGUO_BOX
     : url.includes("/api/match/xiyou") ? { ok: true, raw: XIYOU_PLAN() }
     : url.includes("/api/match/sanguo") ? SANGUO
     : url.includes("/api/match/union-extra") ? UNION_EXTRA
@@ -435,6 +464,43 @@ setTimeout(async () => {
   // 两个玩法绝不能互相串数据
   assert(!/nlb/.test(sg), "三国面板不出现西游记字段（nlb）");
   assert(!/levelId/.test(xb), "西游记面板不出现三国字段（levelId）");
+
+  // ---------- 大关可选（2026-09-29 用户要求）：三国一键出战 / 西游出发都能选打第几大关 ----------
+  const sgOpts = w.eval("(()=>{const s=document.getElementById('match-sg-chapter');"
+    + "return s?[...s.options].map(o=>o.textContent):[]})()") || [];
+  const xyOpts = w.eval("(()=>{const s=document.getElementById('match-xy-chapter');"
+    + "return s?[...s.options].map(o=>o.textContent):[]})()") || [];
+  assert(sgOpts.some((t) => t.includes("第1大关") && t.includes("黄巾之乱")
+    && t.includes("19/21") && t.includes("打 102")),
+    "三国大关下拉列出第 1 大关黄巾之乱（19/21 缺 2 → 打 102）：" + sgOpts.join(" | "));
+  assert(sgOpts.some((t) => t.includes("第2大关") && t.includes("虎牢关") && t.includes("打 203")),
+    "三国大关下拉给出第 2 大关的建议关 203：" + sgOpts.join(" | "));
+  assert(w.eval("(()=>{const s=document.getElementById('match-sg-chapter');"
+    + "const o=[...s.options].find(x=>x.textContent.includes('界桥之战'));"
+    + "return !!(o&&o.disabled)})()"), "未解锁的大关标成不可选（界桥之战）");
+  assert(xyOpts.some((t) => t.includes("第2大关") && t.includes("天宫") && t.includes("（当前）")),
+    "西游大关下拉列出第 2 大关天宫并标出当前：" + xyOpts.join(" | "));
+  assert(xyOpts.some((t) => t.includes("第1大关") && t.includes("花果山")),
+    "西游大关下拉列出第 1 大关花果山（可回头补）：" + xyOpts.join(" | "));
+
+  // 选了第 1 大关 → 一键出战必须带 chapter=1（后端据此在该大关里挑 102 去打）
+  const raidBase = calls.length;
+  w.eval("(()=>{const s=document.getElementById('match-sg-chapter');"
+    + "s.value='1';s.dispatchEvent(new Event('change'));"
+    + "document.querySelector('#msub-sanguo [data-act=\\'mm-raid-sg\\']').click();})()");
+  await new Promise((r) => setTimeout(r, 80));
+  const raidCall = calls.slice(raidBase).find((c) => c.url.includes("/api/match/sanguo-raid"));
+  assert(raidCall && /"chapter":1/.test(raidCall.body || ""),
+    "选中第 1 大关后一键出战带 chapter=1：" + JSON.stringify(raidCall && raidCall.body));
+  // 西游：选了第 1 大关 → 出发带 levelid=1（不是当前大关 2）
+  const xyBase = calls.length;
+  w.eval("(()=>{const s=document.getElementById('match-xy-chapter');"
+    + "s.value='1';s.dispatchEvent(new Event('change'));"
+    + "document.getElementById('match-xy-start').click();})()");
+  await new Promise((r) => setTimeout(r, 80));
+  const xyCall = calls.slice(xyBase).find((c) => c.url.includes("/api/match/xiyou-start"));
+  assert(xyCall && /"levelid":1/.test(xyCall.body || ""),
+    "选中第 1 大关后西游出发带 levelid=1：" + JSON.stringify(xyCall && xyCall.body));
 
   assert(!errors.length, "运行期无 JS 报错" + (errors.length ? "：" + errors.slice(0, 2).join(" | ") : ""));
   w.close();

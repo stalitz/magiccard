@@ -1525,6 +1525,9 @@
           <div id="msub-xiyou" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px;flex-wrap:wrap">
               <button id="match-xiyou" class="btn sm">刷新</button>
+              <label class="hint" style="display:flex;align-items:center;gap:4px;font-size:12.5px">大关
+                <select id="match-xy-chapter" class="sel" style="font-size:12.5px;padding:4px 6px"
+                        title="出发去哪个大关；一次只能有一个进行中的探索"></select></label>
               <button id="match-xy-run" class="btn sm ok" data-idle="探索跑完中…">一键探索（出发 + 收满 + 领奖）</button>
               <button id="match-xy-start" class="btn sm danger" data-idle="出发中…">出发探索（高级 · 消耗）</button>
               <button id="match-xy-get" class="btn sm" data-idle="收获中…">收满收获（24 个）</button>
@@ -1564,6 +1567,9 @@
           <div id="msub-sanguo" class="msub">
             <div class="lib-toolbar" style="gap:8px;padding:8px 12px">
               <button id="match-sanguo" class="btn sm">刷新三国战役</button>
+              <label class="hint" style="display:flex;align-items:center;gap:4px;font-size:12.5px">大关
+                <select id="match-sg-chapter" class="sel" style="font-size:12.5px;padding:4px 6px"
+                        title="一键出战打哪一大关；缺口最小的那一层会被自动挑出来"></select></label>
               <button class="btn sm" data-act="mm-sgbox">刷新关卡卡箱</button>
               <button class="btn sm ok" data-act="mm-raid-sg" data-idle="一键出战（出战中…）">一键出战（今日剩余 3 次）</button>
               <button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>
@@ -1621,7 +1627,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260928q"></script>
+<script src="/app.js?v=20260929a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

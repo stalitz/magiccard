@@ -3848,9 +3848,11 @@ async function loadMatchGvg() {
 }
 
 // 三国一键出战：连打到今日次数用尽（后端内部每轮重读真实阵容，次数由服务端回读）
+// sgPickChapter 是界面上选的大关（0 = 跟服务端当前关）：选了就在那一大关里打缺口最小的层。
 async function sanguoRaid() {
   const r = await fetch("/api/match/sanguo-raid", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chapter: sgPickChapter || 0 }),
   }).then((x) => x.json()).catch(() => null);
   if (!r || r.ok === false) {
     mlog("[三国] 一键出战失败：" + ((r && r.message) || "网络异常"), "err");
@@ -3858,7 +3860,7 @@ async function sanguoRaid() {
   }
   if (r.skipped) { mlog("[三国] " + (r.message || "今日已出满，无需再出"), "warn"); return; }
   const rs = (r.rounds || []).map((x) => `第${x.no}场 ${x.ok ? (x.text || "成功") : (x.msg || "失败")}`);
-  mlog(`[三国] 一键出战：关卡 L${r.levelid} 出战 ${r.played} / ${(r.rounds || []).length} 场` +
+  mlog(`[三国] 一键出战：${r.chapter ? `第 ${r.chapter} 大关 · ` : ""}关卡 L${r.levelid} 出战 ${r.played} / ${(r.rounds || []).length} 场` +
     `（今日 ${r.used_before}→${r.used_after} 次）` + (rs.length ? "｜" + rs.join("；") : ""),
     r.played ? "ok" : "");
   await loadMatchSanguo(true); await loadMatchSanguoLevels();
@@ -3879,6 +3881,38 @@ async function loadMatchSanguo(withTask = false) {
 // 关卡卡箱是自动攒层卡的地方、缺层就出不了关；保险箱只展示 + 手动卖 ——
 // 「保险箱 ↔ 关卡卡箱」怎么搬没有实证，自动动它可能把还缺的层卡卖掉。
 let matchSgBox = null;
+
+// ---------- 大关可选（2026-09-29 用户要求：三国 / 西游都能选打第几大关）----------
+// 0 = 不指定、跟服务端给的当前关走；选了就往那一大关里缺口最小的层打。
+// ⚠ 选中的值必须存在变量里：面板每 60s 轮询重渲染一次，只把选中态写在 DOM 上会被刷掉。
+let sgPickChapter = 0;
+let xyPickChapter = 0;
+
+/** 把后端的 chapters 填进大关下拉；刷新时保留用户已选的那一项。
+ *
+ * ⚠ option 的 value 按玩法取不同的量，别混：
+ *   - 三国 `mode="chapter"`：后端要的是**大关号**（1..9），由后端在该大关里挑该打的小关
+ *     （第 1 大关的缺口 → 102），关号（c.levelid）只能当文案显示；
+ *   - 西游 `mode="levelid"`：出发本来就按大关号，`c.levelid` 与 `c.chapter` 同值。
+ */
+function fillChapterSelect(id, chapters, picked, mode) {
+  const el = $(id);
+  if (!el) return;
+  const keep = String(picked || el.value || "0");
+  const valOf = (c) => (mode === "chapter" ? c.chapter : (c.levelid || c.chapter));
+  const head = mode === "chapter"
+    ? `<option value="0">跟当前关（自动）</option>`
+    : `<option value="0">跟当前大关（自动）</option>`;
+  el.innerHTML = head + (chapters || []).map((c) => {
+    const dis = c.unlocked === false ? " disabled" : "";
+    const cur = c.current ? "（当前）" : "";
+    const prog = `${c.have}/${c.need}` + (c.done ? " 已齐" : ` 缺 ${c.gap}`);
+    const to = mode === "chapter" && c.levelid ? ` → 打 ${c.levelid}` : "";
+    const nm = c.name ? ` ${c.name}` : "";
+    return `<option value="${valOf(c)}"${dis}>第${c.chapter}大关${nm}（${prog}）${to}${cur}</option>`;
+  }).join("");
+  if ([...el.options].some((o) => o.value === keep)) el.value = keep;
+}
 
 async function loadMatchSanguoBox() {
   const r = await fetch("/api/match/sanguo-box")
@@ -3919,6 +3953,9 @@ function renderMatchSanguoBox() {
   }
   const all = d.box || {};
   const ex = all.ex || {}, safe = all.safe || {};
+  // 大关下拉（一键出战打哪一大关）：chapters 来自后端 plan_sg_layers，
+  // 每项带套名 / 收集进度 / 该大关缺口最小层的关号。
+  fillChapterSelect("match-sg-chapter", (d.layers || {}).chapters, sgPickChapter, "chapter");
   cnt.textContent = `关卡卡箱 ${ex.filled || 0}/${ex.capacity || 0} · 保险箱 ${safe.filled || 0}/${safe.capacity || 0}`;
 
   // ⛔ 不再打印「某套缺的第 N 层卡保险箱压着：…」这类诊断：它把**已经收在保险箱里的卡**
@@ -4043,6 +4080,8 @@ function renderMatchXiyou() {
     return;
   }
   const p = d.raw || {}, run = p.run || {}, g = p.gap || {};
+  // 大关下拉（出发去哪一大关）：chapters 来自后端 plan_xiyou，已开启的大关都在里面。
+  fillChapterSelect("match-xy-chapter", p.chapters, xyPickChapter, "levelid");
   cnt.textContent = `第 ${p.level ?? "-"} 关 · ${p.theme_name || "-"} · ${run.running ? "探索中" : "待出发"}`;
   box.innerHTML = `<div class="state-box">` +
     matchRow("当前大关", `第 ${p.level ?? "-"} 关（${p.theme_name || "-"}），上限第 ${p.maxlevel ?? "-"} 关`) +
@@ -4568,7 +4607,8 @@ function initMatchOnce() {
   bind("match-xy-run", async (b) => {
     const restore = busyBtn(b, "探索跑完中…", "一键探索");
     const r = await fetch("/api/match/xiyou-run", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chapter: xyPickChapter || 0 }),
     }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
     const steps = (r && r.steps) || [];
     mlog("[西游记] 一键探索：出发 / 收满 / 领奖 → " +
@@ -4578,9 +4618,12 @@ function initMatchOnce() {
     restore();
   });
   bind("match-xy-start", async (b) => {
-    if (!confirm("出发一次高级探索？会消耗一次探索机会，探索最长 24 小时。")) return;
+    const ch = xyPickChapter || 0;
+    const chName = ch ? (($("match-xy-chapter") || {}).selectedOptions || [{}])[0].textContent || "" : "";
+    if (!confirm(`出发一次高级探索${ch ? `（去第 ${ch} 大关${chName ? " " + chName.replace(/^第\d+大关/, "") : ""}）` : ""}？` +
+                 "会消耗一次探索机会，探索最长 24 小时。")) return;
     const restore = busyBtn(b, "出发中…", "出发探索");
-    await xyPost("/api/match/xiyou-start", {}, "出发探索");
+    await xyPost("/api/match/xiyou-start", { levelid: ch }, "出发探索");
     restore();
   });
   bind("match-xy-get", async (b) => {
@@ -4601,6 +4644,19 @@ function initMatchOnce() {
     await xySellAllDupes();
     restore();
   });
+  // 大关下拉：选中值存进变量（面板会轮询重渲染，只写 DOM 会被刷回默认），并说清这次打哪一关。
+  const sgSel = $("match-sg-chapter");
+  if (sgSel) sgSel.onchange = () => {
+    sgPickChapter = parseInt(sgSel.value, 10) || 0;
+    const t = sgSel.selectedOptions[0] ? sgSel.selectedOptions[0].textContent : "";
+    mlog("[三国] 一键出战的大关：" + (sgPickChapter ? t : "跟随服务端当前关"), "ok");
+  };
+  const xySel = $("match-xy-chapter");
+  if (xySel) xySel.onchange = () => {
+    xyPickChapter = parseInt(xySel.value, 10) || 0;
+    const t = xySel.selectedOptions[0] ? xySel.selectedOptions[0].textContent : "";
+    mlog("[西游记] 出发的大关：" + (xyPickChapter ? t : "跟随当前大关"), "ok");
+  };
   bindMatchModeActs();
   // 子模块 tab：全局委托（按钮是页面里的静态元素）
   const subBar = $("match-sub-bar");

@@ -180,6 +180,7 @@ def plan_xiyou(state: dict) -> dict:
       boxes   三个卡箱的张数与明细
       dupes   跨箱重复（同一张卡在多个箱里）＋ 单箱内同名重复 —— 这些才该卖
       gap     当前大关套还缺哪几张（跨箱去重：一张卡只算一份）
+      chapters 已开启的各大关（套名 / 收集进度 / 缺口 / 是不是当前关）—— 供界面选大关
       tasks   每日任务与可领状态
     """
     lib = _xy_lib()
@@ -274,6 +275,27 @@ def plan_xiyou(state: dict) -> dict:
         gap["layers"] = [{"game_layer": L, "missing": names}
                          for L, names in sorted(lv.items())]
 
+    # ---- 大关列表（界面「大关可选」用）。西游的大关就是探索时选的 levelid：
+    #      levelid=N ↔ 套 1603+N（实证）。已开启的大关 = 1..maxLevelId，全部可选；
+    #      每个大关带上套名与缺口，用户可以主动「回去补第 1 大关」而不是只能打当前关。
+    maxlv = 0
+    try:
+        maxlv = int(state.get("maxLevelId") or 0)
+    except (TypeError, ValueError):
+        maxlv = 0
+    chapters = []
+    for n in range(1, maxlv + 1):
+        th = level_theme(n)
+        cids = [c for c, m in lib.items() if m["theme"] == th]
+        miss = [{"card_id": c, "name": lib[c]["name"], "layer": lib[c]["layer"],
+                 "game_layer": _xy_g(lib[c]["layer"])}
+                for c in sorted(cids) if c not in by_cid]
+        chapters.append({
+            "chapter": n, "levelid": n, "theme": th, "name": theme_name(th),
+            "need": len(cids), "have": len(cids) - len(miss), "gap": len(miss),
+            "done": bool(cids) and not miss, "current": n == level,
+            "missing": miss})
+
     tasks = [{"id": t.get("id"), "type": t.get("type"), "cnt": t.get("cnt"),
               "done": int(t.get("cnt") or 0) > 0}
              for t in (state.get("task_detail") or [])]
@@ -285,7 +307,7 @@ def plan_xiyou(state: dict) -> dict:
     #    act=1 的 formationList / logData 里，只回 plan 的话前端这两个块永远是空的。
     return {"level": level, "theme": theme, "theme_name": theme_name(theme),
             "maxlevel": state.get("maxLevelId"), "run": run, "boxes": boxes,
-            "dupes": dupes, "gap": gap, "tasks": tasks,
+            "dupes": dupes, "gap": gap, "tasks": tasks, "chapters": chapters,
             "formation": _formation_flat(state.get("formationList")),
             "logs": state.get("logData") or [],
             "power": {"freepowerbit": state.get("freepowerbit") or [],
@@ -415,17 +437,23 @@ def _xy_read_box(arr, box_key: str):
 
 
 async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
-                    do_task: bool = True) -> dict:
+                    do_task: bool = True, levelid=None) -> dict:
     """西游记一键：出发 → 收满 24 个收获点（卡箱满就先卖重复卡）→ 领任务奖。
 
     每一步都看服务端脸色，失败即停并写明原因；结果落盘 data/xiyou_run.json。
+    `levelid` = 界面上选的大关（1..maxLevelId），给了就用它出发；不给沿用当前大关。
+    ⚠ 一次只能有一个进行中的探索：已有进行中的就**不重复出发**（选大关也只对下次生效）。
     """
     st = await xiyou_state(session, want_task=True)
     if not st.get("ok"):
         return {"ok": False, "steps": [], "message": st.get("message")}
     plan = plan_xiyou(st)
     run = plan["run"]
-    level = plan["level"] or plan.get("maxlevel")
+    try:
+        picked = int(levelid) if levelid else None
+    except (TypeError, ValueError):
+        picked = None
+    level = picked or plan["level"] or plan.get("maxlevel")
     steps, notes = [], []
 
     # 1. 出发（已经在进行中就不重复出发）

@@ -2421,11 +2421,13 @@ async def match_xiyou_run(req: dict | None = None):
     if err := _require_login():
         return err
     req = req or {}
+    lv = req.get("chapter") or req.get("levelid")
     try:
         return await xy.run_xiyou(_session,
                                   do_start=bool(req.get("start", True)),
                                   do_get=bool(req.get("get", True)),
-                                  do_task=bool(req.get("task", True)))
+                                  do_task=bool(req.get("task", True)),
+                                  levelid=int(lv) if lv else None)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
@@ -2778,12 +2780,16 @@ async def match_sanguo_raid(req: dict | None = None):
     """三国一键出战：用真实阵容连打到今日次数用尽（**消耗闯关次数**）。
 
     今日已打满时直接 skipped，不发任何写请求。步骤落盘 data/sanguo_raid.json。
+    传 `chapter`（1..9）＝ 界面上选的「打第几大关」，后端在该大关内挑该打的小关；
+    不传则沿用服务端给的当前关。
     """
     if err := _require_login():
         return err
     req = req or {}
     lv = req.get("levelid")
+    ch = req.get("chapter")
     return await mt.run_sanguo_raid(_session, int(lv) if lv else None,
+                                    chapter=int(ch) if ch else None,
                                     feed=bool(req.get("feed", True)),
                                     clear_box=bool(req.get("clear_box", True)))
 

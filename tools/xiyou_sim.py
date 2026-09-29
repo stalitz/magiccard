@@ -133,6 +133,23 @@ def test_plan():
           p2["run"]["running"] is False and p2["gap"]["have"] == 18
           and len(p2["gap"]["missing"]) == 3)
 
+    # ---- 大关可选（2026-09-29 用户要求）：已开启的大关都列出来，带套名与缺口
+    ch = {c["chapter"]: c for c in p["chapters"]}
+    check("大关列表 = 已开启的 1..上限，levelid=N ↔ 套 1603+N",
+          sorted(ch) == [1, 2] and (ch[1]["theme"], ch[2]["theme"]) == (1604, 1605)
+          and (ch[1]["levelid"], ch[2]["levelid"]) == (1, 2),
+          str([(c["chapter"], c["levelid"], c["theme"], c["name"])
+               for c in p["chapters"]]))
+    check("第 2 大关天宫是当前关、缺 3 张（与用户口述一致）",
+          ch[2]["current"] and ch[2]["name"] == "天宫" and ch[2]["gap"] == 3
+          and sorted(x["name"] for x in ch[2]["missing"]) ==
+          sorted(["兜率宫", "玉帝王母", "太上老君"]),
+          str({k: ch[2][k] for k in ("name", "gap", "current")}))
+    check("第 1 大关花果山也列出来（可以回头补）、缺 19 张",
+          ch[1]["name"] == "花果山" and ch[1]["gap"] == 19
+          and ch[1]["current"] is False and ch[1]["done"] is False,
+          str({k: ch[1][k] for k in ("name", "have", "need", "gap")}))
+
 
 # ---------------------------------------------------------------- 假 session
 class FakeSession:
@@ -235,6 +252,23 @@ def test_flow():
         check("领任务奖（act=16）成功并带奖励串",
               r3["ok"] and "48_1599_10" in str(r3.get("content") or ""),
               str(r3.get("content")))
+
+        # 大关可选：选了第 1 大关，出发就得带 levelid=1（不再跟当前大关 2）
+        s3 = FakeSession()
+        s3.state["currLevelData"] = []        # 没有进行中的探索 → 这一步真的会出发
+        rr = await xy.run_xiyou(s3, do_get=False, do_task=False, levelid=1)
+        departed = [kw for a, kw in s3.calls if a == 5]
+        check("选第 1 大关 → 出发带的 levelid=1（不跟当前大关）",
+              bool(departed) and departed[0].get("levelid") == 1
+              and bool(rr.get("steps")) and rr["steps"][0]["ok"],
+              str(departed[:1]))
+        s4 = FakeSession()
+        s4.state["currLevelData"] = []
+        await xy.run_xiyou(s4, do_get=False, do_task=False)
+        departed4 = [kw for a, kw in s4.calls if a == 5]
+        check("没选大关 → 出发沿用当前大关（levelid=2）",
+              bool(departed4) and departed4[0].get("levelid") == 2,
+              str(departed4[:1]))
 
     asyncio.run(main())
 

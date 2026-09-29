@@ -75,7 +75,10 @@ def STATE(ex=None, safe=None, ex_num=15, safe_num=12) -> dict:
             "ex_box_num": ex_num,
             "safe_box_data": [dict(x) for x in (SAFE if safe is None else safe)],
             "safe_box_num": safe_num,
-            "freenum": 3, "levelData": [dict(x) for x in LV]}
+            "freenum": 3, "levelData": [dict(x) for x in LV],
+            # 真机基线：顶层 levelId=204（第 2 大关第 4 层）。plan_sg_layers 用它判断
+            # 「哪几个大关已解锁」，所以快照必须带上，否则会列全部 9 套。
+            "levelId": 204}
 
 
 class BoxSim:
@@ -243,9 +246,17 @@ async def main():
     check("游戏第 5 层 = 两套各 8 张（用户说的「第一关掉 8 张」那档）",
           lv[1]["need"] == 16 and lv[5]["need"] == 2,
           str({L: lv[L]["need"] for L in (1, 5)}))
-    check("每层都给了对应小关号 10N",
-          all(l["levelid"] == 100 + l["layer"] for l in p6["levels"]),
+    # 2026-09-29：关号 = **大关号 × 100 + 卡库层号**。levels[].levelid 是「当前大关
+    # （204 → 第 2 大关）」那一层的关号（旧字段、兼容前端）；每套真正该打的关号在
+    # by_theme[].levelid —— 1745 属第 1 大关、1746 属第 2 大关，两者不能共用一个基数。
+    check("按层给的是当前大关（第 2 大关）的小关号 20N",
+          all(l["levelid"] == 200 + l["layer"] for l in p6["levels"]),
           str({l["layer"]: l["levelid"] for l in p6["levels"]}))
+    check("按套给的关号跟着套所属大关走（1745→10N / 1746→20N）",
+          all(r["levelid"] == r["chapter"] * 100 + L
+              for L in lv for r in lv[L]["by_theme"] if r["chapter"]) and
+          [r["levelid"] for r in lv[2]["by_theme"]] == [102, 202],
+          str({r["theme"]: r["levelid"] for r in lv[2]["by_theme"]}))
     # 每层两套的张数固定 8/5/4/3/1
     want_need = {1: 16, 2: 10, 3: 8, 4: 6, 5: 2}
     check("每层总需求 = 两套各 8/5/4/3/1",
@@ -271,8 +282,8 @@ async def main():
           [r["have"] for r in lv[2]["by_theme"] if r["theme"] == 1745] == [4],
           str([(r["theme"], r["have"], r["have_ex"], r["have_safe"])
                for r in lv[2]["by_theme"]]))
-    # STATE() 没有 levelId，退化为「还差最少、层号最小」的第 2 层
-    check("没给当前关时推第 2 层（只差太平道 1 张）",
+    # 快照 levelId=204（当前在第 2 大关），而缺口最小的是第 1 大关第 2 层的「太平道」
+    check("推荐落在第 2 层（只差太平道 1 张）→ 102",
           bool(p6["recommend"]) and p6["recommend"]["layer"] == 2
           and p6["recommend"]["levelid"] == 102
           and p6["recommend"].get("from_now") is False,
@@ -281,29 +292,57 @@ async def main():
           "游戏第 4 层" in (p6["recommend"] or {}).get("why", "")
           and "太平道" in (p6["recommend"] or {}).get("why", ""),
           (p6["recommend"] or {}).get("why", ""))
-    # 给了当前关 204（= 第 4 层）：那层 1745 已齐，打它纯拿重复卡，
-    # 推荐要落在第 2/3 层这种「打了就能补齐」的关上，而不是死守当前关号
+    # 给了当前关 204（第 2 大关第 4 层）：那层 1745 已齐，打它纯拿重复卡。
+    # ⚠ 2026-09-29 修正：缺口在第 1 大关的 1745（太平道），就该推 **102**，
+    #   不能再推「同大关的 202」—— 202 掉的是 1746 的卡，永远补不到太平道（实测 bug）。
     st7 = STATE()
     st7["levelId"] = 204
     p7 = mt.plan_sg_layers(st7)
-    check("当前关 204 那层已齐时改推同大关的小关 202（不是死守 204）",
+    check("当前关 204 时缺口在第 1 大关 → 推 102（不是 202、也不是死守 204）",
           bool(p7["recommend"]) and p7["recommend"]["layer"] == 2
-          and p7["recommend"]["levelid"] == 202
+          and p7["recommend"]["levelid"] == 102
+          and p7["recommend"]["chapter"] == 1
           and p7["recommend"].get("from_now") is False,
           str(p7["recommend"]))
-    # open 只按层号升序供展示，挑「打哪个关」由 recommend 按 gap 取最小
+    # open 只按层号升序供展示，挑「打哪个关」由 recommend 按「套 + 层」的 gap 取最小
     check("open 覆盖所有没齐的层、按层号升序",
           [g["layer"] for g in p6["open"]] == sorted(g["layer"] for g in p6["open"])
           and len(p6["open"]) == sum(1 for L in want_need if lv[L]["have"] != lv[L]["need"]),
           str([(g["layer"], g["gap"]) for g in p6["open"]]))
-    check("recommend 的 gap 是 open 里最小的一档",
+    # recommend 是按「套 + 层」挑的（open 是跨套按层汇总，两者口径不同，不能比大小）
+    check("recommend 的 gap 与它自己那套那层的缺口一致",
           (p6["recommend"] or {}).get("gap") ==
-          min(g["gap"] for g in p6["open"]),
+          len(miss_of(p6, p6["recommend"]["theme"], p6["recommend"]["layer"])),
           f'recommend={p6["recommend"] and p6["recommend"]["gap"]}')
     check("每层 gap 与该层已持有张数一致",
           all(lv[g["layer"]]["need"] - lv[g["layer"]]["have"] == g["gap"]
               for g in p6["open"]),
           str([(g["layer"], g["gap"], lv[g["layer"]]["have"]) for g in p6["open"]]))
+
+    # ---- 大关可选（2026-09-29 用户要求：三国 / 西游都能选打第几大关）
+    print("\n== 大关可选：选哪一大关就打哪一大关")
+    ch = {c["chapter"]: c for c in p7["chapters"]}
+    check("大关列表 9 张地图、套名按 theme 升序（1745/1746/1747…）",
+          sorted(ch) == list(range(1, 10))
+          and (ch[1]["theme"], ch[2]["theme"], ch[3]["theme"]) == (1745, 1746, 1747)
+          and (ch[1]["name"], ch[2]["name"], ch[3]["name"]) ==
+          ("黄巾之乱", "虎牢关", "界桥之战"),
+          str([(c["chapter"], c["theme"], c["name"]) for c in p7["chapters"]][:3]))
+    check("已解锁 = 大关号 ≤ 当前大关（levelId 204 → 只开 1、2）",
+          [c["unlocked"] for c in p7["chapters"]] == [True, True] + [False] * 7,
+          str([c["unlocked"] for c in p7["chapters"]]))
+    check("第 1 大关进度 19/21 缺 2、第 2 大关建议关是 203",
+          ch[1]["have"] == 19 and ch[1]["need"] == 21 and ch[1]["gap"] == 2
+          and ch[1]["levelid"] == 102 and ch[2]["levelid"] == 203,
+          str({n: (ch[n]["have"], ch[n]["need"], ch[n]["levelid"]) for n in (1, 2)}))
+    check("选大关 → 该大关缺口最小的关号（选 1 → 102、选 2 → 203）",
+          mt.pick_sg_levelid(st7, 1) == 102 and mt.pick_sg_levelid(st7, 2) == 203,
+          f"{mt.pick_sg_levelid(st7, 1)} / {mt.pick_sg_levelid(st7, 2)}")
+    pick5 = mt.pick_sg_levelid(st7, 5)
+    check("选未开启的大关给的是该大关内的关号、不在 9 张地图里就不编",
+          pick5 is not None and 501 <= pick5 <= 504
+          and mt.pick_sg_levelid(st7, 99) is None and mt.pick_sg_levelid(st7, 0) is None,
+          f"{pick5} / {mt.pick_sg_levelid(st7, 99)}")
 
     print(f"\n通过 {len(PASS)} 项，失败 {len(FAIL)} 项")
     if FAIL:

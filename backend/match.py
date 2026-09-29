@@ -1237,6 +1237,7 @@ async def sanguo_lineup(session, levelid: int) -> dict:
 # ---------------------------------------------------------------------------
 
 _SG_CARDS: dict | None = None
+_SG_THEME_NAMES: dict | None = None      # 套 id → 套名（theme_card_list），见 _sg_theme_name()
 
 
 def _sg_cards() -> dict:
@@ -1286,6 +1287,51 @@ def _sg_chapter(levelid) -> int:
     """当前所在大关的百位（204 → 200）。推小关号必须留在同一大关里。"""
     n = int(levelid or 0)
     return (n // 100) * 100 if n >= 100 else 100
+
+
+# ---- 三国大关 ↔ 套卡（2026-09-29 真机实证，改推荐前必读）----
+# **关号 = 大关号 × 100 + 卡库层号**，不是「100 + 层号」：
+#   102 掉套 1745 的层 2 卡（25107 黄巾力士，logData 的 passData.sitem 与卡箱 ts 同秒）；
+#   203 掉套 1746 的层 3 卡（25131 吕布投董）。每个大关只有 4 个小关
+#   （act=9 的 id 表：101-104 / 201-204 / … / 901-904）。
+# 9 张大关按 theme 升序取「有层卡」的三国套：1752 杏林春满 / 1753 塞上敕勒 /
+# 1754 十二花信是无层的活动套，不在战役地图里，必须跳过（否则大关号整体错位）。
+# 实证交叉：第 1 大关 = 1745「黄巾之乱」、第 2 大关 = 1746「虎牢关」（吕布线，与用户
+# 口述「第 2 大关第 4 小关」一致）、第 3 大关 = 1747「界桥之战」。
+_SG_CHAPTER_THEMES = (1745, 1746, 1747, 1748, 1749, 1750, 1751, 1755, 1756)
+_SG_MAX_LAYER = 4         # 小关只到 4；卡库层 5 是 boss 层，没有对应小关号（不臆造 105/205）
+
+
+def _sg_chapter_theme(chapter) -> int | None:
+    """大关号 → 套卡 id（第 1 大关 = 1745）。越界返回 None，不编。"""
+    n = int(chapter or 0)
+    return _SG_CHAPTER_THEMES[n - 1] if 1 <= n <= len(_SG_CHAPTER_THEMES) else None
+
+
+def _sg_theme_chapter(theme) -> int | None:
+    """套卡 id → 大关号。不在战役列表里（活动套）返回 None。"""
+    try:
+        return _SG_CHAPTER_THEMES.index(int(theme)) + 1
+    except (ValueError, TypeError):
+        return None
+
+
+def _sg_levelid(chapter, layer) -> int | None:
+    """关号 = 大关号 × 100 + 卡库层号（第 2 大关的层 2 → 202，层 4 → 204）。"""
+    if not chapter or not layer:
+        return None
+    return int(chapter) * 100 + int(layer)
+
+
+def _sg_theme_name(theme) -> str | None:
+    """套名（data/card_lib.json 的 theme_card_list）。查不到返回 None，不编名字。"""
+    global _SG_THEME_NAMES
+    if _SG_THEME_NAMES is None:
+        lib = _ujson.loads((_upath(__file__).resolve().parent.parent / "data"
+                            / "card_lib.json").read_text(encoding="utf-8"))
+        rows = lib.get("theme_card_list") or []
+        _SG_THEME_NAMES = {int(r[0]): str(r[1]) for r in rows if len(r) > 1}
+    return _SG_THEME_NAMES.get(int(theme)) if theme else None
 
 
 def plan_box(state: dict, box: str = "ex") -> dict:
@@ -1384,8 +1430,14 @@ def plan_sg_layers(state: dict) -> dict:
       小关 101 通关给的卡 = 第 1 层（波才 / 白波军 / 张曼成 / 黄巾军 … 共 8 张）；
       小关 102 给的 = 第 2 层（黄巾力士 / 三十六方渠帅，5 张）；
       小关 103 给的 = 第 3 层（岁在甲子），小关 203 给的 = 第 3 层（吕布投董）。
-    配合 card_lib 里每层张数 8/5/4/3/1（两套 1745 / 1746 完全一样），
-    规律即 **小关号 = 100 + 卡库层号**（101…105，203…205 是下一大关同一套规律）。
+    配合 card_lib 里每层张数 8/5/4/3/1（三国每套都是 5 层），规律即
+    **小关号 = 大关号 × 100 + 卡库层号**。
+    2026-09-29 真机交叉实证（act=1 logData × ex_box_data 的时间戳）：
+      小关 102 掉 25107「黄巾力士」＝ 套 1745 的层 2；小关 203 掉 25131「吕布投董」＝
+      套 1746 的层 3。⇒ 第 N 大关的层 L 要打 `N*100 + L`。
+    ⚠ 正因为关号里带着大关号，**不能拿「当前大关」去套所有套的层号**：2026-09-29 实测
+      旧逻辑把第 1 大关（1745）的缺口推荐成「202」（第 2 大关的关），而 202 掉的是
+      1746 的卡、永远补不到「太平道」—— 每个套的关号必须按**该套所属大关**算。
 
     ⚠ **卡库层号 ≠ 游戏界面的层号，是反的**（2026-09-28 用户纠正）：
       游戏里「第 1 层」＝卡库第 5 层，全层只有 1 张「黄巾起义」——那是张角关
@@ -1405,7 +1457,7 @@ def plan_sg_layers(state: dict) -> dict:
     spec: dict = {}
     for cid, c in lib.items():
         th, pos = int(c[1]), int(c[3])
-        if th in (1745, 1746):
+        if th in _SG_CHAPTER_THEMES:        # 9 张大关的套；活动套（1752-1754）不进战役表
             s = spec.setdefault((th, pos // 1000), {"need": 0, "cards": []})
             s["need"] += 1
             s["cards"].append({"card_id": cid, "name": str(c[2]), "theme": th,
@@ -1426,17 +1478,27 @@ def plan_sg_layers(state: dict) -> dict:
     # ⚠ 只认顶层 levelId：真机实测顶层 `levelId=204` 而 `levelData[0].levelid=102`
     #   是上一关的旧残留记录（isget=0 也没通过），拿它当「当前关」会错推一整层。
     levelid_now = state.get("levelId")
-    chapter = _sg_chapter(levelid_now)     # 204 → 200：推荐打同大关的小关（202），不是 102
+    now_chapter = int(levelid_now or 0) // 100 or None    # 204 → 2（第 2 大关）
+    chapter = _sg_chapter(levelid_now)                    # 204 → 200（旧字段用）
     levels, open_gaps, setgaps = [], [], []
     for layer in _SG_LAYERS:
-        ths = sorted({k[0] for k in spec if k[1] == layer})
+        # 按层摊表时**只列已解锁大关的套**：9 套全列会刷出一堆「0/8」把真正
+        # 该看的缺口盖住（用户对「显示杂」敏感），未解锁的大关另有 chapters 列表展示。
+        ths = sorted({k[0] for k in spec if k[1] == layer
+                      and (now_chapter is None or (_sg_theme_chapter(k[0]) or 99) <= now_chapter)})
         rows = []
         for th in ths:
             s = spec.get((th, layer)) or {"need": 0, "cards": []}
             id_ex, id_safe = ids_of(ex, th, layer), ids_of(safe, th, layer)
             have_ids = id_ex | id_safe      # 同一张卡两箱各一份只算一次
             have = len(have_ids)
-            rows.append({"theme": th, "need": s["need"], "have": have, "g": _sg_g(layer),
+            ch = _sg_theme_chapter(th)
+            rows.append({"theme": th, "chapter": ch,
+                         # ★ 这一套的这一层该打哪个小关：关号 = **该套所属大关** ×100 + 层。
+                         #   2026-09-29 修：以前一律用「当前大关」推，1745（第 1 大关）的缺口
+                         #   会被推成 202（第 2 大关），而 202 掉的是 1746 的卡、永远补不到。
+                         "levelid": _sg_levelid(ch, layer),
+                         "need": s["need"], "have": have, "g": _sg_g(layer),
                          "have_ex": len(id_ex), "have_safe": len(id_safe),
                          "done": have >= s["need"],
                          "cards": s["cards"],
@@ -1448,7 +1510,9 @@ def plan_sg_layers(state: dict) -> dict:
                          "in_boxes": len(have_ids)})
         levels.append({
             "layer": layer, "g": _sg_g(layer),          # g = 游戏界面的层号
-            "levelid": chapter + layer,                 # 同大关内的层号，204 → 打 202
+            # ⚠ 这里只是「当前大关」同一层的小关号（旧字段，前端兼容用）；
+            #   每套真正该打的关号在 by_theme[].levelid（按套所属大关算）。
+            "levelid": chapter + layer,
             "by_theme": rows,
             "need": sum(r["need"] for r in rows),
             "have": sum(r["have"] for r in rows),
@@ -1463,41 +1527,74 @@ def plan_sg_layers(state: dict) -> dict:
             ms = [c for c in (spec.get((th, layer)) or {}).get("cards", [])
                   if c["card_id"] not in (ids_of(ex, th, layer) | ids_of(safe, th, layer))]
             if ms:
-                setgaps.append({"theme": th, "layer": layer, "g": _sg_g(layer),
-                                "levelid": chapter + layer, "gap": len(ms),
+                ch = _sg_theme_chapter(th)
+                setgaps.append({"theme": th, "chapter": ch, "layer": layer, "g": _sg_g(layer),
+                                "levelid": _sg_levelid(ch, layer), "gap": len(ms),
                                 "theme_layer_cards": ms})
         if gap:
             open_gaps.append({"layer": layer, "g": _sg_g(layer),
                               "levelid": chapter + layer,
                               "gap": gap, "done": False})
-    # 推荐打哪一关。卡最少的层不一定打得着 —— 跨大关的小关未必解锁：
-    # 现在 levelId=204（第 2 大关），想补第 2 层就得打 202，不是 102。
-    # 所以先保「服务端刚给的当前关」，当前关那层齐了才退而挑 gap 最小的。
+    # 推荐打哪一关：
+    #   ① 只在**已解锁大关**里挑（跨大关的小关未必开着，推了也打不了）；
+    #   ② 排除 boss 层（卡库层 5 没有对应小关号，推荐它等于推一个不存在的关）；
+    #   ③ gap 相同时**先补靠前的大关** —— 用户「第一大关还没过」时不该被推去第 2 大关。
+    rec_pool = [g for g in setgaps
+                if 1 <= g["layer"] <= _SG_MAX_LAYER
+                and (now_chapter is None or (g["chapter"] or 99) <= now_chapter)]
     recommend = None
-    if open_gaps:
-        now_layer = int(levelid_now) % 100 if int(levelid_now or 0) else None
-        # 只在「还没齐」的层里挑。当前关那层要是已经齐了，打它只会拿重复卡，
-        # 对用户「集齐」的目标毫无帮助（2026-09-28：层 4 已齐 3/3，缺的却在层 2/3）。
-        # 且只取层号 <= 当前关的层 —— 后面的小关未必解锁，挑了也是白挑。
-        cand = [g for g in setgaps
-                if now_layer is None or g["layer"] <= now_layer] or setgaps
-        pick = min(cand, key=lambda g: (g["gap"], g["layer"], g["theme"]))
-        recommend = {k: pick[k] for k in ("theme", "layer", "g", "levelid", "gap")}
-        # 打的是「服务端给的当前关号」（如 levelId=204），不是按层号推出来的 104
-        if pick["layer"] == now_layer:
-            recommend["levelid"] = int(levelid_now)
+    if rec_pool:
+        pick = min(rec_pool, key=lambda g: (g["gap"], g["chapter"] or 99, g["layer"]))
+        recommend = {k: pick[k] for k in ("theme", "chapter", "layer", "g", "levelid", "gap")}
         # 直接告诉用户「补齐还差这几张」，别只给个层号让他自己猜
         recommend["missing"] = recommend["names"] = \
             [c["name"] for c in pick["theme_layer_cards"]]
-        recommend["from_now"] = pick["layer"] == now_layer
         names = "、".join(recommend["missing"]) or "这张"
-        recommend["why"] = (f"游戏第 {pick['g']} 层还只差 {pick['gap']} 张"
-                            f"（缺 {names}），打这一档的小关就能补齐 —— "
-                            + (f"正是服务端给的当前关（{levelid_now}）。"
-                               if pick["layer"] == now_layer else
-                               "这关在同一个大关里排在前面，应该已解锁。"))
+        tname = _sg_theme_name(pick["theme"]) or ""
+        recommend["why"] = (f"第 {pick['chapter']} 大关{tname}的游戏第 {pick['g']} 层"
+                            f"还只差 {pick['gap']} 张（缺 {names}），打这一档的小关就能补齐")
+        recommend["from_now"] = pick["levelid"] == int(levelid_now or 0)
+        recommend["why"] += ("—— 正是服务端给的当前关（%s）。" % levelid_now
+                             if recommend["from_now"] else "。")
+    # 大关列表（界面「大关可选」用）：一关一套，缺口按卡 id 跨两箱去重。
+    # unlocked = 大关号 ≤ 当前大关（act=9 的 id 表里每大关只有 4 个小关）。
+    chapters = []
+    for n, th in enumerate(_SG_CHAPTER_THEMES, start=1):
+        need, have = 0, set()
+        for L in _SG_LAYERS:
+            s = spec.get((th, L))
+            if not s:
+                continue
+            need += s["need"]
+            have |= ids_of(ex, th, L) | ids_of(safe, th, L)
+        chg = [g for g in setgaps if g["theme"] == th and 1 <= g["layer"] <= _SG_MAX_LAYER]
+        pick2 = min(chg, key=lambda g: (g["gap"], g["layer"])) if chg else None
+        chapters.append({
+            "chapter": n, "theme": th, "name": _sg_theme_name(th),
+            "need": need, "have": len(have), "gap": max(0, need - len(have)),
+            "done": need > 0 and len(have) >= need,
+            "unlocked": now_chapter is None or n <= now_chapter,
+            "levelid": pick2["levelid"] if pick2 else _sg_levelid(n, _SG_MAX_LAYER),
+            "layer": pick2["layer"] if pick2 else None,
+        })
     return {"levels": levels, "open": open_gaps, "recommend": recommend,
-            "levelid_now": levelid_now}
+            "chapters": chapters, "levelid_now": levelid_now}
+
+
+def pick_sg_levelid(state: dict, chapter) -> int | None:
+    """在**指定大关**里挑一个该打的小关号（缺口最小的未齐层）。
+
+    界面上的「大关可选」走这里：用户选哪一大关就打哪一大关，是手动覆盖自动推荐的
+    入口（例：当前关 204 在第 2 大关，但第一大关还缺「太平道」→ 选第 1 大关 → 102）。
+    该大关全齐时回落到该大关的最后一层，不越界到别的大关，也不编不存在的关号。
+    """
+    n = int(chapter or 0)
+    if not n or not _sg_chapter_theme(n):
+        return None          # 不在战役的 9 张地图里 → 不编关号
+    for c in plan_sg_layers(state).get("chapters") or []:
+        if c.get("chapter") == n:
+            return c.get("levelid") or _sg_levelid(n, _SG_MAX_LAYER)
+    return _sg_levelid(n, _SG_MAX_LAYER)
 
 
 async def sanguo_sell(session, box: int, index: int, card_id: int) -> dict:
@@ -1618,9 +1715,12 @@ def _sanguo_battle_text(d: dict) -> str:
     return "；".join(x for x in bits if x)
 
 
-async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True,
-                          clear_box: bool = True) -> dict:
+async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | None = None,
+                          feed: bool = True, clear_box: bool = True) -> dict:
     """三国「一键出战」：用**真实阵容**连打到今日次数用尽（每天 SGUO_DAILY_MAX 次）。
+
+    `chapter` = 界面上选的「打第几大关」（1..9，见 `_SG_CHAPTER_THEMES`）：给了它就
+    在该大关内挑该打的小关（缺口最小的未齐层），不给则沿用服务端给的当前关。
 
     出战前先把关卡卡箱腾出空位（`clear_box`，用户口述：卡箱满不能出战，多余的层卡
     要卖掉换三国币、只留最新那张）。只在卡箱只剩很少空位时才动手，日志逐张记录。
@@ -1650,6 +1750,14 @@ async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True
         box_before = plan_ex_box(st)
     used = int(st.get("freenum") or 0)
     cur_level = st.get("levelId")
+    # 界面上选了「打第几大关」（大关可选）→ 在该大关内挑该打的小关，手动覆盖自动推荐。
+    # 关号口径：大关号 × 100 + 卡库层号（见 _sg_levelid / _SG_CHAPTER_THEMES）。
+    picked_chapter = None
+    if chapter:
+        picked_chapter = int(chapter)
+        lv2 = pick_sg_levelid(st, picked_chapter)
+        if lv2:
+            levelid = lv2
     if levelid is None or levelid == 0:
         levelid = cur_level
     if not levelid:
@@ -1690,7 +1798,8 @@ async def run_sanguo_raid(session, levelid: int | None = None, feed: bool = True
                        "code": rd.get("code") if "code" in rd else r.get("code")})
         if not ok:
             break
-    out = {"ok": True, "levelid": int(levelid), "used_before": used,
+    out = {"ok": True, "levelid": int(levelid), "chapter": picked_chapter,
+           "used_before": used,
            "used_after": (await sanguo_state(session)).get("freenum"),
            "daily_max": SGUO_DAILY_MAX, "rounds": rounds,
            "played": sum(1 for x in rounds if x.get("ok")),
