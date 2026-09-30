@@ -95,7 +95,10 @@ _cached_food_names = None
 # ───────────────────────── 节流 + 限流重试 ─────────────────────────
 # 实证（2026-09-20）：连续快速请求会被服务端限流，返回 code=-3 "system busy"。
 # 故所有 card_travel_elf 动作统一走 _act：请求间最小间隔 + busy 退避重试。
-_MIN_INTERVAL = 1.2
+# 2026-09-29 依用户实测抓包下调：游戏客户端自身连发间隔常态 0.1~0.5s（bisai2 117 请求
+# min gap=0.00s、大量 0.15~0.5s 均成功），1.2s 过保守致首屏 3 请求串行 ~4s。
+# 取 0.4s（常态区间内）；仍触发限流时由 _act 的 busy 退避重试兜底。
+_MIN_INTERVAL = 0.4
 _last_req_ts = 0.0
 
 
@@ -478,7 +481,7 @@ async def harvest_returned(session, elf_id=None) -> list[dict]:
     return out
 
 
-async def collect_water_targets(session) -> dict:
+async def collect_water_targets(session, st: dict | None = None) -> dict:
     """算出**可浇水**的好友名单（严格按规则，不靠猜）。
 
     规则（用户明确 + HAR 实证）：
@@ -486,9 +489,13 @@ async def collect_water_targets(session) -> dict:
       ② `data` 非空（= 该好友**种了三叶草**）且 `ts > now`（**未成熟**）才可浇；
       ③ 自己 `travel_watered_arr` 里出现过的 = 今日已浇 → 跳过（**每个好友每天只浇一次**）。
 
+    `st`：调用方若已拉过自己的 main 状态（travel_watered_arr 在里面）可直接传入，
+    避免重复发一次 main 请求（state 路由 2026-09-29 优化：5 请求 → 4）。
+
     返回 {"ok","opened","watered_today","targets":[uin...],"all":[{uin,status,reason,...}]}。
     """
-    st = await get_state(session) or {}
+    if st is None:
+        st = await get_state(session) or {}
     done = {str(x.get("uin")) for x in (st.get("travel_watered_arr") or [])}
     op = await fetch_open_friends(session)
     now = int(time.time())
