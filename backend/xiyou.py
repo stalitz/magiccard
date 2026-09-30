@@ -40,11 +40,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Optional
 
 from .constants import EP_WORLD_EXPLORE
-from .match import _json_of, _plain_uin, _upath   # noqa: F401  （_upath 供落盘使用）
+from .match import _json_of, _plain_uin, _upath, ensure_mood, MOOD_TARGET   # noqa: F401  （_upath 供落盘使用）
 
 # ---------------------------------------------------------------- 卡库 / 层号
 
@@ -301,7 +302,10 @@ def plan_xiyou(state: dict) -> dict:
              for t in (state.get("task_detail") or [])]
     bits = int(state.get("task_bits") or 0)
     for i, t in enumerate(tasks):
-        t["claimable"] = bool(bits & (1 << i)) and t["done"]
+        # ⚠️ bits = **已领掩码**（xiyou.har 实证：每成功领一个置一位，响应 bits
+        # 1→5→7 递增）。2026-09-29 曾把它读反成「可领」——方向反了会漏领/误重领。
+        t["claimed"] = bool(bits & (1 << i))
+        t["claimable"] = t["done"] and not t["claimed"]
 
     # ⚠️ formation / logs 要跟着 plan 一起出来：探索布阵的猫和「最近探索」记录都在
     #    act=1 的 formationList / logData 里，只回 plan 的话前端这两个块永远是空的。
@@ -373,21 +377,26 @@ async def xiyou_get(session, levelid: int, index: int, getall: int = 0) -> dict:
 
 async def xiyou_sell(session, box: int, index: int, card_id: int,
                      snap: str = "", snap_num=None) -> dict:
-    """卖探索收获箱里的卡（act=9）。
+    """卖探索卡箱里的卡（act=9）。
 
-    box=2 ＝ new_box_data（HAR 实证：`cards=2_<格下标>_<卡id>`，同时要带上
+    box=2 ＝ 收获箱 new_box_data（HAR 实证：`cards=2_<格下标>_<卡id>`，同时要带上
     `new_box_data=2_<格下标>_<卡id>` 与 `new_box_num=<当前张数>` 两个快照参数，
     服务端拿它对卡箱做并发校验，不匹配会失败）。
 
-    ⚠️ ex_box(0) / safe_box(1) 的卖法 HAR 里没有样本，**未实证**，别照抄这里的
-    2 去卖它们（参数名是否通用不知道）。
+    box=1 ＝ 保险箱 safe_box_data：HAR 里没有样本，按同构参数盲试
+    （cards=1_位_id + safe_box_data/safe_box_num 快照）——用户 2026-09-29 明确授权
+    「保险箱和收获箱加一起重复的要卖」。卖出不可逆，index/card_id 必须先读真实值。
     """
     tag = f"{int(box)}_{int(index)}_{int(card_id)}"
     kw = {"act": 9, "cards": tag}
+    data_key = {2: "new_box_data", 1: "safe_box_data", 0: "ex_box_data"}.get(int(box))
     if snap:
-        kw["new_box_data"] = snap or tag
+        kw[data_key or "new_box_data"] = snap or tag
         if snap_num is not None:
-            kw["new_box_num"] = snap_num
+            kw[{2: "new_box_num", 1: "safe_box_num", 0: "ex_box_num"}[int(box)]] = snap_num
+    elif data_key and snap_num is not None:
+        kw[data_key] = tag
+        kw[{2: "new_box_num", 1: "safe_box_num", 0: "ex_box_num"}[int(box)]] = snap_num
     out = await _resp(session, **kw)
     if out["ok"]:
         d = out["data"]
@@ -437,12 +446,16 @@ def _xy_read_box(arr, box_key: str):
 
 
 async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
-                    do_task: bool = True, levelid=None) -> dict:
-    """西游记一键：出发 → 收满 24 个收获点（卡箱满就先卖重复卡）→ 领任务奖。
+                    do_task: bool = True, levelid=None, feed: bool = True) -> dict:
+    """西游记一键：收满 24 个收获点（卡箱满先跨箱卖重复卡，低级卡先卖）
+    → 出发一次新的 24h 探索 → 领每日任务奖。
 
+    顺序按用户 2026-09-29 定调：先收完上一轮，再出发新一轮，最后领奖。
     每一步都看服务端脸色，失败即停并写明原因；结果落盘 data/xiyou_run.json。
     `levelid` = 界面上选的大关（1..maxLevelId），给了就用它出发；不给沿用当前大关。
-    ⚠ 一次只能有一个进行中的探索：已有进行中的就**不重复出发**（选大关也只对下次生效）。
+    ⚠ 一次只能有一个进行中的探索：已在进行中的**不重复出发**（选大关也只对下次生效）。
+    `feed=True`（默认）：出发前先把猫喂到 MOOD_TARGET（80）—— 西游出发属于「用到猫的一键
+    操作」，按用户定调（2026-09-27「只要用到猫的一键操作都先补心情」+ 本条件）先补再出战。
     """
     st = await xiyou_state(session, want_task=True)
     if not st.get("ok"):
@@ -456,68 +469,107 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
     level = picked or plan["level"] or plan.get("maxlevel")
     steps, notes = [], []
 
-    # 1. 出发（已经在进行中就不重复出发）
-    if do_start and not run["running"]:
-        r = await xiyou_start(session, level or 0)
-        if r["ok"]:
-            steps.append({"step": "出发探索", "ok": True,
-                          "note": r.get("content") or "已出发"})
-        else:
-            steps.append({"step": "出发探索", "ok": False,
-                          "note": r.get("desc") or f"code {r.get('code')}"})
-            notes.append("出发失败，后面不跑")
-            _save_xy_run({"ts": int(time.time()), "ok": False, "steps": steps})
-            return {"ok": False, "steps": steps, "level": level,
-                    "message": steps[-1]["note"]}
+    # 0. 心情门槛：用到猫的一键操作前置，出发前先把猫喂到 80（不够才喂）
+    if feed and do_start:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            msg = (f"喂猫到 {MOOD_TARGET} 失败，已中止出发（不消耗次数）："
+                   f"{f.get('message') or '糖果可能不足'}")
+            _save_xy_run({"ts": int(time.time()), "ok": False, "steps": steps,
+                          "level": level, "message": msg})
+            return {"ok": False, "steps": steps, "level": level, "message": msg}
 
-    # 2. 收收获点（卡箱满 → 卖同一张卡的重复份再继续）
+    # 1. 收收获点（探索完成待收时；卡箱满 → 跨箱卖重复卡再继续）
     if do_get and run["pending"]:
-        idx_list = list(run["pending"])
-        for i in range(len(idx_list)):
-            idx = idx_list[i]
-            # 收之前刷新一次当前卡箱（卖卡会改变它）
-            cur = await xiyou_state(session)
-            if not cur.get("ok"):
-                break
-            p2 = plan_xiyou(cur)
-            if idx not in [s["index"] for s in p2["run"]["steps"] if not s["isget"]]:
-                continue          # 这一步已被别人收了
-            r = await xiyou_get(session, level or 0, idx)
-            if r["ok"]:
-                steps.append({"step": f"收获 #{idx}", "ok": True,
-                              "note": r.get("content") or ""})
-                continue
-            if r.get("code") == -30009 or "卡箱" in str(r.get("desc") or ""):
-                sold = await _xy_clear_dupes(session, p2)
-                steps.append({"step": f"收获 #{idx}（卡箱满，卖出重复 {sold} 张）",
-                              "ok": False, "note": r.get("desc") or "卡箱已满"})
-                if not sold:
-                    notes.append("卡箱满了且没有可卖的重复卡，先手动清理再收")
+        if run["remain"] > 0:
+            # 收获点要等探索跑完才解锁（实证：探索中 act=6 返回「关卡未完成」）
+            notes.append(f"探索进行中（剩约 {run['remain'] // 3600 + 1} 小时），"
+                         "收获点等探索完成后的一键再收")
+        else:
+            idx_list = list(run["pending"])
+            for i in range(len(idx_list)):
+                idx = idx_list[i]
+                # 收之前刷新一次当前卡箱（卖卡会改变它）
+                cur = await xiyou_state(session)
+                if not cur.get("ok"):
                     break
+                p2 = plan_xiyou(cur)
+                if idx not in [s["index"] for s in p2["run"]["steps"] if not s["isget"]]:
+                    continue          # 这一步已被别人收了
                 r = await xiyou_get(session, level or 0, idx)
                 if r["ok"]:
-                    steps.append({"step": f"收获 #{idx}（卖出后）", "ok": True,
+                    steps.append({"step": f"收获 #{idx}", "ok": True,
                                   "note": r.get("content") or ""})
+                    continue
+                if r.get("code") == -30009 or "卡箱" in str(r.get("desc") or ""):
+                    sold = await _xy_clear_dupes(session, p2)
+                    steps.append({"step": f"收获 #{idx}（卡箱满，卖出重复 {sold} 张）",
+                                  "ok": False, "note": r.get("desc") or "卡箱已满"})
+                    if not sold:
+                        notes.append("卡箱满了且没有可卖的重复卡，先手动清理再收")
+                        break
+                    r = await xiyou_get(session, level or 0, idx)
+                    if r["ok"]:
+                        steps.append({"step": f"收获 #{idx}（卖出后）", "ok": True,
+                                      "note": r.get("content") or ""})
+                    else:
+                        steps.append({"step": f"收获 #{idx}", "ok": False,
+                                      "note": r.get("desc") or ""})
+                        break
                 else:
-                    steps.append({"step": f"收获 #{idx}", "ok": False,
-                                  "note": r.get("desc") or ""})
+                    # system busy ≠ 真失败（09-29 实证：#0 busy 后单发立刻成功）＝瞬时性
+                    # 失败，等待重试，别一个 busy 就把整轮收获全停；连续 3 次仍 busy 才停。
+                    note = str(r.get("desc") or f"code {r.get('code')}")
+                    got = False
+                    for _try in range(1, 4):
+                        steps.append({"step": f"收获 #{idx}", "ok": False,
+                                      "note": f"{note}，5s 后重试（{_try}/3）"})
+                        await asyncio.sleep(5)
+                        r = await xiyou_get(session, level or 0, idx)
+                        if r["ok"]:
+                            steps.append({"step": f"收获 #{idx}", "ok": True,
+                                          "note": r.get("content") or ""})
+                            got = True
+                            break
+                        note = str(r.get("desc") or f"code {r.get('code')}")
+                    if r.get("code") == -30009 or "卡箱" in note:
+                        break       # 交给上面的卡箱分支处理
+                    if "未完成" in note:
+                        break       # 探索没跑完、收获点没解锁，重试无意义
+                    if got:
+                        continue
+                    steps.append({"step": f"收获 #{idx}", "ok": False, "note": note})
                     break
-            else:
-                steps.append({"step": f"收获 #{idx}", "ok": False,
-                              "note": r.get("desc") or f"code {r.get('code')}"})
-                break
+
+    # 2. 出发新的 24h 探索（收完 / 本来就没在探索时出发；进行中的不重复出发）
+    if do_start:
+        st2 = await xiyou_state(session)
+        if st2.get("ok"):
+            p2 = plan_xiyou(st2)
+            if not p2["run"]["running"]:
+                r = await xiyou_start(session, level or 0)
+                if r["ok"]:
+                    steps.append({"step": "出发探索", "ok": True,
+                                  "note": r.get("content") or "已出发（高级探索，最长 24h）"})
+                else:
+                    steps.append({"step": "出发探索", "ok": False,
+                                  "note": r.get("desc") or f"code {r.get('code')}"})
+            elif p2["run"]["remain"] > 0 and not p2["run"]["pending"]:
+                notes.append(f"探索进行中，约 {max(1, p2['run']['remain'] // 3600)} 小时后完成，本次不重复出发")
 
     # 3. 领任务奖
     if do_task:
         t = await xiyou_task_list(session)
-        for t2 in (t.get("task_detail") or []):
+        bits = int(t.get("task_bits") or 0)
+        for i, t2 in enumerate(t.get("task_detail") or []):
             if not int(t2.get("cnt") or 0):
                 continue
+            if bits & (1 << i):
+                continue      # bits=已领掩码（HAR 实证），领过的不再发 act=16
             r = await xiyou_claim_task(session, int(t2.get("id")))
             steps.append({"step": f"任务奖 {t2.get('id')}", "ok": r["ok"],
                           "note": r.get("content") or r.get("desc") or ""})
-            if not r["ok"]:
-                break
+            # 单个任务领取失败（已领过等）继续领下一个，不因一个挡全部
 
     payload = {"ts": int(time.time()), "ok": any(s["ok"] for s in steps),
                "level": level, "steps": steps, "notes": notes}
@@ -526,23 +578,43 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
             "log": str(_XY_RUN_LOG)}
 
 
-async def _xy_clear_dupes(session, plan: dict, limit: int = 12) -> int:
-    """把「同一张卡有重复份」的卡卖掉（只卖第 2 份及以后），返回卖出张数。"""
-    sold = 0
+async def _xy_clear_dupes(session, plan: dict, limit: int = 24) -> int:
+    """跨箱卖重复卡腾卡箱：收获箱(new)+保险箱(safe) 合并计数，同一张卡只留 1 份，
+    多余份卖掉；**低级卡先卖**（卡库层号小的先卖，用户 2026-09-29 定调）。
+
+    - box=2（收获箱）卖法 HAR 实证；box=1（保险箱）按同构参数盲试，用户已授权。
+    - 槽位卖出后原位清空不搬移（act=12 实证同构），index 不失效；张数变 →
+      每卖一张本地自减 num，快照参数要跟真实张数对上。
+    - 卖失败（如快照不匹配）即停本箱，调用方重读状态后会再次触发本函数。
+    """
+    lib = _xy_lib()
+    boxes = plan.get("boxes") or {}
+    sells: dict = {"new": [], "safe": []}
     for d in plan.get("dupes") or []:
-        if sold >= limit:
-            break
-        for s in d["sell"]:
+        m = lib.get(int(d["card_id"])) or {}
+        lv = m.get("layer")
+        lv = int(lv) if isinstance(lv, int) and lv else 99   # 查不到层号排最后
+        for s in d.get("sell") or []:
+            bk = s["box"]
+            if bk in sells:
+                sells[bk].append((lv, int(s["index"]), int(s["card_id"])))
+    sold = 0
+    box_param = {"new": (2, "new_box_data", "new_box_num"),
+                 "safe": (1, "safe_box_data", "safe_box_num")}
+    for bk in ("new", "safe"):
+        if not sells[bk]:
+            continue
+        bnum, dk, nk = box_param[bk]
+        num = (boxes.get(bk) or {}).get("filled")   # 当前真实张数（快照用）
+        for _lv, idx, cid in sorted(sells[bk]):     # 低级卡（层号小）先卖
             if sold >= limit:
-                break
-            box, idx, cid = s["box"], s["index"], s["card_id"]
-            if box != "new":
-                continue          # 只卖 HAR 实证过的探索收获箱
-            snap_num = plan["boxes"]["new"].get("capacity")
-            r = await xiyou_sell(session, 2, idx, cid, snap=f"2_{idx}_{cid}",
-                                 snap_num=snap_num)
+                return sold
+            r = await xiyou_sell(session, bnum, idx, cid,
+                                 snap=f"{bnum}_{idx}_{cid}", snap_num=num)
             if r["ok"]:
                 sold += 1
+                if isinstance(num, int):
+                    num -= 1
             else:
-                break
+                break   # 本箱停（下轮触发会重读状态）
     return sold
