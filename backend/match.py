@@ -1490,6 +1490,16 @@ async def explore_shop(session) -> dict:
     return await _act(session, EP_WORLD_EXPLORE, 26)
 
 
+async def explore_shop_buy(session, buyid: int) -> dict:
+    """探索商店购买（explore act=7 buyid=N）。
+
+    2026-09-30 HAR 实证（xiyou.har）：buyid=4 → content=48_1599_60、buyid=2 →
+    content=48_1599_500（1599=出发消耗的能量道具）；价格由服务端扣（响应不含成本），
+    shoplist[].cnt 为已购计数。出发前能量不足时由 run_xiyou 反应式调用。
+    """
+    return await _act(session, EP_WORLD_EXPLORE, 7, buyid=int(buyid))
+
+
 async def explore_rank(session) -> dict:
     """探索排行榜（explore act=28）。读：data 4 项。"""
     return await _act(session, EP_WORLD_EXPLORE, 28)

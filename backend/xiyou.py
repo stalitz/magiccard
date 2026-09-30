@@ -45,7 +45,8 @@ import time
 from typing import Optional
 
 from .constants import EP_WORLD_EXPLORE
-from .match import _json_of, _plain_uin, _upath, ensure_mood, MOOD_TARGET   # noqa: F401  （_upath 供落盘使用）
+from .match import (_json_of, _plain_uin, _upath, ensure_mood, MOOD_TARGET,
+                    explore_shop_buy)   # noqa: F401  （_upath 供落盘使用）
 
 # ---------------------------------------------------------------- 卡库 / 层号
 
@@ -548,6 +549,21 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
             p2 = plan_xiyou(st2)
             if not p2["run"]["running"]:
                 r = await xiyou_start(session, level or 0)
+                # 能量（道具 1599）不足自动补货：2026-09-30 用户「道具不足」出发失败 +
+                # xiyou.har 实证 act=7 buyid=N 购买能量包（buyid=4→1599×60、buyid=2→1599×500）。
+                # 余额字段语义未证实 → 反应式：出发报「道具不足」才买，买完重试，不预判不囤货。
+                if not r["ok"] and "道具" in str(r.get("desc") or ""):
+                    for buyid in (4, 2):        # 先小包（60）不够再大包（500），照用户抓包顺序
+                        b = await explore_shop_buy(session, buyid)
+                        if not b.get("ok"):
+                            steps.append({"step": "购买能量", "ok": False,
+                                          "note": b.get("desc") or f"buyid={buyid} code {b.get('code')}"})
+                            break               # 买失败（如钻石不足）再买大的没意义
+                        steps.append({"step": "购买能量", "ok": True,
+                                      "note": f"能量包 buyid={buyid} → {b.get('content') or '已购买'}"})
+                        r = await xiyou_start(session, level or 0)
+                        if r["ok"]:
+                            break
                 if r["ok"]:
                     steps.append({"step": "出发探索", "ok": True,
                                   "note": r.get("content") or "已出发（高级探索，最长 24h）"})
