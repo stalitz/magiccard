@@ -17,16 +17,20 @@ HAR 中实证到的端点与参数：
 （避免把推测写成常量，见项目 MEMORY.md 铁律）。
 
 **工会 / 公会战例外**：工会玩法需要真实可执行（2026-09-27 由用户要求「把社团公会
-玩法做了」），所以 `run_union()` 是三步真实写操作 —— 领奖(act=17) → 点赞(act=14) →
-出兵(act=21)。三个 act 全部有实跑证据，参数与返回见各函数 doc；**每日出兵上限至今
-未证实**，因此出兵只发一次、不循环。
+玩法做了」）。union 端点 act 语义 2026-09-29 经全部抓包逐条复核修正：
+act=1 工会信息（读）/ act=14 按 uin 批量查公会归属（**只读，游戏里没有「全员点赞」**）/
+act=15 任务计数（读）/ act=16 贡献（读）/ act=17 领奖（写，零消耗）/ act=19 抢红包列表（读，
+**「抢」的写接口未抓到，不盲试**）/ act=21 摇水果（写，返 coin/exp，零消耗，不带 cats）/
+act=22 公会战信息（读）/ act=23 公会战出战（写，{cats,eqs}→battle_data.iswin，**耗 3/3**）/
+act=25 候选对手列表（读）/ act=27 对手名单（读）/ act=30 商店（读）/ act=39 读阵容（读）。
+游戏里**没有「出兵」「全员点赞」这两个独立接口**（用户 09-29 明确纠正，此前误标已全部撤）。
 """
 import json
 from typing import Optional
 
 from .cat_dress import (  # 装扮名 / 属性名（官方 catHome_Info 配置实证，见 cat_dress 模块 doc）
     attr_name as _attr_name, equip_name as _equip_name, summary as _equip_summary,
-    slot_of as _equip_slot,
+    slot_of as _equip_slot, equip_attrs as _equip_attrs,
 )
 from .constants import (
     EP_TRAVEL_MATCH, EP_TRAVEL_PVP, EP_TRAVEL_UNION,
@@ -76,7 +80,15 @@ def _cats(rows: list) -> list:
             # 官方名表没收录的进阶款，退回槽位名（头/手/衣/其他），界面上不留数字 id
             "equip_slots": [_equip_slot(x) for x in (c.get("equip_arr") or [])
                             if x and str(x).strip() not in ("", "0")],
-            "skills": c.get("skill_data"),
+            "skills": [
+                # 实证（bisai2.har skill_data 完整四字段）：cat_skill_type=强化的才艺
+                # （6=翻滚/8=游泳/1=唱歌/4=演奏/9=强健/10=艳丽，与 1..12 才艺同一编号
+                # 空间，同一槽位不同猫 type 不同）；attribute=该猫此才艺当前属性值。
+                {"level": s.get("cat_skill_level"), "type": s.get("cat_skill_type"),
+                 "name": _attr_name(s.get("cat_skill_type")) if s.get("cat_skill_type") else "",
+                 "value": s.get("cat_skill_attribute")}
+                for s in (c.get("skill_data") or [])
+            ],
             "talent": c.get("talent_arr"),
             "tease": c.get("tease"),
         })
@@ -147,9 +159,36 @@ async def match_state(session, want_equip: bool = False) -> dict:
                     "cat_home_dress_clothing_attr", "cat_home_dress_hand_attr",
                     "cat_home_dress_head_attr", "cat_home_dress_other_attr")}
                 out["equip_code"] = r6.get("code")
+                # 每只猫的可读穿装（名字 + 属性加成；名字表缺的件也带属性数值）
+                for c in out["cats"]:
+                    c["equip_texts"] = [
+                        _fmt_eq_item(x, out["equip"])
+                        for x in (c.get("equip") or [])
+                        if x and str(x).strip() not in ("", "0")]
         except Exception as e:  # noqa: BLE001
             out["equip_err"] = str(e)
     return out
+
+
+async def dress_info(session) -> dict:
+    """衣橱全量（competition act=6，只读）。
+
+    返回 {ok, data:{四张 cat_home_dress_*_attr 表}}（与 mode_props fetch 约定一致，
+    取数层统一 .get("data")）；data 就是游戏「猫咪衣柜」的完整数据
+    （bisai2.har 实证 30+31+30+36=127 件，每件 eq_attr=真实加成值）。
+    供「我的顶级装备属性」等字段做可读化：名字表缺的 48 件也能显示属性数值。
+    """
+    try:
+        r6 = await session.post(EP_TRAVEL_MATCH, act=6)
+        d6 = await _json_of(r6)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"请求衣橱异常：{e}"}
+    if not d6:
+        return {"ok": False, "message": "衣橱返回空壳"}
+    return {"ok": True,
+            "data": {k: d6.get(k) for k in (
+                "cat_home_dress_head_attr", "cat_home_dress_clothing_attr",
+                "cat_home_dress_hand_attr", "cat_home_dress_other_attr")}}
 
 
 async def pvp_rank(session, rank_id: int = 0, top: int = 100) -> dict:
@@ -992,44 +1031,123 @@ async def union_chip(session) -> dict:
     return await _act(session, EP_TRAVEL_UNION, 16)
 
 
-async def union_claim(session) -> dict:
-    """工会领奖（union act=17）。零消耗。
+async def union_fruit_reset(session) -> dict:
+    """摇水果——重置（union act=16）。用户 09-29 口述机制 + bisai2.har 时间线佐证。
 
-    2026-09-27 实跑：`content=48_1542_10,48_1543_1`（与 HAR 的 92_32_10,48_1543_1
-    同类，具体 id 每次可能不同）。奖励串按项目铁律统一走 prop_dict，不在别处裸译。
+    机制（用户定调）：摇水果是 5 个水果，**每次摇之前可以重置一次**，重置有机会把
+    3 个相同刷成 4 个相同、奖励提升。bisai2 里 act=16 与 act=17 严格交替
+    （16,16,17 ×3 组），act=16 每次返回不同的 5 位数（22315/22224/55514/55542/
+    22145/22443）——按 5 位=5 个水果、每位 1~5 解读（**语义未证实，仅如实显示**），
+    22224=四个 2、55514=三个 5；第一次摇前 3 连刷成 4 连，那次奖励串也最大。
+    act=16 当天 6 连发均成功 → 至少 6 次/日可行；流程固定每摇只重置 1 次
+    （用户口述「一次重置」），不循环刷（次数上限未证实，不盲试）。
     """
+    r = await _act(session, EP_TRAVEL_UNION, 16)
+    d = (r.get("data") or {}) if r.get("ok") else {}
+    raw = str(d.get("data") or "")
+    fruits = "".join(ch for ch in raw if ch.isdigit())[:5]
+    max_same = 0
+    if len(fruits) == 5:
+        max_same = max(fruits.count(c) for c in set(fruits))
+    pretty = "·".join(fruits) if fruits else raw
+    grade = {5: "五连！", 4: "四连", 3: "三连"}.get(max_same, "")
+    text = f"重置完成：水果 {pretty}" + (f"（{grade}）" if grade else "")
+    return {"ok": bool(r.get("ok")), "code": r.get("code"),
+            "fruits": fruits or raw, "max_same": max_same,
+            "text": text if r.get("ok") else (r.get("message") or "重置失败")}
+
+
+async def union_shake_fruit(session, reset_first: bool = True) -> dict:
+    """摇水果（union act=17，**每日 3 次**）—— 2026-09-29 由 union_run.json 落盘实锤。
+
+    此前误标「工会领奖」。实锤链：09-29 12:32/12:33/12:34 三次 act=17 连续成功
+    （奖励：纤维×3、红宝石×6、纤维×3——随机果实/材料），13:38 第 4 次 → 服务端
+    `system busy` 拒绝；union act=15 的 num/resetnum 当日 = 3/3。与用户实证
+    「游戏里摇水果每天 3 次、点完次数 -1」完全吻合。
+    bisai2.har 里 act=17 恰好 3 连发、每次返回随机奖励串（92_32_10,48_1543_1）。
+    奖励串按项目铁律统一走 prop_dict，不在别处裸译。
+    ⚠ 本地硬闸 SHAKE_DAILY_LIMIT=3（服务端也会拒第 4 次，双保险）。
+    `reset_first=True`（默认）：摇之前先重置一次（act=16，用户定调「每次摇水果前
+    还有一次重置，有机会把 3 连刷成 4 连拉高奖励」），重置失败不阻断摇。
+    """
+    q = _union_quota_check("shake", SHAKE_DAILY_LIMIT)
+    if q.get("blocked"):
+        return q
+    rst = await union_fruit_reset(session) if reset_first else None
     r = await _act(session, EP_TRAVEL_UNION, 17)
     if r.get("ok"):
         try:
             from .prop_dict import summarize_reward
             r["text"] = summarize_reward(str((r.get("data") or {}).get("content") or ""))
-        except Exception:  # 取不到就留原始串，不阻断领奖
+        except Exception:  # 取不到就留原始串，不阻断
             pass
+        used = _union_quota_bump("shake").get("shake")
+        r["used"] = used
+        r["limit"] = SHAKE_DAILY_LIMIT
+        r["fruits"] = (rst or {}).get("fruits")
+        r["max_same"] = (rst or {}).get("max_same")
+        head = f"{(rst or {}).get('text', '')} → " if rst else ""
+        r["text"] = f"{head}摇水果成功（{r.get('text') or (r.get('data') or {}).get('content') or ''}，今日 {used}/{SHAKE_DAILY_LIMIT}）"
+    else:
+        r.setdefault("message", "摇水果失败（可能今日 3 次已用完）")
     return r
 
 
-async def union_fight(session, optype: int = 4, uptype: int = 1,
-                      feed: bool = True) -> dict:
-    """出兵（union act=21 {optype, uptype}）。
+async def union_exchange_redstone(session, optype: int = 4, uptype: int = 1) -> dict:
+    """工会商店兑换（union act=21 {optype, uptype}）—— **每日 1 次策略闸**。
 
-    ⚠ 2026-09-28 用户实证：**这不是游戏内公会战的「挑战」（3/3 那个）** ——
-    出兵跑了 3 次，游戏挑战次数仍 3/3 满的。实测效果：工会金币 +2、exp 增长，
-    且 act=22 的 gift_record 里多次出现自己 uin（疑似助威/送礼类动作）。
-    游戏内挑战的写接口未定位；要接它必须先抓包，禁止盲试写接口（会烧真实次数）。
-
-    出兵带猫与装备（同族 act=23/act=11 的 cats/eqs 语义），所以出兵前按用户定调
-    先把猫喂到 MOOD_TARGET。
+    2026-09-29 用户澄清真实机制：act=21 是**商店兑换**（对应 act=30 商店列表，
+    花金币买商品如红包石）。商店**每周刷新 1 次、每件 maxnum=1，没有日限额**——
+    这就是服务端从不拒绝的原因（周库存内随便兑）。每天只兑 1 次是**人为策略**：
+    每日任务要求「商店兑换 1 次」，兑 1 次拿任务奖励即可，多兑纯属提前烧周库存。
+    故本地硬闸 EXCHANGE_DAILY_LIMIT=1：当日已兑就不再发请求（只统计本工具，
+    游戏内手动兑感知不到）。响应返 coin(工会资金+2/+5)/exp —— 兑换副产品展示，
+    uptype 与商店商品 id 的对应关系语义未证实。
     """
-    if feed:
-        f = await ensure_mood(session)
-        if not f.get("ok"):
-            msg = f"喂猫到 {MOOD_TARGET} 失败，已中止出兵：{f.get('message') or '糖果可能不足'}"
-            return {"ok": False, "code": -1, "desc": msg, "message": msg}
-    return await _act(session, EP_TRAVEL_UNION, 21, optype=int(optype), uptype=int(uptype))
+    q = _union_quota_check("exchange", EXCHANGE_DAILY_LIMIT)
+    if q.get("blocked"):
+        return q
+    r = await _act(session, EP_TRAVEL_UNION, 21, optype=int(optype), uptype=int(uptype))
+    d = (r.get("data") or {}) if r.get("ok") else {}
+    if r.get("ok"):
+        used = _union_quota_bump("exchange").get("exchange")
+        return {"ok": True, "code": 0, "used": used, "limit": EXCHANGE_DAILY_LIMIT,
+                "coin": d.get("coin"), "exp": d.get("exp"),
+                "text": f"商店兑换成功（工会资金 → {d.get('coin')}，今日 {used}/{EXCHANGE_DAILY_LIMIT}，本周库存省着用）"}
+    return {"ok": False, "code": r.get("code"),
+            "message": (r.get("message") or "商店兑换失败")}
+
+
+async def union_enemy_list(session, level: int = None) -> dict:
+    """公会战候选对手名单（union act=25 {level}）—— **只读**，不是写接口。
+
+    2026-09-29 实证（shetuan.har）：REQ {level:8} → code:0 返回候选敌方公会 list
+    （形如 `["10012_沧海月明_ts", ...]`）。它只是「取对手列表」，不消耗 3/3 次数，
+    也不发起战斗。真正的出战写接口是 union_battle（act=23）。
+    level 不传则从 act=22（union_gvg）实时读 `level` 字段（当前进行层）。
+    """
+    if level is None:
+        g = await union_gvg(session)
+        if not g.get("ok"):
+            return {"ok": False, "code": g.get("code"),
+                    "message": "读取公会战层失败：" + (g.get("message") or "")}
+        try:
+            level = int((g.get("data") or {}).get("level"))
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "公会战层号缺失"}
+    r = await _act(session, EP_TRAVEL_UNION, 25, level=int(level))
+    d = await _json_of(r)
+    if r.get("ok") and r.get("code") in (0, None):
+        lst = (d or {}).get("list") or []
+        n = len(lst)
+        return {"ok": True, "code": 0, "level": int(level), "enemies": n,
+                "list": lst, "text": f"第 {level} 层候选敌方 {n} 个"}
+    return {"ok": False, "code": r.get("code"),
+            "message": ((d or {}).get("desc") or r.get("message") or "读取对手失败")}
 
 
 async def union_enemies(session, level: int = 8) -> dict:
-    """公会战关卡对手名单（union act=27 {level}）。读。"""
+    """公会战另一份对手名单（union act=27 {level}，逗号分隔串）。读。"""
     return await _act(session, EP_TRAVEL_UNION, 27, level=int(level))
 
 
@@ -1038,11 +1156,132 @@ async def union_shop(session) -> dict:
     return await _act(session, EP_TRAVEL_UNION, 30)
 
 
-async def union_zan(session, uins: list) -> dict:
-    """工会点赞（union act=14 {uins:'逗号分隔'}）。HAR 里调了 17 次，零消耗。
+async def union_redpacket_list(session) -> dict:
+    """抢红包——红包列表（union act=19）。读：redpkggetlist1/2/3 三份红包领取记录。
 
-    2026-09-27 实跑：uins="1006409757" → {"ok":true,"code":0}。
-    **逐个发**（对齐 HAR 的 17 次调用），避免一次传 29 个 uin 被服务端拒绝。
+    2026-09-29 抓包实证（hongbao.har）：**3 个红包对应 list1/2/3**，每份是
+    `uin_金额_时间戳_昵称` 逗号分隔的已领记录；**自己 uin 不在 listN 里 = 第 N 个红包未领**。
+    pkgdata1/2/3 与 pget 语义未证实，原样透出。
+    """
+    r = await _act(session, EP_TRAVEL_UNION, 19)
+    d = await _json_of(r)
+    if not (r.get("ok") and r.get("code") in (0, None)):
+        return {"ok": False, "code": r.get("code"),
+                "message": ((d or {}).get("desc") or r.get("message") or "读取红包列表失败")}
+    lists = {k: (d or {}).get(k) or "" for k in ("redpkggetlist1", "redpkggetlist2", "redpkggetlist3")}
+    me = _plain_uin(session)
+    claimed = {i: (me in [seg.split("_")[0] for seg in v.split(",") if seg])
+               for i, v in (("1", lists["redpkggetlist1"]),
+                            ("2", lists["redpkggetlist2"]),
+                            ("3", lists["redpkggetlist3"]))}
+    return {"ok": True, "code": 0, "lists": lists, "claimed": claimed, "me": me,
+            "text": f"红包领取状态：{'、'.join(f'第{i}个已领' if c else f'第{i}个未领' for i, c in claimed.items())}"}
+
+
+async def union_redpacket_grab(session) -> dict:
+    """抢红包（union act=20 {id: 1|2|3}）—— hongbao.har 实证，只抢自己没领过的。
+
+    实证序列：act=20 {id:2} → {"code":0,"content":"92_62_6"}，随后 act=19 的
+    redpkggetlist2 里多出自己 uin（4821992_6）——即第 2 个红包领到 6。
+    已领判定：自己 uin 已在 redpkggetlistN 里 → 跳过第 N 个（不盲发，避免烧次数/报错）。
+    奖励串按项目铁律走 prop_dict，解不出就原样透出。
+    """
+    st = await union_redpacket_list(session)
+    if not st.get("ok"):
+        return {"ok": False, "message": st.get("message") or "读取红包列表失败"}
+    claimed = st.get("claimed") or {}
+    me = st.get("me")
+    grabs, skipped = [], 0
+    for i in ("1", "2", "3"):
+        if claimed.get(i):
+            skipped += 1
+            continue
+        r = await _act(session, EP_TRAVEL_UNION, 20, id=int(i))
+        d = await _json_of(r)
+        if r.get("ok") and r.get("code") in (0, None):
+            content = (d or {}).get("content") or ""
+            text = content
+            try:
+                from .prop_dict import summarize_reward
+                text = summarize_reward(str(content)) or content
+            except Exception:  # 解不出就保留原始串
+                pass
+            grabs.append({"id": int(i), "ok": True, "content": content, "text": text})
+        else:
+            grabs.append({"id": int(i), "ok": False,
+                          "msg": (d or {}).get("desc") or r.get("message") or "领取失败"})
+    if not grabs and skipped == 3:
+        return {"ok": True, "code": 0, "grabs": [], "grabbed": 0, "skipped": 3,
+                "text": "3 个红包今天都已领过，无待抢"}
+    ok_n = sum(1 for g in grabs if g.get("ok"))
+    fail_n = len(grabs) - ok_n
+    text = "；".join(f"第{g['id']}个{'：' + g.get('text', '') if g.get('ok') else '失败：' + g.get('msg', '')}"
+                     for g in grabs) or "无待抢红包"
+    return {"ok": fail_n == 0, "code": 0 if fail_n == 0 else 1,
+            "grabs": grabs, "grabbed": ok_n, "skipped": skipped, "me": me,
+            "text": text}
+
+
+async def union_battle(session, feed: bool = True) -> dict:
+    """公会战真正出战（union act=23 {cats, eqs}）—— 消耗 3/3 次数，带猫出战。
+
+    2026-09-29 抓包实证：REQ {cats:'3|4|2', eqs:'12个装备id'} → battle_data
+    含 attack_accounts.iswin。这才是游戏内「挑战 3/3」那个写接口（此前误标成「换装」，
+    又把 act=25 当成「发起挑战」——act=25 其实只是对手列表）。
+    阵容从 union_lineup（act=39，cats 全 0）实时读，绝不写死。出战带猫，按用户定调
+    先 ensure_mood 到 80；喂失败即中止、不烧次数。
+    ⚠ 每日本地硬闸 BATTLE_DAILY_LIMIT=3：超限直接不发请求（不喂猫、不读阵容），
+    避免替用户烧当日挑战机会。
+    """
+    q = _union_quota_check("battle", BATTLE_DAILY_LIMIT)
+    if q.get("blocked"):
+        return q
+    if feed:
+        f = await ensure_mood(session)
+        if not f.get("ok"):
+            msg = f"喂猫到 {MOOD_TARGET} 失败，已中止出战：{f.get('message') or '糖果可能不足'}"
+            return {"ok": False, "code": -1, "desc": msg, "message": msg}
+    ln = await union_lineup(session, cats=[0, 0, 0])
+    elf = ((ln.get("data") or {}).get("elf_list") or [])
+    cats, eqs = [], []
+    for e in elf:
+        cid = e.get("id")
+        if not cid:
+            continue
+        cats.append(int(cid))
+        eqs.extend(int(x) for x in (e.get("equip_list") or []))
+    if not cats:
+        return {"ok": False, "message": "读不到出战阵容（act=39 无 elf_list）"}
+    r = await session.post(EP_TRAVEL_UNION, act=23,
+                           cats="|".join(str(int(c)) for c in cats),
+                           eqs="|".join(str(int(x)) for x in eqs))
+    d = await _json_of(r)
+    if not d:
+        return {"ok": False, "code": r.get("code"),
+                "message": r.get("message") or "出战请求未返回数据"}
+    ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
+    win = ba.get("iswin")
+    if r.get("code") in (0, None) and win == 1:
+        used = _union_quota_bump("battle").get("battle")
+        return {"ok": True, "code": 0, "win": True, "score": ba.get("total_score"),
+                "used": used, "limit": BATTLE_DAILY_LIMIT,
+                "text": f"公会战出战胜利（总分 {ba.get('total_score')}，今日 {used}/{BATTLE_DAILY_LIMIT}）"}
+    if r.get("code") in (0, None):
+        used = _union_quota_bump("battle").get("battle")
+        return {"ok": True, "code": 0, "win": False, "score": ba.get("total_score"),
+                "used": used, "limit": BATTLE_DAILY_LIMIT,
+                "text": f"公会战出战结束（iswin={win}，总分 {ba.get('total_score')}，今日 {used}/{BATTLE_DAILY_LIMIT}）"}
+    return {"ok": False, "code": r.get("code"),
+            "message": (d.get("desc") or r.get("message") or "出战失败")}
+
+
+async def union_unioninfo_query(session, uins: list) -> dict:
+    """按 uin 批量查公会归属（union act=14 {uins:'逗号分隔'}）—— **只读查询，不是点赞**。
+
+    2026-09-29 抓包实证：REQ {uins:'...'} → 返回 info:[{uin, unionid, unionname}]。
+    游戏界面上**不存在「全员点赞」这种操作**（用户 09-29 明确纠正）；act=14 只是给
+    一串 uin 回填它们所属公会名，用于显示。HAR 里出现多次是因为每拉一批成员就查一次。
+    故它**不属于「一键工会」的写操作步骤**，只是一句查询。
     """
     return await _act(session, EP_TRAVEL_UNION, 14, uins=",".join(str(int(u)) for u in uins))
 
@@ -1085,6 +1324,54 @@ import json as _ujson                                    # noqa: E402
 from pathlib import Path as _upath                       # noqa: E402
 
 _UNION_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "union_run.json"
+_UNION_QUOTA_FILE = _upath(__file__).resolve().parent.parent / "data" / "union_quota.json"
+
+# 每日限次硬闸（本地计数，只统计本工具发起的请求；游戏内手动操作无法感知）：
+# - 摇水果 act=17：每日 3 次（服务端第 4 次 busy 拒绝，双保险）。
+# - 公会战出战 act=23：3/3 次数（用户实证）。
+# - 商店兑换 act=21：**每日 1 次策略闸**（用户 2026-09-29 澄清：商店每周刷新 1 次、
+#   每件 maxnum=1，无日限额；每日兑 1 次是为完成「商店兑换 1 次」每日任务，
+#   多兑白烧周库存 —— 当日已兑就不再发）。
+SHAKE_DAILY_LIMIT = 3
+BATTLE_DAILY_LIMIT = 3
+EXCHANGE_DAILY_LIMIT = 1
+
+
+def _union_quota_today() -> dict:
+    """读当日工会限次计数（跨日自动清零），形如 {"date":"2026-09-29","shake":1,"battle":0}。"""
+    today = _utime.strftime("%F")
+    try:
+        d = _ujson.loads(_UNION_QUOTA_FILE.read_text(encoding="utf-8"))
+        if isinstance(d, dict) and d.get("date") == today:
+            return {"date": today, "shake": int(d.get("shake", 0)),
+                    "battle": int(d.get("battle", 0)),
+                    "exchange": int(d.get("exchange", 0))}
+    except Exception:
+        pass
+    return {"date": today, "shake": 0, "battle": 0, "exchange": 0}
+
+
+def _union_quota_bump(kind: str) -> dict:
+    d = _union_quota_today()
+    d[kind] = int(d.get(kind, 0)) + 1
+    try:
+        _UNION_QUOTA_FILE.write_text(_ujson.dumps(d, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # 落盘失败不影响主流程
+        pass
+    return d
+
+
+def _union_quota_check(kind: str, limit: int) -> dict:
+    """超限返回 {"blocked":True,...}（调用方直接 return，不发请求）；未超限返回当日计数。"""
+    d = _union_quota_today()
+    used = int(d.get(kind, 0))
+    if used >= limit:
+        name = {"shake": "摇水果", "battle": "公会战出战",
+                "exchange": "商店兑换"}.get(kind, kind)
+        return {"blocked": True, "ok": False, "code": -1, "used": used, "limit": limit,
+                "message": f"{name}今日已 {used}/{limit}（本地限额，不再发请求；"
+                           f"真实剩余以游戏内为准）"}
+    return {"blocked": False, "used": used, "limit": limit, "date": d.get("date")}
 
 
 def _save_union_run(payload: dict) -> None:
@@ -1104,63 +1391,71 @@ def _save_union_run(payload: dict) -> None:
         pass
 
 
-async def run_union(session, do_zan: bool = True, do_fight: bool = True,
-                    zan_all: bool = False, feed: bool = False) -> dict:
-    """「一键工会」：工会领奖(act=17) → 工会点赞(act=14) → 公会战出兵(act=21)。
+async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
+                    do_redpacket: bool = True, feed: bool = True,
+                    do_battle: bool = True) -> dict:
+    """「一键工会」：摇水果(act=17，每日3次) → 商店兑换(act=21，每日1次策略闸) →
+    抢红包(act=19+20) → 公会战出战(act=23)。
 
-    每一步都以**服务端返回**判定成败（项目铁律：不拿本地推测当结果），
-    失败即停并记录 reason，不继续下一步。
+    2026-09-29 三次实证修正：
+      - act=17 = **摇水果**（每日 3 次，第 4 次服务端 busy 拒绝）。
+      - act=21 = **商店兑换**（每周刷新 1 次、每件 maxnum=1、无日限额；每日 1 次是
+        任务策略闸，靠 EXCHANGE_DAILY_LIMIT=1 当日已兑就不再发）。
+      - act=19+20 抢红包：自己 uin 不在 listN 里才发 act=20。
+      - act=23 公会战出战：消耗挑战机会，出战前 ensure_mood(80)；09-30 起循环打满
+        每日次数（BATTLE_DAILY_LIMIT=3），单场失败/本地闸即停。
 
-    已知（2026-09-27 实跑，09-28 修正口径）：
-      - 领奖 act=17 返回 ok/code/data；点赞 act=14 逐个发，零消耗；
-      - 出兵 act=21 {optype:4, uptype:1} → {"code":0,"coin":4053,"exp":72580,"lv":0}，
-        工会金币 coin 4051 → 4053；**act=21 不是游戏内公会战挑战（3/3 未消耗）**，
-        act=15 `num` 口径存疑（可能跨日累计），所以**每日上限未知 → 不循环，一次为止**。
+    每一步以**服务端返回**判定成败，失败记录 reason 继续其余步骤（红包逐个抢互不影响）。
     """
-    steps, fights = [], 0
+    steps = []
     before = await union_info(session)
     coin0 = before.get("coin")
     chip0 = before.get("chip")
 
-    # 1) 工会领奖（每日限额：第二次起服务端回 code=-2 system busy = 今天已领过）
-    r = await union_claim(session)
-    ccode = r.get("code")
-    r_ok = bool(r.get("ok")) and ccode in (0, None)
-    msg = r.get("text") or (r.get("data") or {}).get("content") or ""
-    if not r_ok:
-        msg = f"{msg}｜" if msg else ""
-        msg += f"今天已领过（{(r.get('data') or {}).get('desc') or '未领取'}）"
-    steps.append({"act": "claim", "ok": r_ok, "code": ccode,
-                  "msg": msg or (r.get("message") or "领奖无返回")})
+    # 1) 摇水果（act=17，每日 3 次；本地硬闸 + 服务端 busy 双保险）
+    if do_shake:
+        s = await union_shake_fruit(session)
+        steps.append({"act": "shake", "ok": s.get("ok"),
+                      "msg": s.get("text") or s.get("message") or "摇水果无返回"})
 
-    # 2) 工会点赞（逐个发，对齐 HAR 的 17 次调用）
-    if do_zan:
-        mem = await union_members(session)
-        targets = [m["uin"] for m in mem] if zan_all else [m["uin"] for m in mem[:3]]
-        zan_ok = 0
-        for u in targets:
-            z = await union_zan(session, [u])
-            if z.get("ok") and z.get("code") in (0, None):
-                zan_ok += 1
-        steps.append({"act": "zan", "ok": zan_ok > 0, "count": zan_ok,
-                      "total": len(targets),
-                      "msg": f"点赞成功 {zan_ok}/{len(targets)} 人"})
-        if zan_ok == 0:
-            steps[-1]["msg"] = f"点赞全部失败（{len(targets)} 人）：服务端未接受"
+    # 2) 商店兑换（act=21，每日 1 次策略闸；当日已兑就跳过不发，省周库存）
+    if do_exchange:
+        x = await union_exchange_redstone(session)
+        steps.append({"act": "exchange", "ok": x.get("ok"),
+                      "blocked": x.get("blocked"),
+                      "msg": x.get("text") or x.get("message") or "商店兑换无返回"})
 
-    # 3) 公会战出兵（消耗；次数以服务端为准，一次为止）
-    if do_fight:
-        f = await union_fight(session, feed=feed)
-        if f.get("ok") and f.get("code") in (0, None):
-            fights = 1
-            steps.append({"act": "fight", "ok": True,
-                          "msg": f"出兵成功（{_utime.strftime('%T')}）"})
-        else:
-            steps.append({"act": "fight", "ok": False,
-                          "msg": f.get("message") or f.get("desc") or "出兵失败（可能次数已用完）"})
+    # 3) 抢红包（act=19 读列表 + act=20 {id:N} 逐个领，已领过的跳过）
+    if do_redpacket:
+        rp = await union_redpacket_grab(session)
+        steps.append({"act": "redpacket", "ok": rp.get("ok"),
+                      "grabbed": rp.get("grabbed"), "skipped": rp.get("skipped"),
+                      "msg": rp.get("text") or rp.get("message") or "抢红包无返回"})
+
+    # 4) 公会战出战（act=23，消耗挑战次数；本地硬闸 + 服务端限额双保险）
+    #    2026-09-30 修正：原版只打 1 场（union_run.json 实证「今日 1/3」就停）；
+    #    现循环打到每日上限（BATTLE_DAILY_LIMIT=3）为止。停止条件：
+    #    本地闸 blocked / 单场失败（喂猫失败、读不到阵容、服务端拒绝）/ 打满上限。
+    #    每场独立走 ensure_mood → 读阵容 → act=23，逐场落 rounds 明细。
+    if do_battle:
+        rounds = []
+        while True:
+            b = await union_battle(session, feed=feed)
+            rounds.append({"ok": b.get("ok"), "win": b.get("win"),
+                           "msg": b.get("text") or b.get("message") or "出战无返回"})
+            if b.get("blocked") or not b.get("ok"):
+                break
+            if int(b.get("used") or 0) >= BATTLE_DAILY_LIMIT:
+                break
+        steps.append({"act": "battle",
+                      "ok": any(x.get("ok") for x in rounds),
+                      "win": sum(1 for x in rounds if x.get("win")),
+                      "rounds": rounds,
+                      "msg": "；".join(f"第{i+1}场：{x['msg']}"
+                                      for i, x in enumerate(rounds)) or "出战无返回"})
 
     after = await union_info(session)
-    out = {"ok": True, "steps": steps, "fights": fights,
+    out = {"ok": True, "steps": steps,
            "coin_before": coin0, "coin_after": after.get("coin"),
            "chip_before": chip0, "chip_after": after.get("chip"),
            "members": len(after.get("members") or {})}
@@ -1819,7 +2114,7 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
 # 未在此列出的 key 会归进「其他原始字段」，不会丢服务端返回的字段。
 # ---------------------------------------------------------------------------
 MODE_PROP_SOURCES: dict = {
-    "comp": ["score", "hero"],
+    "comp": ["score", "hero", "dress"],   # dress=act=6 衣橱，供「顶级装备属性」显示属性数值
     "pvp": ["state", "store"],
     "union": ["task", "chip", "shop", "enemies"],
     "explore": ["team", "task", "shop", "rank"],
@@ -1897,6 +2192,54 @@ def _fmt_v(v) -> str:
         return s if len(s) <= 110 else s[:110] + "…"
 
 
+def _fmt_week_theme(rows) -> str:
+    """pvp act=1 week_theme：[{"id":"1","val":"20"},…] → 「唱歌 20% · …」（bisai2.har 实证 6 项）。"""
+    parts = []
+    for a in rows or []:
+        if not isinstance(a, dict):
+            continue
+        try:
+            parts.append(f"{_attr_name(int(a.get('id')))} {a.get('val')}%")
+        except (TypeError, ValueError):
+            continue
+    return " · ".join(parts)
+
+
+def _fmt_eq_item(eid, dress: dict | None) -> str:
+    """单件装扮 → 「头:魔法帽(演奏+266)」；无名（官方表缺 48 件）→ 「头:#10663(唱歌+262 舞蹈+72)」。
+
+    属性加成只从衣橱 act=6 的 eq_attr 取（玩家真实数值，见 cat_dress.equip_attrs）。
+    """
+    try:
+        eid = int(eid)
+    except (TypeError, ValueError):
+        return ""
+    nm = _equip_name(eid)
+    slot = _equip_slot(eid)
+    if nm:
+        label = f"{slot}:{nm}" if slot else nm
+    else:
+        label = f"{slot}:#{eid}" if slot else f"#{eid}"
+    attrs = _equip_attrs(eid, dress or {})
+    if attrs:
+        label += "(" + " ".join(f"{_attr_name(k)}+{v}" for k, v in sorted(attrs.items())) + ")"
+    return label
+
+
+def _fmt_top_eq(rows, dress: dict | None) -> str:
+    """comp act=9 my_top_eq_attr：[{"id":N},…] → 「头:魔法帽(演奏+266) ｜ …」。
+
+    名字来自官方表；缺名的用槽位/#id，**属性加成从衣橱 act=6 的 eq_attr 取**
+    （衣橱里都有，名字表缺的 48 件也能显示数值而不是裸编号）。
+    """
+    parts = []
+    for a in rows or []:
+        if not isinstance(a, dict) or not a.get("id"):
+            continue
+        parts.append(_fmt_eq_item(a["id"], dress))
+    return " ｜ ".join(p for p in parts if p)
+
+
 def _merge_src(mode: str, src_name: str, data) -> dict:
     """把一个来源的 data 摊平成 {原始key: 值}（跳过 code/desc 之类噪声）。
 
@@ -1931,6 +2274,7 @@ async def mode_props(session, mode: str, fetch: dict, levelid: int = 0) -> dict:
     if mode not in MODE_PROP_SOURCES:
         return {"ok": False, "message": f"未知玩法 {mode}"}
     merged: dict = {}
+    dress = None                       # comp 的 act=6 衣橱（只供 _fmt_top_eq 用，不进 merged）
     for s in MODE_PROP_SOURCES[mode]:
         fn = (fetch or {}).get(f"{mode}:{s}")
         if not fn:
@@ -1945,6 +2289,9 @@ async def mode_props(session, mode: str, fetch: dict, levelid: int = 0) -> dict:
                 data = (await fn(session) or {}).get("data")
         except Exception as e:
             return {"ok": False, "message": f"{s} 读取失败：{type(e).__name__}: {e}"}
+        if sk == "comp:dress":
+            dress = data               # dress_info 已裁成四张表，直接用
+            continue
         merged.update(_merge_src(mode, s, data))
 
     groups, seen = [], set()
@@ -1953,7 +2300,13 @@ async def mode_props(session, mode: str, fetch: dict, levelid: int = 0) -> dict:
         for raw_key, label in rows:
             if raw_key not in merged:   # _EXTRA_KEYS 只在「其他字段」里排除，别挡住分组展示
                 continue
-            txt = _fmt_v(merged[raw_key])
+            val = merged[raw_key]
+            if raw_key == "my_top_eq_attr" and isinstance(val, list) and val:
+                txt = _fmt_top_eq(val, dress) or _fmt_v(val)
+            elif raw_key == "week_theme" and isinstance(val, list) and val:
+                txt = _fmt_week_theme(val) or _fmt_v(val)
+            else:
+                txt = _fmt_v(val)
             if txt == "":
                 continue
             out.append({"k": label, "key": raw_key, "v": txt})
