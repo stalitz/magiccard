@@ -58,6 +58,12 @@ _DATA = _ROOT / "data" / "cat_equip.json"
 #: 官方配置地址（版本号随游戏更新；用 item_dict 的同一份，避免两处漂移）。
 CAT_HOME_URL = "http://appimg2.qq.com/card/mk/catHome_Info_v_114.xml"
 
+#: 全量服装表（2026-09-29 用户抓包实证 URL；仅 http→https 301，需 https 直连）。
+#: 285 条 cat_cloth，含 name/cloth_type/cloth_param，是 catHome_Info_v_114（96 条）的超集——
+#: 玩家衣柜 127 件全部有名字（此前 48 件未收录由此补齐）。版本号 54188 随游戏更新，
+#: 更新后在游戏里抓一次 cat_cloth_v_N.xml 换 URL 重跑 build() 即可。
+CAT_CLOTH_URL = "https://appimg2.qq.com/card/mk/cat_cloth_v_54188.xml"
+
 #: 槽位首位数字 → 名字。同样有官方源：`<catHome_Equip type>`（1=头 2=手 3=衣 4=其他）
 #: 与装备 id 首位一致，这里只做 id 解析的兜底。
 SLOT_BY_PREFIX = {1: "头", 2: "手", 3: "衣", 4: "其他"}
@@ -104,6 +110,42 @@ def parse_cat_home(text: str) -> list:
     return out
 
 
+def parse_cat_cloth(text: str) -> list:
+    """`<cat_clothlist>` 全量解析（cat_cloth_v_54188.xml，285 条）。
+
+    cloth_param 格式 "属性id,?,值,?,?|属性id,?,值,?,?"（与 catHome_Equip.entry 同
+    属性 id 空间、量级不同——铁律：数值只认 act=6 衣橱 eq_attr，这里只取名字/槽位）。
+    """
+    out = []
+    for mm in re.finditer(r"<cat_cloth\s+([^>]*?)/>", text, re.S):
+        a = _attrs(mm.group(1))
+        eid = a.get("id")
+        if not eid:
+            continue
+        bonus = []
+        for seg in (a.get("cloth_param") or "").split("|"):
+            v = seg.split(",")
+            if len(v) >= 3 and v[0].strip().isdigit():
+                bonus.append((int(v[0]), int(v[2])))
+        out.append({
+            "id": int(eid),
+            "name": a.get("name") or "",
+            "type": int(a["cloth_type"]) if (a.get("cloth_type") or "").isdigit() else 0,
+            "desc": a.get("cloth_intro") or "",
+            "bonus": bonus,
+            "words": re.findall(r"“([^”]+)”", a.get("cloth_intro") or ""),
+            "rarity": int(a["cloth_rarity"]) if (a.get("cloth_rarity") or "").isdigit() else 0,
+        })
+    return out
+
+
+def _fetch(url: str) -> str:
+    """拉一个官方配置（必须 https：http 会 301 跳回 https）。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=40) as r:
+        return r.read().decode("utf-8", "replace")
+
+
 def _vote_attrs(ents: list) -> dict:
     """entry 属性 id ↔ desc 才艺名 配对投票 → {attr_id: 属性名}。"""
     import collections
@@ -134,15 +176,30 @@ def _vote_attrs(ents: list) -> dict:
     return {"names": {str(k): v for k, v in sorted(out.items())}, "votes": detail}
 
 
-def build(url: str = "", verbose: bool = True) -> dict:
-    """联网拉官方配置 → 生成属性名 + 装备名表 → 写 `data/cat_equip.json`。"""
-    url = url or CAT_HOME_URL
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=40) as r:
-        text = r.read().decode("utf-8", "replace")
-    ents = parse_cat_home(text)
+def build(url: str = "", cloth_url: str = "", verbose: bool = True) -> dict:
+    """联网拉官方配置 → 生成属性名 + 装备名表 → 写 `data/cat_equip.json`。
+
+    双源：catHome_Info_v_114.xml（96 条，属性名投票仍靠它的 desc/entry 配对）
+    + cat_cloth_v_54188.xml（285 条全量服装，覆盖衣柜 127 件全部名字）。
+    同 id 冲突时 cat_cloth 优先（更新更全）。
+    """
+    ents = []
+    if cloth_url or CAT_CLOTH_URL:
+        text = _fetch(cloth_url or CAT_CLOTH_URL)
+        ents = parse_cat_cloth(text)
+        if not ents:
+            raise RuntimeError("cat_cloth 没解析到条目（源可能改版）")
+    if url or CAT_HOME_URL:
+        try:
+            text = _fetch(url or CAT_HOME_URL)
+            ents_old = parse_cat_home(text)
+            if ents_old:
+                ents = ents + ents_old
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(f"catHome_Info 拉取失败（继续用 cat_cloth）：{e}")
     if not ents:
-        raise RuntimeError(f"没解析到 catHome_Equip（源可能改版：{url}）")
+        raise RuntimeError("两个配置源都没拉到数据")
     v = _vote_attrs(ents)
     equips = {}
     for e in ents:
@@ -161,7 +218,7 @@ def build(url: str = "", verbose: bool = True) -> dict:
     attrs = {int(k): vv for k, vv in v["names"].items()} or dict(_FALLBACK_ATTRS)
     data = {
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "source": url,
+        "source": " + ".join(filter(None, [cloth_url or CAT_CLOTH_URL, url or CAT_HOME_URL])),
         "count": len(equips),
         "attrs": {str(k): vv for k, vv in sorted(attrs.items())},
         "equips": equips,
@@ -170,7 +227,7 @@ def build(url: str = "", verbose: bool = True) -> dict:
     _DATA.parent.mkdir(parents=True, exist_ok=True)
     _DATA.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     if verbose:
-        print(f"写入 {_DATA}：{len(equips)} 件装扮、{len(attrs)} 个属性名（源 {url}）")
+        print(f"写入 {_DATA}：{len(equips)} 件装扮、{len(attrs)} 个属性名")
     global _cache
     _cache = data
     return data
