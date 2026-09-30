@@ -10,6 +10,7 @@
 import asyncio
 import base64
 import html
+import json
 import logging
 import re
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth_qr import QRLogin
 from .mc_api import LoginSession
@@ -1694,12 +1695,27 @@ async def across_run(body: dict):
 # 仅收录已实证动作（见 travel_elf_auto.py 顶部注释 + REFERENCE.md 猫咪旅行段）。
 
 
+# ── 猫咪旅行辅助数据缓存（2026-09-29 性能优化）──
+# state 路由原本串行发 5 个上游请求（main/act=3/act=32/main 重复/act=12），每个都过
+# 1.2s 全局节流 → 点开要等 ~6s。优化：① collect_water_targets 复用已拉的 main（去重）；
+# ② 食物(act=3)/任务(act=32)/浇水名单(act=12) 加进程内 TTL 缓存 —— 它们变化频率低
+# （买食物/领任务/浇水后才变），state 核心的猫状态(main)仍每次实时拉。
+# 任一写动作（run/clover/harvest/water/tasks）完成后立即失效，宁多拉一次不显示旧值。
+_TRAVEL_AUX_TTL = 45.0
+_travel_aux_cache: dict = {"ts": 0.0, "food": None, "tasks": None}
+
+
+def _travel_aux_invalidate() -> None:
+    _travel_aux_cache["ts"] = 0.0
+
+
 @app.get("/api/travel/state")
 async def travel_state():
     """猫咪旅行只读状态：猫状态 + 免费次数 + 食物持有 + A级食物 + 每日任务。"""
     if err := _require_login():
         return err
     try:
+        import time as _time_mod
         st = await te.get_state(_session)
         if st is None:
             return {"ok": False, "message": "读取状态失败"}
@@ -1721,17 +1737,27 @@ async def travel_state():
                 "food_id": c.get("food_id"),
                 "food_num": c.get("food_num"),
             })
-        # 食物持有（act=3）+ A 级食物（静态配置解析）
+        # 食物持有（act=3）+ A 级食物（静态配置解析）—— TTL 缓存
+        aux = _travel_aux_cache
+        aux_ok = aux["ts"] > 0 and (_time_mod.monotonic() - aux["ts"]) < _TRAVEL_AUX_TTL
         try:
-            food_owned = await te.get_food_config(_session)
+            if aux_ok and aux["food"] is not None:
+                food_owned = aux["food"]
+            else:
+                food_owned = await te.get_food_config(_session)
+                aux["food"] = food_owned
         except Exception:  # noqa: BLE001
-            food_owned = {}
+            food_owned = aux["food"] or {}
         a_grade = te.resolve_a_grade_foods()
-        # 每日任务（act=32；task_bits = 已领取掩码）
+        # 每日任务（act=32；task_bits = 已领取掩码）—— TTL 缓存
         try:
-            info = await te.get_daily_tasks(_session)
+            if aux_ok and aux["tasks"] is not None:
+                info = aux["tasks"]
+            else:
+                info = await te.get_daily_tasks(_session)
+                aux["tasks"] = info
         except Exception:  # noqa: BLE001
-            info = {"tasks": [], "bits": 0}
+            info = aux["tasks"] or {"tasks": [], "bits": 0}
         bits = int(info.get("bits") or 0)
         task_rows = []
         for t in info.get("tasks") or []:
@@ -1752,14 +1778,12 @@ async def travel_state():
         #   剩余 = Σ max(0, 3 − 该猫已旅行次数)。⚠️ travel_cnt_limit=8 不是这个上限。
         fc = te.compute_free_counts(st)
         free_limit, free_used, free_left = fc["free_limit"], fc["free_used"], fc["free_left"]
-        # 可浇好友（act=12 只读筛选：已开通 + 已种三叶草未成熟 + 今日未浇）
-        try:
-            col = await te.collect_water_targets(_session)
-            water_open = col.get("opened")
-            water_targets = col.get("targets") or []
-            water_rows = col.get("all") or []
-        except Exception:  # noqa: BLE001
-            water_open, water_targets, water_rows = None, [], []
+        # 可浇好友名单：**不再随 state 拉**（2026-09-29 用户定调「好友分开、各拉各的，
+        # 不串行，上面不显示好友相关」）——act=12 名单走独立路由 /api/travel/friends
+        # （点「好友列表」按钮才拉），浇水动作路由内部自会实时筛。state 里只保留
+        # watered_today（来自 main 的 travel_watered_arr，零额外请求）。
+        if not aux_ok:
+            aux["ts"] = _time_mod.monotonic()
         return {"ok": True,
                 "free_cnt": st.get("free_cnt"),
                 "free_limit": free_limit,
@@ -1774,9 +1798,6 @@ async def travel_state():
                 "can_water_times": st.get("can_water_times"),
                 "watered_today": len(watered),
                 "watered_uins": [str(x.get("uin")) for x in watered],
-                "water_open": water_open,
-                "water_targets": water_targets,
-                "water_rows": water_rows,
                 "food_owned": food_owned,
                 "food_names": te.resolve_food_names(),
                 "a_grade_foods": a_grade,
@@ -1814,6 +1835,8 @@ async def travel_run(body: dict | None = None):
             do_water=bool(b.get("do_water", True)),
             do_tasks=bool(b.get("do_tasks", True)),
         )
+        if not b.get("dry_run"):
+            _travel_aux_invalidate()
         return {"ok": bool(out) and all(i.get("ok") for i in out),
                 "dry_run": bool(b.get("dry_run")), "items": out}
     except Exception as e:  # noqa: BLE001
@@ -1827,6 +1850,7 @@ async def travel_clover():
         return err
     try:
         r = await te.harvest_clover(_session)
+        _travel_aux_invalidate()
         return {"ok": r.get("code") == 0, "code": r.get("code"),
                 "clover_num": r.get("clover_num"),
                 "message": r.get("message") or r.get("desc") or ""}
@@ -1847,6 +1871,7 @@ async def travel_harvest(body: dict | None = None):
     try:
         eid = b.get("elf_id")
         items = await te.harvest_returned(_session, elf_id=int(eid) if eid else None)
+        _travel_aux_invalidate()
         return {"ok": all(i.get("ok") for i in items), "items": items}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
@@ -1901,6 +1926,8 @@ async def travel_water(body: dict | None = None):
                     "message": f"无可浇好友（已开通 {col.get('opened')} 个，今日已浇 "
                                f"{col.get('watered_today')} 个，其余未种三叶草/已成熟）"}
         r = await te.water_targets(_session, targets)
+        if r.get("ok_cnt"):
+            _travel_aux_invalidate()
         return {"ok": (r.get("ok_cnt") or 0) > 0, "opened": col.get("opened"),
                 "targets": len(targets), "tried": r.get("tried"),
                 "ok_cnt": r.get("ok_cnt"), "fail": r.get("fail"),
@@ -1929,6 +1956,8 @@ async def travel_tasks():
                 claimed.append({"index": idx, "ok": r.get("code") == 0,
                                 "code": r.get("code"),
                                 "message": r.get("message") or r.get("desc") or ""})
+        if claimed:
+            _travel_aux_invalidate()
         return {"ok": True, "claimed": claimed}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
@@ -2414,7 +2443,7 @@ async def match_xiyou_task(req: dict | None = None):
 
 @app.post("/api/match/xiyou-run")
 async def match_xiyou_run(req: dict | None = None):
-    """西游记一键：出发 → 收满 24 个收获点（卡箱满先卖重复卡）→ 领任务奖。
+    """西游记一键：收满收获点（卡箱满先跨箱卖重复卡）→ 出发新 24h 探索 → 领任务奖。
 
     每一步都看服务端返回，失败即停并写明原因；结果落盘 data/xiyou_run.json。
     """
@@ -2427,7 +2456,8 @@ async def match_xiyou_run(req: dict | None = None):
                                   do_start=bool(req.get("start", True)),
                                   do_get=bool(req.get("get", True)),
                                   do_task=bool(req.get("task", True)),
-                                  levelid=int(lv) if lv else None)
+                                  levelid=int(lv) if lv else None,
+                                  feed=bool(req.get("feed", True)))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
 
@@ -2509,6 +2539,11 @@ async def match_pvp_extra():
         return err
     st = await mt.pvp_state(_session)
     store = await mt.pvp_store(_session)
+    # 竞技主题（pvp act=1 week_theme）：每周三更新、持续一周。复用后端 _fmt_week_theme
+    # 转中文属性名，避免前端再维护一份 id→名字映射（前端铁律：界面文案禁止代码标识）。
+    wd = ((st.get("data") or {}).get("week_theme")) or []
+    if isinstance(st, dict):
+        st.setdefault("data", {})["week_theme_text"] = mt._fmt_week_theme(wd) if wd else ""
     return {"ok": True, "state": st, "store": store}
 
 
@@ -2602,13 +2637,18 @@ async def home_feed(req: dict = None):
 
 @app.post("/api/home/arena-auto")
 async def home_arena_auto():
-    """竞技比赛自动：挑低战力打（≤4）+ 免费刷对手 + 领任务奖励。消耗挑战次数。"""
+    """竞技比赛自动（SSE 流式）：挑低战力打（≤4）+ 免费刷对手 + 领任务奖励。消耗挑战次数。"""
     if err := _require_login():
         return err
-    try:
-        return await ch.arena_auto(_session)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"异常：{e}"}
+
+    async def gen():
+        try:
+            async for step in ch.arena_auto(_session):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/home/gold-buy")
@@ -2650,18 +2690,25 @@ async def home_forge(equip_id: int = 0):
 
 @app.post("/api/home/all")
 async def home_all():
-    """一键全部：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 兑红宝石 → 竞技自动，按正确顺序跑一遍。"""
+    """一键全部（SSE 流式）：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 兑红宝石 → 竞技自动。
+    每完成一步就推一行，前端实时显示，不再等整段跑完才出日志。"""
     if err := _require_login():
         return err
-    try:
-        return await ch.run_all(_session)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"异常：{e}"}
+
+    async def gen():
+        try:
+            async for step in ch.run_all(_session):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # mode-props 的取数映射（mode:来源 -> 协程），由 main 注入 match.mode_props
 _MODE_PROP_FETCH: dict = {
     "comp:score": mt.comp_score, "comp:hero": mt.comp_hero,
+    "comp:dress": mt.dress_info,   # act=6 衣橱：顶级装备属性的可读化数据源
     "pvp:state": mt.pvp_state, "pvp:store": mt.pvp_store,
     "union:task": mt.union_task, "union:chip": mt.union_chip,
     "union:shop": mt.union_shop, "union:enemies": mt.union_enemies,
@@ -2861,50 +2908,76 @@ async def match_pvp_flush():
     return await mt.pvp_flush(_session)
 
 
-@app.post("/api/match/union-fight")
-async def match_union_fight(req: dict | None = None):
-    """出兵（union act=21 {optype, uptype}）。非游戏内公会战挑战（3/3 未消耗实证）。"""
+@app.get("/api/match/union-quota")
+async def match_union_quota():
+    """工会每日限次本地计数（摇水果 3/出战 3/金币兑红包石 1）。只读落盘文件，不发任何游戏请求。"""
+    return {"ok": True, "quota": mt._union_quota_today(),
+            "shake_limit": mt.SHAKE_DAILY_LIMIT, "battle_limit": mt.BATTLE_DAILY_LIMIT,
+            "exchange_limit": mt.EXCHANGE_DAILY_LIMIT}
+
+
+@app.post("/api/match/union-exchange")
+async def match_union_exchange():
+    """金币兑换红包石（union act=21）。每日 1 次（周 7 次周一重置）；当日已兑本地拦截不发请求。"""
+    if err := _require_login():
+        return err
+    return await mt.union_exchange_redstone(_session)
+
+
+@app.post("/api/match/union-shake")
+async def match_union_shake():
+    """摇水果（union act=17，每日 3 次）。本地硬闸 + 服务端限额双保险，超限不发请求。"""
+    if err := _require_login():
+        return err
+    return await mt.union_shake_fruit(_session)
+
+
+@app.post("/api/match/union-battle")
+async def match_union_battle(req: dict | None = None):
+    """公会战出战（union act=23 {cats,eqs}）—— 消耗 3/3 次数，带猫出战。
+
+    阵容从 union_lineup(act=39) 实时读，前端不必传 cats/eqs。
+    """
     if err := _require_login():
         return err
     req = req or {}
-    return await mt.union_fight(_session, req.get("optype", 4), req.get("uptype", 1))
+    return await mt.union_battle(_session, feed=bool(req.get("feed", True)))
 
 
-@app.post("/api/match/union-claim")
-async def match_union_claim():
-    """工会领奖（union act=17）。零消耗，可重复调用（没有可领奖时会如实失败）。"""
+@app.post("/api/match/union-redpacket")
+async def match_union_redpacket():
+    """抢红包（act=19 读列表 + act=20 {id:N} 领取）。只领自己没领过的，已领自动跳过。"""
     if err := _require_login():
         return err
-    return await mt.union_claim(_session)
+    return await mt.union_redpacket_grab(_session)
 
 
-@app.post("/api/match/union-zan")
-async def match_union_zan(req: dict | None = None):
-    """工会点赞（union act=14 {uins:[...]}）。零消耗，逐个发。"""
+@app.post("/api/match/union-info-query")
+async def match_union_info_query(req: dict | None = None):
+    """按 uin 批量查公会归属（union act=14 {uins:[...]}）—— 只读查询，不是点赞。"""
     if err := _require_login():
         return err
     req = req or {}
     uins = req.get("uins") or []
     if not uins:
         return {"ok": False, "message": "缺少 uins"}
-    return await mt.union_zan(_session, uins)
+    return await mt.union_unioninfo_query(_session, uins)
 
 
 @app.post("/api/match/union-all")
 async def match_union_all(req: dict | None = None):
-    """「一键工会」：工会领奖(act=17) → 全员点赞(act=14) → 公会战出兵(act=21)。
+    """「一键工会」：摇水果(17，每日3次) → 抢红包(19+20) → 公会战出战(23，消耗挑战次数)。
 
-    出兵会消耗出兵次数（每日上限未证实，只发一次）。步骤落盘 data/union_run.json，
-    以后用户报「工会没成功」直接查这一份。
+    act=21（旧误标摇水果）已全线撤下。抢红包只领自己没领过的。步骤落盘 data/union_run.json。
     """
     if err := _require_login():
         return err
     req = req or {}
     return await mt.run_union(_session,
-                              do_zan=bool(req.get("zan", True)),
-                              do_fight=bool(req.get("fight", True)),
-                              zan_all=bool(req.get("zan_all", True)),
-                              feed=bool(req.get("feed", False)))
+                              do_shake=bool(req.get("shake", True)),
+                              do_redpacket=bool(req.get("redpacket", True)),
+                              feed=bool(req.get("feed", True)),
+                              do_battle=bool(req.get("battle", True)))
 
 
 @app.post("/api/match/sanguo-run")

@@ -742,6 +742,9 @@
     text-overflow:ellipsis;white-space:nowrap}
   .mp-body .rv .v{flex:1 1 auto;word-break:break-all}
   .pay-meta{flex:0 0 auto;color:var(--muted);font-size:12px;white-space:nowrap;margin-left:10px}
+/* 骨架屏 shimmer（猫咪旅行首次加载占位，2026-09-29） */
+.skel{height:11px;border-radius:4px;display:inline-block;vertical-align:middle;background:linear-gradient(90deg,#e3e8ee 25%,#f2f5f9 45%,#e3e8ee 65%);background-size:200% 100%;animation:skel_shimmer 1.2s linear infinite}
+@keyframes skel_shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 </style>
 </head>
 <body>
@@ -1392,7 +1395,8 @@
               </div>
               <div class="lst mode-card">
                 <div class="lst-head"><span class="t">竞技比赛</span></div>
-                <div class="state-box"><span id="home-arena-st" style="grid-column:1/-1">读取中…</span></div>
+                <div class="state-box"><span id="home-arena-st" style="grid-column:1/-1">读取中…</span>
+                  <span id="home-arena-theme" style="grid-column:1/-1;color:var(--accent);font-weight:600"></span></div>
               </div>
               <div class="lst mode-card">
                 <div class="lst-head"><span class="t">金币福利</span></div>
@@ -1478,10 +1482,9 @@
               <button id="match-gold" class="btn sm">金卡限购</button>
             </div>
             <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:0 12px 8px">
-              <button id="union-all" class="btn sm ok" data-idle="一键工会">一键工会</button>
-              <button id="union-claim" class="btn sm" data-idle="领奖">领奖</button>
-              <button id="union-zan" class="btn sm" data-idle="全员点赞">全员点赞</button>
-              <span class="hint" style="font-size:12px">出兵按钮在下方「公会战」块里（与上面按钮同为一次出兵，不再重复放一个）。</span>
+              <button id="union-all" class="btn sm ok" data-idle="一键工会">一键工会（摇水果+抢红包+出战）</button>
+              <button id="union-shake" class="btn sm" data-idle="摇水果">摇水果（先重置再摇，每日 3 次）</button>
+              <span class="hint" style="font-size:12px">游戏里没有「全员点赞」「出兵」这两个操作（已纠正）。</span>
             </div>
             <div class="lib-body dg-cols">
               <div class="dg-col" style="flex:1">
@@ -1497,7 +1500,9 @@
                     <div class="state-box"><span class="spinner"></span>正在读取公会战…</div>
                   </div>
                   <div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">
-                    <button class="btn sm danger" data-act="mm-fight-union" data-idle="一键出兵">一键出兵（非游戏内挑战 3/3）</button>
+                    <button class="btn sm" data-act="mm-fight-union" data-idle="摇水果">摇水果（先重置再摇，每日 3 次）</button>
+                    <span class="cnt" id="match-union-shakecnt"></span>
+                    <button class="btn sm ok" id="union-challenge" data-idle="发起挑战">公会战出战（真打一场，耗 1 次挑战机会）</button>
                     <span class="cnt" id="match-gvg-fightcnt"></span>
                   </div>
                 </div>
@@ -1627,7 +1632,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20260929a"></script>
+<script src="/app.js?v=20260930c"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

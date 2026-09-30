@@ -32,6 +32,7 @@ from .prop_dict import summarize_reward as _reward_text
 import time as _time
 import json as _json
 from pathlib import Path as _Path
+import asyncio
 
 # 「一键全部 / 竞技自动」的步骤落盘：用户报「某某没成功」时先看这份，
 # 不必再让用户翻浏览器日志。data/ 已在 .gitignore 内。
@@ -354,37 +355,72 @@ async def feed_one(session, elf_id: int, candy_type: int) -> dict:
     return {"ok": True, "mood": d.get("cat_mood"), "elf_id": d.get("elfid")}
 
 
-async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
-    """竞技比赛自动：挑战战力低于自己的对手（≤surplus 次），不够就免费刷对手，
-    打完领任务奖励（act=15 id=1..4）。不换装（pvp act=8 用猫当前穿着，HAR 实证）。
+# 竞技一键穿装（持久化，与每日比赛不共享）：act=27，无参数，服务端自动给竞技猫穿
+# 最优装并回写保存。HAR 实证(bisai2)：act=1 开对手列表 → act=27 一键穿装 → act=3 设阵容
+# → act=8 出战。竞技穿装一旦设置就一直保存（capture 里开局猫已穿好、全程 equip_arr 不变），
+# 所以 arena_auto 只在开局调用一次，不必每场重穿。每日比赛是 act=4 ids 每场临时算、不持久，
+# 两套机制互不相干，严禁把每日比赛的 best_equip/act=4 复用到竞技。
+DRESS_ACT = 27   # 竞技「一键穿装」：服务端自动算最优装、持久保存（bisai2 抓包确认）
 
-    feed=True 时**先**把 4 只猫喂到心情 80 再去打 —— 用户明确要求「4 个猫的玩耍要在
-    竞技比赛之前进行，以保证心情在 80 以上」，顺序由代码保证，不靠用户手动点两下。
+async def dress_cat(session) -> dict:
+    """竞技开局一键穿装：调用 act=27（无参数），服务端自动给竞技猫穿最优装并持久保存。
+
+    不传 catId/ids —— act=27 本身是无参数的全局一键穿装，与每日比赛 act=4 ids 机制无关。
+    调用失败不中止竞技（用当前穿着继续），只告警。
+    """
+    r = await _act(session, EP_TRAVEL_PVP, DRESS_ACT)
+    d = r.get("data") or {}
+    if not r.get("ok") or d.get("code") not in (0, None):
+        return {"ok": False, "message": d.get("desc") or r.get("message") or "穿装失败"}
+    return {"ok": True, "message": "竞技一键穿装完成（服务端自动穿最优装，已持久保存）"}
+
+
+async def arena_auto(session, max_flush: int = 4, feed: bool = True):
+    """竞技比赛自动（生成器，逐步 yield 以便前端实时显示）。
+    开局一键穿装(act=27，持久化、只做一次) → 每场走完整流程：重读对手/自己战力 +
+    比战力挑最低 + 没有更低才刷新(act=7) + 出战(act=8)。
+    不并发：每场前 3s 冷却（从源头避开服务端限流），且每场都重新读对手/自己战力。
+    竞技穿装与每日比赛(act=4 ids)不共享、持久保存，故只开局穿一次。
     """
     uin = _plain_uin(session)
     steps = []
+    def emit(d):
+        steps.append(d)
+        return d
+
+    # 连发冷却 / 限流重试（09-29 修复）：自动连发挑战会被服务端限流(system busy)，
+    # 导致第 2 场即中断、整轮只打 1 场。HAR 手动连点 4 场全成功，差异仅在间隔。
+    FIGHT_COOLDOWN = 3.0   # 每场挑战前冷却（秒），从源头避免触发限流
+    FIGHT_RETRY_WAIT = 5.0  # system busy 后重试等待（秒）
+    FIGHT_MAX_TRY = 4      # 单场最多尝试次数（含首试）
 
     if feed:
         f = await feed_smart(session)
         fed_n = len([s for s in f.get("steps") or [] if s.get("candy")])
-        steps.append({"act": "feed", "ok": f.get("ok", False),
-                      "msg": f"先喂猫到 80（喂了 {fed_n} 颗）"})
+        yield emit({"act": "feed", "ok": f.get("ok", False),
+                    "msg": f"先喂猫到 80（喂了 {fed_n} 颗）"})
         if not f.get("ok"):
-            return {"ok": False, "steps": steps,
-                    "message": f.get("message") or "喂猫失败，已中止竞技"}
+            yield emit({"act": "arena:error", "ok": False,
+                        "msg": f.get("message") or "喂猫失败，已中止竞技"})
+            return
 
-    st = await _act(session, EP_TRAVEL_PVP, 1)
-    dp = st.get("data") or {}
-    surplus = int(dp.get("surplus") or 0)
-    flush_left = max_flush - int(dp.get("flush_num") or 0)
-    my_ce = next((e.get("ce") for e in dp.get("enemy_list") or []
-                  if str(e.get("uin")) == uin), None)
-    # 开跑前的原始配额整份留底 —— 以后查「今天到底打了几次/还剩几次」看这一份，
-    # 别再靠 surplus 一个字段猜（surplus 是剩余量，不是日上限）
-    quota_before = {"surplus": dp.get("surplus"), "free_pvp_num": dp.get("free_pvp_num"),
-                    "pvp_num": dp.get("pvp_num"), "flush_num": dp.get("flush_num"),
-                    "battle_arr": dp.get("battle_arr"), "my_ce": my_ce,
-                    "score": dp.get("score")}
+    # 开门配额
+    st0 = await _act(session, EP_TRAVEL_PVP, 1)
+    dp0 = st0.get("data") or {}
+    my_ce0 = next((e.get("ce") for e in dp0.get("enemy_list") or []
+                   if str(e.get("uin")) == uin), None)
+    quota_before = {"surplus": dp0.get("surplus"), "free_pvp_num": dp0.get("free_pvp_num"),
+                    "pvp_num": dp0.get("pvp_num"), "flush_num": dp0.get("flush_num"),
+                    "battle_arr": dp0.get("battle_arr"), "my_ce": my_ce0,
+                    "score": dp0.get("score")}
+    yield emit({"act": "arena:state", "ok": True,
+                "msg": f"开局可打 {dp0.get('surplus')} 场，我的战力 {my_ce0}"})
+
+    # 竞技一键穿装（持久化，只做一次）：act=27 服务端自动给竞技猫穿最优装并保存，
+    # 与每日比赛 act=4 ids（每场临时、不持久）不共享。之后所有场次都用这套保存的装。
+    dres = await dress_cat(session)
+    yield emit({"act": "arena:dress", "ok": dres.get("ok", False),
+                "msg": dres.get("message") or "穿装"})
 
     def targets(lst, my):
         if my is None:
@@ -392,54 +428,115 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
         return [e for e in lst or [] if str(e.get("uin")) != str(uin)
                 and e.get("ce") is not None and e.get("ce") < my]
 
-    enemies = dp.get("enemy_list") or []
+    free_seen = int(dp0.get("free_pvp_num") or 0)
+    flush_left = max_flush - int(dp0.get("flush_num") or 0)
     wins, fights = 0, 0
-    hard_cap = max(surplus, 0) + 5   # 防跑飞：正常打满就停，多出的 5 次是给异常场景兜底
-    while surplus > 0:
+    busy_total = 0
+    stop_all = False
+    BUSY_MAX = 3                    # 整轮最多容忍的 busy 次数：防 7 对手×4 重试刷一墙失败
+    loop_guard, LOOP_MAX = 0, 40    # 总轮次硬上限：防「全员持续限流只跳过不扣次数」空转
+    live = int(dp0.get("surplus") or 0)
+
+    while True:
+        loop_guard += 1
+        if loop_guard > LOOP_MAX:
+            yield emit({"act": "arena:limit", "ok": True,
+                        "msg": "已达安全轮次上限，停止（疑似服务端持续限流）"})
+            break
+        # 每场前：看对手 + 看自己战力（实时重读，不是开局看一次就打 4 场）
+        st = await _act(session, EP_TRAVEL_PVP, 1)
+        dp = st.get("data") or {}
+        live = int(dp.get("surplus") or 0)
+        if live <= 0:
+            yield emit({"act": "arena:end", "ok": True,
+                        "msg": f"今日竞技次数已用完（已打 {fights} 场）"})
+            break
+        my_ce = next((e.get("ce") for e in dp.get("enemy_list") or []
+                      if str(e.get("uin")) == uin), my_ce0)
+        enemies = dp.get("enemy_list") or []
         cand = sorted(targets(enemies, my_ce), key=lambda e: -e["ce"])
         if not cand:
             if flush_left <= 0:
-                steps.append({"act": "flush", "ok": False, "msg": "没有更低战力对手，免费刷新已用完"})
+                yield emit({"act": "flush", "ok": False,
+                            "msg": "没有更低战力对手，免费刷新已用完，结束"})
                 break
             fr = await _act(session, EP_TRAVEL_PVP, 7)
             fd = fr.get("data") or {}
             if not fr.get("ok") or fd.get("code") not in (0, None):
-                steps.append({"act": "flush", "ok": False,
-                              "msg": fd.get("desc") or fr.get("message") or "刷新失败"})
+                yield emit({"act": "flush", "ok": False,
+                            "msg": fd.get("desc") or fr.get("message") or "刷新失败"})
                 break
             flush_left -= 1
             enemies = fd.get("enemy_list") or []
-            steps.append({"act": "flush", "ok": True,
-                          "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(enemies)} 个"})
+            yield emit({"act": "flush", "ok": True,
+                        "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(enemies)} 个"})
             continue
         foe = cand[0]
-        r = await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=str(foe["uin"]))
-        d = r.get("data") or {}
-        if not r.get("ok") or d.get("code") not in (0, None):
-            steps.append({"act": "fight", "ok": False, "foe": foe.get("name"),
-                          "msg": d.get("desc") or r.get("message") or "挑战失败"})
+        # 竞技穿装已在开局做一次并持久保存，这里无需每场重穿（与每日比赛每场临时算不同）。
+        # 每场挑战前短冷却：连发会触发服务端限流（system busy），
+        # 09-29 实测 auto 跑第 2 场必 busy 而中断（HAR 手动连点 4 场全成功，差异是间隔）。
+        await asyncio.sleep(FIGHT_COOLDOWN)
+        foe_uin = str(foe["uin"])
+        fight_ok = False
+        for _try in range(1, FIGHT_MAX_TRY + 1):
+            r = await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=foe_uin)
+            d = r.get("data") or {}
+            if r.get("ok") and d.get("code") in (0, None):
+                fight_ok = True
+                break
+            desc = str(d.get("desc") or r.get("message") or "挑战失败")
+            if "system busy" not in desc.lower():
+                yield emit({"act": "fight", "ok": False, "foe": foe.get("name"), "msg": desc})
+                break
+            # busy ≠ 纯限流（铁律：system busy 常掩盖「次数/状态不允许」）。先回读
+            # 配额再决定下一步，绝不盲目重试：次数被扣=战斗可能已发生；次数归零=结束。
+            busy_total += 1
+            q = await _act(session, EP_TRAVEL_PVP, 1)
+            qd = q.get("data") or {}
+            live_surplus = int(qd.get("surplus") or 0)
+            free_now = int(qd.get("free_pvp_num") or 0)
+            if free_now > free_seen:
+                # busy 但次数被扣：战斗实际已发生（胜负未知，响应里没有战报）
+                fights += 1
+                free_seen = free_now
+                yield emit({"act": "fight", "ok": True, "foe": foe.get("name"), "win": None,
+                            "msg": f"返回 busy 但次数已扣（已打 {free_now} 场），战斗实际已发生"
+                                   f"（胜负以游戏内战绩为准）"})
+            else:
+                yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
+                            "msg": f"system busy（未扣次数，服务端剩 {live_surplus} 次）"})
+            if live_surplus <= 0:
+                stop_all = True
+                yield emit({"act": "arena:limit", "ok": True,
+                            "msg": "服务端剩余次数 0，今日竞技结束（busy=次数不允许，非限流）"})
+                break
+            if busy_total >= BUSY_MAX:
+                stop_all = True
+                yield emit({"act": "arena:limit", "ok": True,
+                            "msg": f"busy 已 {busy_total} 次，停止挑战（服务端剩 {live_surplus} 次，"
+                                   f"稍后可再跑）"})
+                break
+            if _try < FIGHT_MAX_TRY:
+                await asyncio.sleep(FIGHT_RETRY_WAIT)
+                continue
+            yield emit({"act": "fight", "ok": False, "foe": foe.get("name"), "msg": desc})
             break
+        if stop_all:
+            break
+        if not fight_ok:
+            # 该对手重试耗尽（未扣次数）→ 跳过它打其余对手，不因一个对手卡住就整轮停。
+            enemies = [e for e in enemies if str(e.get("uin")) != str(foe["uin"])]
+            yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
+                        "msg": f"对手「{foe.get('name')}」持续 busy，跳过，转打其余对手"})
+            continue
+
         fights += 1
         ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
         win = ba.get("iswin")
         wins += 1 if win == 1 else 0
-        steps.append({"act": "fight", "ok": True, "foe": foe.get("name"),
-                      "ce": foe.get("ce"), "win": win,
-                      "score": ba.get("pvp_score"), "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）"})
-        enemies = [e for e in enemies if str(e.get("uin")) != str(foe["uin"])]
-        # 剩余次数**以服务端为准**：每打一场重读 act=1 的 surplus，服务端说还有就继续打。
-        # 原来只在本地 `surplus -= 1`，一旦本地与服务端不同步就会漏打（或多打）。
-        # hard_cap 只在服务端异常（一直说有次数）时兜底，正常走不到。
-        re_st = await _act(session, EP_TRAVEL_PVP, 1)
-        live = int((re_st.get("data") or {}).get("surplus") or 0)
-        if live > 0:
-            surplus = live
-            hard_cap -= 1
-            if hard_cap <= 0:
-                steps.append({"act": "limit", "ok": True, "msg": "场次异常，已达安全上限"})
-                break
-        else:
-            surplus = 0
+        yield emit({"act": "fight", "ok": True, "foe": foe.get("name"),
+                    "ce": foe.get("ce"), "win": win,
+                    "score": ba.get("pvp_score"), "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）"})
 
     # 只有真正打了才领任务奖励（HAR 实证：都是打完连着领 4 个）；一次没打就别空领
     claims = []
@@ -449,9 +546,9 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
             d = r.get("data") or {}
             if r.get("ok") and d.get("code") in (0, None) and d.get("content"):
                 claims.append({"id": cid, "content": d.get("content")})
-        steps.append({"act": "claim", "ok": True, "msg": f"领任务奖励 {len(claims)} 项"})
+        yield emit({"act": "arena:claim", "ok": True, "msg": f"领任务奖励 {len(claims)} 项"})
     else:
-        steps.append({"act": "claim", "ok": False, "msg": "今天没打挑战，跳过领奖"})
+        yield emit({"act": "arena:claim", "ok": False, "msg": "今天没打挑战，跳过领奖"})
 
     # 打完再读一次原始配额，和用户/游戏里的显示对照
     tail = await _act(session, EP_TRAVEL_PVP, 1)
@@ -459,64 +556,63 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True) -> dict:
     quota_after = {"surplus": td.get("surplus"), "free_pvp_num": td.get("free_pvp_num"),
                    "pvp_num": td.get("pvp_num"), "flush_num": td.get("flush_num"),
                    "battle_arr": td.get("battle_arr"), "score": td.get("score")}
-    fights_today = (quota_after.get("free_pvp_num") or 0) - (quota_before.get("free_pvp_num") or 0) or None
     out = {"ok": True, "steps": steps, "fights": fights, "wins": wins,
-           "claims": claims, "surplus_left": surplus,
-           "surplus_before": quota_before.get("surplus"),
+           "claims": claims, "surplus_left": live,
            "quota_before": quota_before, "quota_after": quota_after,
-           "fights_today": fights_today}   # 今日总免费场次 = free_pvp_num 差值（口径未定时可为 None）
+           "fights_today": (quota_after.get("free_pvp_num") or 0)
+                           - (quota_before.get("free_pvp_num") or 0) or None}
     _save_run("arena_auto", out)
-    return out
+    yield {"act": "arena:done", "ok": True, "fights": fights, "wins": wins,
+           "surplus_left": live, "claims": claims}
 
 
-async def run_all(session) -> dict:
+async def run_all(session):
     """「一键全部」：按正确顺序自动跑完每日玩法 —— 用户要的主入口（2026-09-26）。
 
-    顺序（用户明确要求）：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 → 竞技自动。
-    第 3 步把猫喂饱，第 5 步的 arena_auto 就 feed=False，避免重复喂同一批猫。
+    顺序：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 → 竞技自动。
+    改为生成器：每完成一步就 yield，配合 /api/home/all 的 SSE 让前端实时显示。
     """
     steps = []
+    def emit(d):
+        steps.append(d)
+        return d
 
     # 1) 两个榜各点一次赞（每天各 1 次，已点过自动跳过）
     for tg, label in (("match", "每日比赛榜"), ("arena", "竞技比赛榜")):
         r = await like(session, tg)
-        steps.append({"act": "like", "ok": bool(r.get("ok")), "target": tg,
-                      "msg": f"{label} {'已点 ✓' if r.get('ok') else (r.get('message') or '未点')}"})
+        yield emit({"act": "like", "ok": bool(r.get("ok")), "target": tg,
+                    "msg": f"{label} {'已点 ✓' if r.get('ok') else (r.get('message') or '未点')}"})
 
     # 2) 扭蛋机免费抽一次
     r = await gacha_free(session)
-    steps.append({"act": "gacha", "ok": bool(r.get("ok")),
-                  "msg": (f"扭蛋：{r['content']}" if r.get("content") else "")
-                         or r.get("message") or "扭蛋"})
+    yield emit({"act": "gacha", "ok": bool(r.get("ok")),
+                "msg": (f"扭蛋：{r['content']}" if r.get("content") else "")
+                       or r.get("message") or "扭蛋"})
 
     # 3) 喂猫到 80；糖不够就先用积分换大糖果再喂
     f = await feed_smart(session)
     if not f.get("ok") and "不足" in (f.get("message") or ""):
         c = await exchange_candy(session, 1)
         if c.get("ok"):
-            steps.append({"act": "exchange", "ok": True, "msg": "糖果不足，先用 6 积分换 1 颗大糖果"})
+            yield emit({"act": "exchange", "ok": True, "msg": "糖果不足，先用 6 积分换 1 颗大糖果"})
             f = await feed_smart(session)
     n_candy = len([s for s in f.get("steps") or [] if s.get("candy")])
-    steps.append({"act": "feed", "ok": bool(f.get("ok")),
-                  "msg": f.get("message") or f"喂猫到 80（共 {n_candy} 颗糖）"})
+    yield emit({"act": "feed", "ok": bool(f.get("ok")),
+                "msg": f.get("message") or f"喂猫到 80（共 {n_candy} 颗糖）"})
 
     # 4) 金币福利 · 兑红宝石（到上限自动跳过，不会白白浪费次数）
     g = await gold_buy_ruby(session)
-    steps.append({"act": "gold", "ok": bool(g.get("ok")), "skipped": bool(g.get("skipped")),
-                  "msg": g.get("message") or f"兑红宝石　→ {_reward_text(g.get('content'))}"})
+    yield emit({"act": "gold", "ok": bool(g.get("ok")), "skipped": bool(g.get("skipped")),
+                "msg": g.get("message") or f"兑红宝石　→ {_reward_text(g.get('content'))}"})
 
     # 5) 竞技自动（玩耍已在第 3 步做完，这里不再重复喂）
-    a = await arena_auto(session, feed=False)
-    for s in a.get("steps") or []:
-        steps.append({"act": "arena:" + str(s.get("act")), "ok": s.get("ok"), "msg": s.get("msg")})
+    async for s in arena_auto(session, feed=False):
+        steps.append(s)
+        yield s
 
     # 6) 写动作仍没定位的玩法：如实跳过（不猜参数、不假装有按钮）
-    steps.append({"act": "skip-group", "ok": True, "skipped": True,
-                  "msg": "以下写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
+    yield emit({"act": "skip-group", "ok": True, "skipped": True,
+                "msg": "以下写动作未定位，本次跳过：" + "；".join(s["what"] for s in ALL_SKIPS)})
 
-    out = {"ok": True, "steps": steps, "skipped": ALL_SKIPS, "gold": g,
-           "fights": a.get("fights"), "wins": a.get("wins"), "claims": a.get("claims"),
-           "surplus_left": a.get("surplus_left"),
-           "fights_today": a.get("fights_today"), "quota_before": a.get("quota_before")}
-    _save_run("run_all", out)
-    return out
+    _save_run("run_all", {"ok": True, "steps": steps, "skipped": ALL_SKIPS})
+    yield {"act": "__done__", "ok": True}
