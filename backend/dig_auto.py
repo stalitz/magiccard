@@ -662,12 +662,21 @@ async def jd_collect(session) -> dict:
 collect_machines = jd_collect  # 兼容旧名字
 
 
-async def jd_auto(session, stone_order=(0, 1, 2)) -> dict:
-    """鉴定机一轮：先收到期的，再给每个空槽按 stone_order 依次投石头。"""
+async def jd_auto(session, stone_order=(0, 1, 2), submit_relics: bool = True) -> dict:
+    """鉴定机一轮：先收到期的，再自动上交文物（act=10），最后给每个空槽按 stone_order 投石。
+
+    submit_relics=True（默认）：收完鉴定产出立刻把文物（含仓库里本就有的）一键上交，
+    与「一键上交全部」语义一致 —— 否则文物只收不出、永远堆在仓库
+    （2026-09-29 用户反馈「自动一轮不会自动上交文物」）。
+    ⚠️ 上交走 relic_submit_all：对无库存/不存在的 id 是**探测型**（不扣次数），零副作用。
+    """
     c = await jd_collect(session)
+    # 收完立刻交文物：本轮收出的 + 仓库里之前没交的，一并清掉
+    sub = await relic_submit_all(session) if submit_relics else None
     st = await get_state(session)
     if st is None:
-        return {"ok": False, "text": "读状态失败"}
+        tail = f"；上交文物 {sub['total']} 件" if (sub and sub.get("total")) else ""
+        return {"ok": False, "text": "读状态失败（已收、已交）" + tail}
     started = []
     for m in st.get("jd") or []:
         if int(m.get("lv") or 0) <= 0:
@@ -681,11 +690,21 @@ async def jd_auto(session, stone_order=(0, 1, 2)) -> dict:
                 break
     nstart = len([x for x in started if x["ok"]])
     got = c.get("count") or 0
-    return {
+    parts = []
+    if got:
+        parts.append(f"收 {got} 槽：" + c["text"].split("：", 1)[-1])
+    if sub and sub.get("total"):
+        parts.append(f"上交文物 {sub['total']} 件")
+    parts.append(f"投石 {nstart} 次")
+    out = {
         "ok": True, "collected": got, "started": nstart,
+        "submitted": (sub or {}).get("total", 0) if sub else 0,
         "items": (c.get("items") or []) + started,
-        "text": (f"收 {got} 槽" + (f"：{c['text'].split('：', 1)[-1]}" if got else "") + f"；投石 {nstart} 次"),
+        "text": "；".join(parts),
     }
+    if sub:
+        out["relic_submit"] = sub
+    return out
 
 
 # ───────────────────────── 自动挖 ─────────────────────────
