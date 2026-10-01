@@ -2341,6 +2341,20 @@ async def match_explore(want_task: int = 0):
 
 # ---- 西游记探索（2026-09-28 xiyou.har 实证的写操作，与三国是两套独立玩法）----
 
+@app.post("/api/match/refresh-card-lib")
+async def match_refresh_card_lib():
+    """刷新卡库：重新拉取官方 card_info_v3.js 重建 data/card_lib.json（公开数据，无需登录）。
+
+    本地卡库快照自 2026-09-07 起未更新，新套/新卡（如 26188「饭否」）不会进库，
+    导致炼卡/卡箱/礼物/卡库查询缺数据。此接口纯拉公开静态数据，不消耗任何游戏次数。
+    """
+    try:
+        from .card_lib_refresh import refresh_card_lib
+        return await refresh_card_lib()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"刷新卡库失败：{e}"}
+
+
 @app.get("/api/match/xiyou")
 async def match_xiyou(want_task: int = 1):
     """西游记探索总览（只读）：当前大关 / 探索倒计时 / 三个卡箱 / 重复卡 / 缺哪几张。

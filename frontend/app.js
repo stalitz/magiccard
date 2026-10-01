@@ -365,6 +365,7 @@ function switchPane(pane) {
   $("pane-match").classList.toggle("hidden", pane !== "match");
   const inOverview = pane === "overview";
   $("refresh-btn").classList.toggle("hidden", !inOverview);
+  $("refresh-card-btn").classList.toggle("hidden", !inOverview);
   $("auto-refresh").classList.toggle("hidden", !inOverview);
   if (pane === "overview") { ovLoadProps(); initLotteryOnce(); }
   if (pane === "lib") initLibOnce();
@@ -1333,6 +1334,27 @@ async function loadState() {
   }
 }
 $("refresh-btn").onclick = loadState;
+$("refresh-card-btn").onclick = async () => {
+  const btn = $("refresh-card-btn");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  log("正在刷新卡库（拉取官方最新卡列表）…", "info");
+  try {
+    const r = await fetch("/api/match/refresh-card-lib", { method: "POST" }).then(x => x.json());
+    if (r.ok) {
+      const added = (r.added_cards || []).length;
+      const addedT = (r.added_themes || []).length;
+      log(`卡库已刷新：共 ${r.total_cards} 张卡 / ${r.total_themes} 套；本次新增 ${added} 张卡、${addedT} 套`, "ok");
+      if (added) log(`新增卡 id：${r.added_cards.slice(0, 30).join(", ")}${added > 30 ? "…" : ""}`, "ok");
+    } else {
+      log("刷新卡库失败：" + (r.message || "未知错误"), "err");
+    }
+  } catch (e) {
+    log("刷新卡库异常：" + e, "err");
+  } finally {
+    btn.disabled = false;
+  }
+};
 $("auto-refresh").onchange = (e) => {
   if (stateTimer) { clearInterval(stateTimer); stateTimer = null; }
   if (e.target.checked) stateTimer = setInterval(loadState, 60000);

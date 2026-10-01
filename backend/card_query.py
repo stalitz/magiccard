@@ -305,8 +305,14 @@ def query_cards(price: int = 0, q: str = "", star: int = 0, flash: int = -1,
         cid = int(c[0])
         if price and int(c[3]) != price:
             continue
-        if q and q not in str(c[2]).lower():
-            continue
+        if q:
+            # 纯数字按卡 id 精确匹配（用户常直接搜 id，如 26188）；否则按卡名模糊匹配
+            cid = int(q) if q.isdigit() else None
+            if cid is not None:
+                if int(c[0]) != cid:
+                    continue
+            elif q not in str(c[2]).lower():
+                continue
         th = themes_by_id.get(int(c[1]))
         if th is None:
             continue
