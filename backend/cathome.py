@@ -422,12 +422,6 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
     yield emit({"act": "arena:dress", "ok": dres.get("ok", False),
                 "msg": dres.get("message") or "穿装"})
 
-    def targets(lst, my):
-        if my is None:
-            return []
-        return [e for e in lst or [] if str(e.get("uin")) != str(uin)
-                and e.get("ce") is not None and e.get("ce") < my]
-
     free_seen = int(dp0.get("free_pvp_num") or 0)
     flush_left = max_flush - int(dp0.get("flush_num") or 0)
     wins, fights = 0, 0
@@ -436,6 +430,23 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
     BUSY_MAX = 3                    # 整轮最多容忍的 busy 次数：防 7 对手×4 重试刷一墙失败
     loop_guard, LOOP_MAX = 0, 40    # 总轮次硬上限：防「全员持续限流只跳过不扣次数」空转
     live = int(dp0.get("surplus") or 0)
+    skip_uins = set()               # 本回合已打过（胜/负）或持续 busy 的对手 uin，绝不重复打同一个人
+
+    def pick_target(enemies, my):
+        """挑本回合最优目标：比自己战力低、且本回合没打过，按战力升序取最低（最易打）。
+
+        修复 10-01 用户反馈：原 sort(key=-ce) 取「比自己低里战力最高的」，等于专挑
+        只比自己低几十的硬骨头，极易输且反复打同一人。改为取最低战力对手。
+        """
+        if my is None:
+            return None
+        cand = [e for e in enemies or []
+                if str(e.get("uin")) != str(uin)
+                and e.get("ce") is not None and e.get("ce") < my
+                and str(e.get("uin")) not in skip_uins]
+        if not cand:
+            return None
+        return min(cand, key=lambda e: e["ce"])   # 战力最低 = 最易打
 
     while True:
         loop_guard += 1
@@ -454,11 +465,11 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
         my_ce = next((e.get("ce") for e in dp.get("enemy_list") or []
                       if str(e.get("uin")) == uin), my_ce0)
         enemies = dp.get("enemy_list") or []
-        cand = sorted(targets(enemies, my_ce), key=lambda e: -e["ce"])
-        if not cand:
+        foe = pick_target(enemies, my_ce)
+        if foe is None:
             if flush_left <= 0:
                 yield emit({"act": "flush", "ok": False,
-                            "msg": "没有更低战力对手，免费刷新已用完，结束"})
+                            "msg": "没有更低战力且未打过的对手，免费刷新已用完，结束"})
                 break
             fr = await _act(session, EP_TRAVEL_PVP, 7)
             fd = fr.get("data") or {}
@@ -467,11 +478,9 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
                             "msg": fd.get("desc") or fr.get("message") or "刷新失败"})
                 break
             flush_left -= 1
-            enemies = fd.get("enemy_list") or []
             yield emit({"act": "flush", "ok": True,
-                        "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(enemies)} 个"})
+                        "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(fd.get('enemy_list') or [])} 个"})
             continue
-        foe = cand[0]
         # 竞技穿装已在开局做一次并持久保存，这里无需每场重穿（与每日比赛每场临时算不同）。
         # 每场挑战前短冷却：连发会触发服务端限流（system busy），
         # 09-29 实测 auto 跑第 2 场必 busy 而中断（HAR 手动连点 4 场全成功，差异是间隔）。
@@ -486,6 +495,8 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
                 break
             desc = str(d.get("desc") or r.get("message") or "挑战失败")
             if "system busy" not in desc.lower():
+                # 非 busy 失败（非法/状态不允许/战败返回错误码）：本场判失败，跳过该对手换人
+                skip_uins.add(foe_uin)
                 yield emit({"act": "fight", "ok": False, "foe": foe.get("name"), "msg": desc})
                 break
             # busy ≠ 纯限流（铁律：system busy 常掩盖「次数/状态不允许」）。先回读
@@ -499,9 +510,11 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
                 # busy 但次数被扣：战斗实际已发生（胜负未知，响应里没有战报）
                 fights += 1
                 free_seen = free_now
+                skip_uins.add(foe_uin)
                 yield emit({"act": "fight", "ok": True, "foe": foe.get("name"), "win": None,
                             "msg": f"返回 busy 但次数已扣（已打 {free_now} 场），战斗实际已发生"
                                    f"（胜负以游戏内战绩为准）"})
+                break
             else:
                 yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
                             "msg": f"system busy（未扣次数，服务端剩 {live_surplus} 次）"})
@@ -525,7 +538,7 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
             break
         if not fight_ok:
             # 该对手重试耗尽（未扣次数）→ 跳过它打其余对手，不因一个对手卡住就整轮停。
-            enemies = [e for e in enemies if str(e.get("uin")) != str(foe["uin"])]
+            skip_uins.add(foe_uin)
             yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
                         "msg": f"对手「{foe.get('name')}」持续 busy，跳过，转打其余对手"})
             continue
@@ -534,9 +547,12 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
         ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
         win = ba.get("iswin")
         wins += 1 if win == 1 else 0
+        # 无论输赢，本回合不再打这个人（避免反复打同一人）
+        skip_uins.add(foe_uin)
         yield emit({"act": "fight", "ok": True, "foe": foe.get("name"),
                     "ce": foe.get("ce"), "win": win,
-                    "score": ba.get("pvp_score"), "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）"})
+                    "score": ba.get("pvp_score"),
+                    "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）{'胜 ✓' if win == 1 else ('负 ✗' if win == 0 else '')}"})
 
     # 只有真正打了才领任务奖励（HAR 实证：都是打完连着领 4 个）；一次没打就别空领
     claims = []
