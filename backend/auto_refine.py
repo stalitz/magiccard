@@ -438,11 +438,13 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
          不是当前一张 40 没有就是缺」—— 缺口按 `face40_gap()` 的**总量**算。
       （此前写死 26117 属 theme 1810，炼的却是别的套，等于白烧礼物卡。）
 
-    候选排序（用户 2026-09-26「要优先补最缺的那张」）：
-      ① 这张还差得多的优先（单卡缺口）
-      ② 同一张缺口相同时，**整套还差得多的那套**优先（多套并行时不让第一套独吞）
-      ③ 再相同，则**炼完全套用得更多的那张**优先（`f40` 需求量）
-      ④ 最后才按队列顺序、卡 id —— 保证结果稳定不抖
+    候选排序（★ 2026-10-03 用户定调「成功后再次变卡要找少的变」）：
+      ① **持有张数少的优先**（`held_c` 升序）——只要该 40 面卡还有缺口，就补手上最少的
+        那张，让多张不同的 40 面卡轮流被变出来。此前按「缺口最大」挑会死盯同一张
+        （实测七夕情人节求姻缘 23926 已有 9 张还一直变，全占卡箱；而变 3 张不同的
+        才能炼更高面额）。
+      ② 持有相同则**单卡缺口大**的优先；再同则整套缺口大者优先（多套并行不让第一套独吞）
+      ③ 再相同则炼完全套用得更多的优先（`f40`）；最后按队列序、卡 id 保证稳定不抖
     """
     if not queue:
         return None
@@ -451,28 +453,38 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
     stock = stock or Counter()
     pending = pending or Counter()
 
-    cands = []                       # (单卡缺口, -整套缺口, -f40需求, 队列序, cid, tid)
+    cands = []                       # (持有数, -单卡缺口, -整套缺口, -f40需求, 队列序, cid, tid)
     for order, tid in enumerate(queue):
         g = face40_gap(plans[tid], stock, pending)
         for cid, n in g["gap"].items():
             if cid not in keep or n <= 0:
                 continue
             need_c = int(plans[tid].f40.get(cid, 0) or 0)
-            cands.append((int(n), -int(g["need_total"]), -need_c, order, int(cid), tid))
+            held_c = int(stock.get(cid, 0) + pending.get(cid, 0))
+            # ★ 2026-10-03 用户定调「成功后再次变卡要找少的变」：主排序改成
+            # **持有张数少的优先**（held_c 升序）。此前按「缺口最大」挑，会死盯
+            # 同一张变（实测七夕情人节求姻缘 23926 已有 9 张还继续变，全占卡箱、
+            # 变3张不同的才能炼更高面额）。现在改成：只要该 40 面卡还有缺口，
+            # 就优先补**手上最少的那张**，让多张不同的 40 面卡轮流被变出来。
+            cands.append((held_c, -int(n), -int(g["need_total"]), -need_c,
+                          order, int(cid), tid))
     if not cands:
         return None
-    cands.sort(key=lambda x: (-x[0], x[1], x[2], x[3], x[4]))
-    n, _neg_need_total, neg_need_c, order, cid, tid = cands[0]
+    cands.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5]))
+    held_c, _neg_n, _neg_need_total, neg_need_c, order, cid, tid = cands[0]
+    n = -_neg_n
     plan = plans[tid]
     c = plan.cards.get(cid)
     face = int(c[3] or 0) if c else 0
     g = face40_gap(plan, stock, pending)
     return {"dst": cid, "name": plan.cname(cid), "face": face, "times": n,
+            "held": held_c,
             "tid": tid, "theme": plan.name, "f40_need": -neg_need_c,
             "need_total": g["need_total"], "have": g["have"],
             "gap_total": sum(g["gap"].values()),
             "gap": dict(sorted(g["gap"].items())),
-            "target": f'{plan.cname(cid)}（{plan.name} {face}面，还差 {n} 张；'
+            "target": f'{plan.cname(cid)}（{plan.name} {face}面，手上 {held_c} 张、'
+                      f'还差 {n} 张；'
                       f'本套 40 面卡已有 {g["have"]} 张、总共还差 {g["need_total"]} 张；'
                       f'炼完全套需用 {max(1, -neg_need_c)} 张）'}
 
@@ -589,6 +601,24 @@ class AutoRefine:
                                   self._pending, set(self._keep))
 
     # ---------- 日志 ----------
+    def _log_change_attempts(self, attempts: list[dict] | None, label: str) -> None:
+        """把变卡的逐张明细写成日志：消耗的源卡名 → 变出的目标卡名 + 成功/失败。
+
+        ★ 2026-10-03 用户定调「每次变卡成功都要记录成功，要把消耗的卡和变的卡名字
+        都显示出来」：此前只写一条汇总（`changed=N`），逐张成败不落盘，导致「日志零
+        成功但卡箱多出好几张」无法核对。这里每张单独一行，成功用 ok=True。
+        """
+        for a in attempts or []:
+            src = a.get("src_name") or a.get("src_id")
+            dst = a.get("dst_name") or a.get("dst_id")
+            if a.get("ok"):
+                detail = f"{src} → {dst} 成功"
+            else:
+                extra = a.get("msg") or f"code={a.get('code')}"
+                stage = "收礼失败" if a.get("stage") == "take" else "变卡失败"
+                detail = f"{src} → {dst} {stage}（{extra}）"
+            self._log(label, bool(a.get("ok")), detail)
+
     def _log(self, action: str, ok: bool, detail: str) -> None:
         self.log.append({"ts": time.time(), "action": action, "ok": ok, "detail": detail})
         if not ok:
@@ -1041,6 +1071,8 @@ class AutoRefine:
                 self._stock, self._pending = rd[1], rd[3]
         self._log("礼物卡变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物卡变卡", "ok": ok, "detail": r.get("message") or ""})
+        # 逐张明细单独成行（成功/失败都记，显示消耗的源卡名与变出的目标卡名）
+        self._log_change_attempts(r.get("attempts"), "卡变明细")
         return rd
 
     async def _gift_drain(self, steps: list[dict]) -> None:
@@ -1082,6 +1114,8 @@ class AutoRefine:
         self._log("礼物变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物变卡", "ok": ok,
                       "detail": r.get("message") or ""})
+        # 逐张明细单独成行（成功/失败都记，显示消耗的源卡名与变出的目标卡名）
+        self._log_change_attempts(r.get("attempts"), "收礼变卡明细")
 
     async def _read_state(self):
         """读主界面 -> (st, stock, slots, pending)。失败返回 None。"""

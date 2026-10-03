@@ -421,6 +421,37 @@ def change_dst_is_face40(dstid: int) -> bool | None:
     return None if f == 0 else (f == 40)
 
 
+_name_cache: dict[int, str] = {}
+
+
+def _card_name_cached(cid: int) -> str:
+    """卡 id → 卡名（带进程内缓存；查不到显示「卡{id}」，不臆造名字）。"""
+    cid = int(cid)
+    if cid in _name_cache:
+        return _name_cache[cid]
+    try:
+        lib = json.loads((Path(__file__).resolve().parent.parent
+                          / "data" / "card_lib.json").read_text(encoding="utf-8"))
+        name = ""
+        for c in lib["card_list"]:
+            if int(c[0]) == cid:
+                name = str(c[2] or "").strip()
+                break
+    except Exception:  # noqa: BLE001
+        name = ""
+    _name_cache[cid] = name or f"卡{cid}"
+    return _name_cache[cid]
+
+
+def _face48_name(cid: int) -> str:
+    """源卡（礼物卡）名。礼物卡是道具卡 id，卡库里多半查不到 → 显式标「礼物卡」。
+
+    不写死「蚕丝/五彩线」等具体名字：收礼产物 7773/7774/7775 都是 48 面礼物卡，
+    具体名随 action 变（见模块头 freegift_take 注释），这里只标明「是礼物卡」即可。
+    """
+    return _card_name_cached(cid)
+
+
 def _face48_ids() -> set[int]:
     """礼物套（theme=487「手工织锦」）里面额 48 的卡 id = 礼物卡的形态。
 
@@ -499,6 +530,7 @@ async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANG
     budget = inbox if max_try <= 0 else min(max_try, inbox)   # 硬上限：源卡有限
     tried = changed = burned = 0
     last = ""
+    attempts: list[dict] = []   # 逐张明细：消耗的源卡 → 变出的目标卡 + 成败
     for _ in range(budget):
         pool = await find_box_gift_cards(session)      # 重扫：失败那张已被烧掉
         if not pool:
@@ -507,18 +539,28 @@ async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANG
         r = await change_card(session, p["id"], dstid, slotid=p["slot"],
                               slottype=p["slottype"])
         tried += 1
+        # 源卡名（礼物卡 48 面，多为道具卡 id，卡库里查不到就显示「礼物卡」）
+        src_name = _face48_name(p["id"])
         if r.get("ok"):
             changed += 1
             last = f"#{p['id']} → {dstid} 成功"
+            attempts.append({"src_id": p["id"], "src_name": src_name,
+                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "ok": True, "code": r.get("code")})
             break
         burned += 1                                    # 失败也烧掉一张源卡
         last = f"#{p['id']} → {dstid} 失败 code={r.get('code')}"
+        attempts.append({"src_id": p["id"], "src_name": src_name,
+                         "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                         "ok": False, "code": r.get("code"),
+                         "msg": r.get("message") or ""})
         await asyncio.sleep(0.3)
     tail = (f"；{last}" if last else "")
     if not changed and burned:
         tail += "（失败也烧源卡，已换下一张继续，直到成功或箱里礼物卡没了）"
     return {"ok": changed > 0, "skipped": False, "inbox": inbox, "tried": tried,
             "changed": changed, "burned": burned, "dstid": dstid, "last": last,
+            "attempts": attempts,
             "message": f"卡箱礼物卡 {inbox} 张：变成功 {changed} 张"
                        + (f"；{last}" if last else "")}
 
@@ -561,6 +603,7 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
     gifts = sorted(inb["gifts"], key=lambda g: g.get("time") or 0)   # 最老的先收
     took = changed = failed = 0
     last = ""
+    attempts: list[dict] = []   # 逐张明细：收的礼物 → 变出的目标卡 + 成败
     for g in gifts[:max_take]:
         if count - took <= lower:
             break
@@ -568,17 +611,29 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
         if r.get("stage") == "take" and not r.get("ok"):
             failed += 1
             last = f"收礼 #{g['index_id']} 失败 code={r.get('code')}"
+            attempts.append({"src_id": g["index_id"], "src_name": "礼物",
+                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "ok": False, "stage": "take", "code": r.get("code"),
+                             "msg": r.get("message") or ""})
             await asyncio.sleep(0.3)
             continue
         took += 1
+        src_id = r.get("itemid")
         if r.get("ok"):
             changed += 1
+            attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
+                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "ok": True, "code": r.get("code")})
         else:
             failed += 1
             last = f"变卡失败（约 50% 概率）code={r.get('code')}"
+            attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
+                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "ok": False, "stage": "change", "code": r.get("code"),
+                             "msg": r.get("message") or ""})
         await asyncio.sleep(0.4)
     return {"ok": True, "skipped": False, "box_before": count, "box_after": count - took,
             "took": took, "changed": changed, "failed": failed, "dstid": dstid,
-            "last": last,
+            "last": last, "attempts": attempts,
             "message": f"礼物箱 {count}→{count - took}：收 {took} 件、变成功 {changed} 张"
                        f"（dst={dstid}）" + (f"；{last}" if last else "")}
