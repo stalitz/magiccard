@@ -1120,6 +1120,109 @@ class AutoRefine:
         c = st["cap"].get("change", {})
         return c.get("cur", 0) - c.get("used", 0)
 
+    # ---------- 腾位（换卡箱满了买不进底卡时）★ 2026-10-03 用户定调 ----------
+    async def _make_room(self, tid: int, need: int, st: dict, steps: list[dict],
+                         running_themes: set | None = None) -> int:
+        """换卡箱腾出至少 `need` 格，返回腾出的格数（不够/失败返回实际腾出数）。
+
+        真机死锁（2026-10-03 复现）：换卡箱 18/18 满，40 面底卡买不进来 → 流水线全停；
+        唯一腾格的是占炉 4h 的 150（期间不烧素材），于是「暂缓」连转 4 小时不自愈。
+
+        腾位策略（用户定调「优先移保险箱」）：
+          · **优先把换卡箱里「与在炼套卡无关的高面值卡」移到保险箱**（保险箱 200 格，
+            无损，不卖）—— 换卡箱塞着鬼门关1337/酆都城1333 这类大面额杂卡，炼卡根本
+            用不上，白占换卡箱（硬顶 18）；
+          · 10 面值底卡**不动**（它们是炼卡素材，要买/留着当料）；
+          · 在炼套卡自己的卡不动（要当素材/收藏）；
+          · 保险箱也满 → 退回「卖」：卖掉这些无关高面值杂卡换金币 + 腾格（保底）。
+
+        `running_themes` = 在炼套卡 id 集合，用于保护它们相关的卡不被误移/误卖。
+        """
+        keep_themes = running_themes if running_themes is not None else set(self.queue)
+        keep_ids: set = set()
+        for t in keep_themes:
+            if t in self.plans:
+                keep_ids |= set(self.plans[t].ids)
+
+        async def snapshot():
+            mp = await self.s.post(EP_MAINPAGE, code="", opuin=self.s.uin)
+            if mp.get("code") != 0:
+                return None
+            return parse_full(mp.get("raw", ""))
+
+        snap = await snapshot()
+        if snap is None:
+            return 0
+        freed = 0
+        # 候选：换卡箱里「不在任何在炼套卡内」的卡，按面额从高到低腾（大面额最没用）。
+        # ⚠ parse_full 的卡 dict **没有 face 字段**（只有 slot/id/type/st），面额要从卡库查。
+        _all_cards = _maps()[0]
+
+        def _face_of(cid: int) -> int:
+            c = _all_cards.get(cid)
+            return int(c[3] or 0) if c else 0
+
+        def candidates(box_key):
+            out = []
+            for c in snap.get(box_key) or []:
+                cid = int(c.get("id") or 0)
+                if cid <= 0 or cid in keep_ids:
+                    continue                        # 在炼套卡的卡：保护，不动
+                out.append((cid, _face_of(cid), int(c.get("slot") or 0)))
+            # 排序：① 高面值杂卡最先（移保险箱，无损、且大面额本就用不上，用户定调
+            #   「优先移保险箱」）；② 10 面值底卡垫后（要腾更多格时才卖掉它们）。
+            out.sort(key=lambda x: (0 if x[1] > CHANGE_FACE else 1, -x[1]))
+            return out
+
+        cands = candidates("change")
+        if not cands:
+            return 0
+        for cid, face, slot in cands:
+            if freed >= need:
+                break
+            nm = card_name(cid)
+            done = False
+            if face <= CHANGE_FACE:
+                # ★ 10 面值底卡：用户定调「未下架的 10 面值卡都买掉」——它们是炼卡
+                #   素材、用多少现场买多少，留着纯占格位，卖掉既腾格又回金币。
+                sr = await self.s.sell_card(slot, cid, box_type=1)
+                if sr.get("ok"):
+                    self._log("腾位", True, f"{nm}（面{face}底卡）卖掉腾位（炼卡素材，用多少买多少）")
+                    steps.append({"action": "腾位", "ok": True,
+                                  "detail": f"{nm}（面{face}底卡）卖掉腾位"})
+                    done = True
+                else:
+                    self._log("腾位", False, f"{nm} 卖失败：{(sr.get('message') or '')[:80]}")
+            else:
+                # 高面值杂卡：优先移保险箱（无损，用户定调「优先移保险箱」）
+                r = await self.s.move_card(cid, slot, from_box=0)
+                if r.get("ok"):
+                    self._log("腾位", True, f"{nm}（面{face}）移入保险箱（换卡箱太满，炼卡用不上）")
+                    steps.append({"action": "腾位", "ok": True,
+                                  "detail": f"{nm}（面{face}）移入保险箱"})
+                    done = True
+                else:
+                    # 保险箱也满 → 卖（保底）：这卡不在在炼套内、又没处放，卖掉换格位
+                    sr = await self.s.sell_card(slot, cid, box_type=1)
+                    if sr.get("ok"):
+                        self._log("腾位", True, f"{nm}（面{face}）保险箱也满 → 卖掉腾位")
+                        steps.append({"action": "腾位", "ok": True,
+                                      "detail": f"{nm}（面{face}）卖掉腾位（保险箱已满）"})
+                        done = True
+                    else:
+                        self._log("腾位", False,
+                                  f"{nm} 移/卖都失败：{(r.get('message') or sr.get('message') or '')[:80]}")
+            if done:
+                freed += 1
+            if freed < need:
+                # 每腾一张换卡箱/保险箱状态都变了，重扫一次拿最新槽位
+                ns = await snapshot()
+                if ns is None:
+                    break
+                snap = ns
+                cands = candidates("change")
+        return freed
+
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
                             planned: set, bought: int, steps: list[dict],
                             tag: str = "炼卡"):
@@ -1142,6 +1245,17 @@ class AutoRefine:
         need_buy = sum(short.values())
         if need_buy:
             free_box = self._free_change(st)
+            # ★ 2026-10-03 死锁修复：换卡箱满 → 先腾位（优先移保险箱）再买。
+            #   真机复现：18/18 满时底卡买不进来，而唯一腾格的是占炉 4h 的 150，
+            #   于是「暂缓」连转 4 小时不自愈（150 不烧素材就不腾格）。
+            if need_buy > free_box:
+                freed = await self._make_room(tid, need_buy - free_box, st, steps)
+                if freed > 0:
+                    rd = await self._read_state()   # 腾位后重读，空位/槽位都变了
+                    if rd is None:
+                        return None
+                    st, stock, slots, pending = rd
+                    free_box = self._free_change(st)
             if need_buy > free_box or bought + need_buy > MAX_BUY_PER_TICK:
                 # 不是故障，是等前面那几炉把素材烧掉腾格位 —— 不计入 errors
                 self._log("暂缓", True,
