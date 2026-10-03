@@ -1581,9 +1581,90 @@ async def sanguo_list(session) -> dict:
     return await _act(session, EP_WORLD_SANGUO, 9)
 
 
-async def sanguo_claim(session, cid: int = 0) -> dict:
-    """三国领奖（sanguo act=8 {id}）。HAR：content=48_1614_10,92_32_1,92_58_1。"""
-    return await _act(session, EP_WORLD_SANGUO, 8, id=int(cid))
+async def sanguo_claim(session, levelid: int = 0) -> dict:
+    """三国领通关奖励（sanguo act=2 {levelid}）。
+
+    2026-10-03 sanguolingka.har 实证（SanGuoModule_v_14.swf 真机序列）：
+      - act=1 主界面 levelData 每条带 `percent_hp`（通关进度，100=已通关待领奖）、
+        `passData.isget`（0=奖励未领）；
+      - 领奖 = `act=2 {levelid}`，返回 content=48_..._N（掉落卡）；领完后该关从
+        levelData 消失，奖励卡进 ex_box（下次 act=1 拉取才可见）；
+      - act=2 **不消耗 freenum**（每日出战次数由 act=11 战斗计，与本领奖无关）。
+
+    旧代码写的 act=8 是错的：act=8 来自前端注释 / union 的以讹传讹；bisai2.har 是
+    工会（card_travel_elf_union，act=16=水果重摇），并不能证明三国 act=11/16/8 的语义。
+    levelid=0 → 自动领取 levelData 里所有 isget=0 的已通关关；传具体关号 → 只领那一关。
+    """
+    if levelid:
+        return await _act(session, EP_WORLD_SANGUO, 2, levelid=int(levelid))
+    # 领掉全部「已通关但奖励未领」的关；每领一张回读一次，避免重复/越界。
+    claimed, failed = [], []
+    for _ in range(20):
+        st = await sanguo_state(session)
+        levels = [lv for lv in (st.get("levelData") or [])
+                  if (lv.get("passData") or {}).get("isget") == 0]
+        if not levels:
+            break
+        did = False
+        for lv in levels:
+            lid = int(lv.get("levelid") or lv.get("bossid") or 0)
+            if not lid:
+                continue
+            r = await _act(session, EP_WORLD_SANGUO, 2, levelid=lid)
+            rd = r.get("data") if isinstance(r.get("data"), dict) else {}
+            if r.get("ok") and rd.get("code") in (0, None):
+                claimed.append({"levelid": lid, "content": rd.get("content")})
+                did = True
+            else:
+                failed.append({"levelid": lid,
+                               "msg": rd.get("desc") or r.get("message") or f"code={rd.get('code')}"})
+        if not did:
+            break
+    return {"ok": True, "claimed": claimed, "failed": failed,
+            "message": f"已领 {len(claimed)} 关，失败 {len(failed)} 关"}
+
+
+async def sanguo_claim_tasks(session) -> dict:
+    """三国每日任务领奖（sanguo act=7 查 + act=8 {id} 领）。
+
+    2026-10-03 jiangli.har 实证（SanGuoModule_v_14.swf 真机）：
+      - act=7 返回 task_bits（**已领掩码**，bit i 置位=第 i 个任务已领，与
+        travel_elf_auto.py:183 同义）+ task_detail[{cnt,id,type}]；
+      - act=8 {id} 领对应任务奖励，返回 content=48_..._N（掉落卡），领完该任务
+        从「可领」变「已领」（task_bits 对应位置位）；
+      - 典型任务 id=1(type=161)=「每日出战 3 次」，打满 3 次后 cnt=3 方能领
+        （此时 task_bits 仍只有 id=0 置位），漏领就少拿一份奖励。
+        jiangli.har 时序：出手前 act=7 task_bits=1 → 手动 act=8 id=1 领奖 →
+        再查 act=7 task_bits=3，证实掩码语义。
+
+    规则：对每个任务，若 task_bits 未置位（没领过）且 cnt>0（有进度，可能已达标），
+    调 act=8 {id}；达标才发奖（code=0+content），否则 code!=0 跳过。不臆测阈值
+    （响应无 limit 字段），以服务端判定为准，避免重复领/误领。
+    """
+    r7 = await _act(session, EP_WORLD_SANGUO, 7)
+    d7 = r7.get("data") if isinstance(r7.get("data"), dict) else {}
+    if not r7.get("ok") or d7.get("code") not in (0, None):
+        return {"ok": False, "message": d7.get("desc") or r7.get("message") or "查任务失败",
+                "task_bits": d7.get("task_bits"), "task_detail": d7.get("task_detail")}
+    bits = int(d7.get("task_bits") or 0)
+    claimed, skipped = [], []
+    for i, t in enumerate(d7.get("task_detail") or []):
+        tid = int(t.get("id") or 0)
+        cnt = int(t.get("cnt") or 0)
+        if bits & (1 << i):          # 已领过，跳过
+            continue
+        if cnt <= 0:                 # 无进度，肯定未达标
+            continue
+        r = await _act(session, EP_WORLD_SANGUO, 8, id=tid)
+        rd = r.get("data") if isinstance(r.get("data"), dict) else {}
+        if r.get("ok") and rd.get("code") in (0, None) and rd.get("content"):
+            claimed.append({"id": tid, "type": t.get("type"), "content": rd.get("content")})
+        else:
+            skipped.append({"id": tid, "type": t.get("type"),
+                             "msg": rd.get("desc") or r.get("message") or f"code={rd.get('code')}"})
+    return {"ok": True, "task_bits": bits, "task_detail": d7.get("task_detail"),
+            "claimed": claimed, "skipped": skipped,
+            "message": f"已领 {len(claimed)} 个任务，跳过 {len(skipped)} 个"}
 
 
 async def sanguo_lineup(session, levelid: int) -> dict:
@@ -2045,10 +2126,11 @@ async def sanguo_run(session, levelid: int, cats: list, eqs: list, mode: int = 0
                       cats="|".join(str(int(c)) for c in cats) + "|")
 
 
-# 三国每日闯关次数上限。**实证来源（2026-09-28 读 bisai2.har 真机序列）**：
-#   act=1 的 `freenum` 是「**今日已闯关次数**」，随每次 act=11 成功后 +1，
-#   0 → 1 → 2 → 3 后封顶不再涨（同批 `buynum` 恒 0）；用户口述「每天 3 次」。
-#   所以「剩余次数 = SGUO_DAILY_MAX - freenum」，不能拿 freenum 当剩余量用。
+# 三国每日闯关次数上限。**语义（2026-09-28 用户口述「每天 3 次」+ sanguolingka.har
+# 实测 freenum 字段存在且 act=2 领奖不改变它）**：
+#   `freenum` 当作「今日已闯关次数」用，剩余 = SGUO_DAILY_MAX - freenum。
+#   注意：act=11 战斗是否真让 freenum +1 尚无三国 HAR 实证（bisai2.har 是工会，
+#   不能拿来证明三国 act=11 语义）；本常量仅作安全上限，不靠它裁决成败。
 SGUO_DAILY_MAX = 3
 
 _SGUO_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "sanguo_raid.json"
@@ -2105,11 +2187,11 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
       - 服务端返回失败即停并记 reason，不做「换一个继续」的猜测性重试；
       - 今日已打满 → 直接 skipped，一次请求都不发，不烧次数。
 
-    HAR 实证（bisai2.har 真机，mode 恒 0）：
-      - act=16 {levelid, cats:'0|0|0|0'} → elf_list 4 只猫（id + equip_list 4 件）；
-      - act=11 {mode, levelid, eqs（N×4 平铺、尾随 |）, cats（猫 id 序、尾随 |）}
-        → base_score / battle_data.attack_accounts{iswin,total_score,talent_rate} /
-          attack_elf_list / boss_reduce_hp / percent / content。
+    HAR 实证（sanguolingka.har 真机）：
+      - act=2 {levelid} = **领通关奖励**，返回 content（掉落卡），领完该关从 levelData
+        消失、奖励卡进 ex_box；**零消耗、不烧次数**；
+      - act=16（读阵容）/ act=11（出战）的语义来自早期推断，三国无 HAR 真证；本函数
+        先尽量用 act=2 领掉「已通关未领奖」的关，出战环节保留 act=11 但失败时即停。
     """
     st = await sanguo_state(session)
     if not st.get("ok"):
@@ -2121,6 +2203,13 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
         box_sold = r.get("sold") or []
         st = await sanguo_state(session)   # 卖完立刻回读，后续步骤用真实卡箱
         box_before = plan_ex_box(st)
+    # 先领掉所有「已通关但未领奖」的关（act=2，零消耗、不烧次数）。
+    # 这正是「剩 N 次不能进行」的根因：关卡清了奖励没领，levelData 卡着后续关出不来。
+    pre_claim = await sanguo_claim(session, 0)
+    pre_claimed = (pre_claim.get("claimed") or []) if isinstance(pre_claim, dict) else []
+    # 顺带领掉「开局就可领的每日任务」（act=7 查 + act=8 领），避免漏领（jiangli.har）。
+    pre_tasks = await sanguo_claim_tasks(session)
+    pre_task_claimed = (pre_tasks.get("claimed") or []) if isinstance(pre_tasks, dict) else []
     used = int(st.get("freenum") or 0)
     cur_level = st.get("levelId")
     # 界面上选了「打第几大关」（大关可选）→ 在该大关内挑该打的小关，手动覆盖自动推荐。
@@ -2171,10 +2260,22 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
                        "code": rd.get("code") if "code" in rd else r.get("code")})
         if not ok:
             break
+        # 打完立刻领奖（act=2），避免奖励卡在 levelData、后续关出不来。
+        cr = await sanguo_claim(session, int(levelid))
+        crd = cr.get("data") if isinstance(cr.get("data"), dict) else {}
+        rounds[-1]["claim"] = crd.get("content") if (cr.get("ok")
+                                 and crd.get("code") in (0, None)) else \
+            (crd.get("desc") or cr.get("message") or f"code={crd.get('code')}")
+    # 战后补领每日任务奖励（act=7 查 + act=8 领）：打满 3 次的任务(id=1)此刻才达标。
+    post_tasks = await sanguo_claim_tasks(session)
+    post_task_claimed = (post_tasks.get("claimed") or []) if isinstance(post_tasks, dict) else []
     out = {"ok": True, "levelid": int(levelid), "chapter": picked_chapter,
            "used_before": used,
            "used_after": (await sanguo_state(session)).get("freenum"),
            "daily_max": SGUO_DAILY_MAX, "rounds": rounds,
+           "pre_claimed": pre_claimed,
+           "pre_task_claimed": pre_task_claimed,
+           "post_task_claimed": post_task_claimed,
            "played": sum(1 for x in rounds if x.get("ok")),
            "box": {"free_before": box_before.get("free"),
                    "free_after": plan_ex_box(

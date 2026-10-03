@@ -2766,7 +2766,7 @@ def _claim_group(req, g: str, k: str, coro):
 async def match_claim_all(req: dict | None = None):
     """一键领奖：依次领各玩法的奖励（都是零消耗的领奖 act）。
 
-    覆盖 competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=8。
+    覆盖 competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=2。
     **only** 可选，传 "comp"/"pvp"/"union"/"explore"/"sanguo" 时只领该玩法（其余子块一键用）。
     返回每一项的结果，失败的单独标出，不影响其他项。
     """
@@ -2795,14 +2795,20 @@ async def match_claim_all(req: dict | None = None):
         out.append(_claim_group(req, "explore", "探索领奖 act=25",
                                 await mt.explore_claim(_session, req.get("explore_id", 1))))
     if await want("sanguo"):
-        out.append(_claim_group(req, "sanguo", "三国领奖 act=8",
+        out.append(_claim_group(req, "sanguo", "三国领奖 act=2",
                                 await mt.sanguo_claim(_session, req.get("sanguo_id", 0))))
+        out.append(_claim_group(req, "sanguo", "三国每日任务领奖 act=8",
+                                await mt.sanguo_claim_tasks(_session)))
     return {"ok": True, "items": out}
 
 
 @app.post("/api/match/sanguo-auto")
 async def match_sanguo_auto(req: dict | None = None):
-    """三国闯关（sanguo act=11）：内部先读 act=16 真实阵容再提交，**消耗闯关次数**。
+    """三国闯关（sanguo act=11）：内部先读 act=16 真实阵容再提交。
+
+    注意：act=11（出战）/ act=16（读阵容）的语义来自早期推断，三国无 HAR 真证
+    （bisai2.har 是工会）。2026-10-03 sanguolingka.har 实证的是 act=2=领通关奖励。
+    本接口保留 act=11 出战，但 run_sanguo_raid 已先尽量用 act=2 领掉未领奖的关。
 
     走后端拼装是为了遵守「参数取真实值」铁律：cats/eqs 一律来自当次 act=16 的 elf_list，
     不靠前端猜。只在用户主动点子块按钮时才调。
@@ -2996,7 +3002,7 @@ async def match_union_all(req: dict | None = None):
 
 @app.post("/api/match/sanguo-run")
 async def match_sanguo_run(req: dict):
-    """三国闯关（sanguo act=11）。**消耗闯关次数**。
+    """三国闯关（sanguo act=11，出战）。**消耗闯关次数**（act=11 语义三国未实证）。
 
     cats/eqs 必须来自 sanguo act=16 读到的真实阵容（铁律：参数取真实值）。
     """
