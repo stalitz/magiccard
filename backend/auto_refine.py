@@ -598,8 +598,76 @@ class AutoRefine:
         return p.net_plan(stock, pending)
 
     # ---------- 套数（每轮排几套）★ 2026-10-03 用户定调 ----------
+    @staticmethod
+    def _card_secs(plan: "ThemePlan", cid: int) -> int:
+        """炼一张 cid 需要的炉·秒（0 = 底卡，买来即用不占炉）。"""
+        comp = plan.comp.get(cid)
+        return int(comp[6]) if comp else 0
+
+    def _set_furnace_hours(self, plan: "ThemePlan", top: int) -> float:
+        """炼 1 套（1 张顶层卡）占用的炉·小时。
+
+        把顶层卡的整条素材链**展开到可直接炼的 40 面**（更低层是买来的底卡、
+        占 0 炉·h），逐张累加炼时。1 星七夕情人节：3 张 40 面各 1h + 1 张 150 面 4h
+        = **7 炉·h/套**（这是 sets 时间上限的依据）。
+        """
+        total = 0
+        stack = [int(top)]
+        seen: set = set()
+        while stack:
+            c = stack.pop()
+            if c in seen:
+                continue
+            seen.add(c)
+            comp = plan.comp.get(c)
+            if not comp:
+                continue                            # 底卡：买即用，0 炉·h
+            total += self._card_secs(plan, c)
+            for m in (comp[3], comp[4], comp[5]):
+                if m:
+                    stack.append(int(m))
+        return total / 3600.0
+
+    def _target_ready(self, plan: "ThemePlan", target: int, stock: Counter) -> bool:
+        """target 的素材此刻是否齐（能马上投炉）—— 时间感知排序用。
+
+        与 `_prepare_turn` 的「投得进去」判定同口径：底卡（不在 comp 里，可买）永远
+        算齐；成品素材必须在箱里（`stock` 够）。不齐的 target 投进去会被 `_prepare_turn`
+        挡掉、白占一次判断，所以排序时排后面。
+        """
+        comp = plan.comp.get(target)
+        if not comp:
+            return True
+        for m in (comp[3], comp[4], comp[5]):
+            if not m:
+                continue
+            m = int(m)
+            if m in plan.comp:                  # 成品素材：必须在箱里
+                if stock.get(m, 0) < 1:
+                    return False
+        return True
+
+    def _sort_time_aware(self, plan: "ThemePlan", runs: dict, stock: Counter) -> list:
+        """把一套的候选炉次按「时间感知」排序（★ 2026-10-03 用户定调，要考虑炼卡时间）。
+
+        纯深度降序的毛病：150 面(4h) 素材没凑齐时仍排在 40 面(1h) 前面，引擎每 tick
+        都先试投 150 → 被 `_prepare_turn` 挡掉（素材是「还得炼出来的成品卡」）→ 白跑；
+        真正该做的是**素材一齐就立刻投 150**（它占炉 4h，越早投越早腾炉），其余炉位
+        用 1h 的 40 面补料喂下一轮 150，形成长短交织的流水线。
+
+        排序键（从高到低）：
+          ① **就绪优先**（ready desc）：素材此刻齐的排前，不齐的排后（投了也会被挡）；
+          ② **占炉时长降序**（secs desc）：同样就绪时，4h 的 150 先投（长任务早占炉），
+             1h 的 40 排后 —— 正好让长短任务在多个炉位上交织满载；
+          ③ **深度降序**（depth desc）：同就绪、同耗时再按面额高的优先（旧口径兜底）。
+        """
+        def key(c):
+            ready = 0 if self._target_ready(plan, c, stock) else 1   # 0=就绪在前
+            return (ready, -self._card_secs(plan, c), -plan.depth.get(c, 0), c)
+        return sorted(runs, key=key)
+
     def _calc_sets(self, plan: "ThemePlan", stock: Counter, pending: Counter,
-                   free_slots: int = 0) -> int:
+                   free_slots: int = 0, cap_hours: float = 0.0) -> int:
         """这一套本轮排几套（= `net_plan` 的 sets 倍数）。
 
         `surplus_sets`（用户设置的「套数」，默认 0）：
@@ -610,8 +678,13 @@ class AutoRefine:
 
         1 星「按囤卡算套数」：顶层卡（如七夕情人节 150 面）= 若干张 40 面各 1，
         能炼几套 = 这些 40 面持有数的**最小值**（瓶颈）。但 0 套会空炉，所以至少
-        排 1 套（缺的那部分引擎会自己变卡/买底卡炼出来）；同时不超炉位数 + 1，
-        免得一次排出几十个炉次、白买一堆底卡。
+        排 1 套（缺的那部分引擎会自己变卡/买底卡炼出来）。
+
+        ★ 2026-10-03 用户指出「要考虑炼卡时间，150 的 4 小时、40 的 1 小时」：
+        sets 的**上限按炉·小时算**而非炉位数 —— 一张 150 面占炉 4h，若按「炉位数+1」
+        排 N 套会高估短期吞吐（引擎是每 tick 投空闲炉的离散循环，150 一投就占 4h，
+        根本投不完那么多），徒买一堆底卡。故 `cap_hours` = 本轮可支配的炉·小时
+        （= 空闲炉位数 × 一个 tick 覆盖的时长），除以每套炉·h 得套数上限。
         """
         if self.surplus_sets and self.surplus_sets > 0:
             return int(self.surplus_sets)
@@ -631,7 +704,14 @@ class AutoRefine:
         have = [stock.get(c, 0) + pending.get(c, 0) for c in ing]
         by_stock = min(have)                   # 瓶颈：这些 40 面各要 1 张/套
         sets = max(1, by_stock)                # 0 也至少 1 套（缺料引擎自己补，不空炉）
-        # 上限：炉位数 + 1（够把空炉排满并留一点余量，不至于一次买爆底卡）
+        # 时间上限：可支配炉·h / 每套炉·h（不按张数硬排，避免高估 + 徒买底卡）
+        if cap_hours and free_slots:
+            per_set = self._set_furnace_hours(plan, tops[0])
+            if per_set > 0:
+                # 空闲炉能并行跑 cap_hours 小时 → 能炼几套
+                time_cap = max(1, int((cap_hours * free_slots) / per_set))
+                sets = min(sets, time_cap)
+        # 兜底仍以炉位数封顶（离散循环一轮最多排这么多个空闲炉次）
         cap = max(1, int(free_slots) + 1) if free_slots else sets
         return max(1, min(sets, cap))
 
@@ -914,7 +994,16 @@ class AutoRefine:
             credit = self._face40_credit(p, st)
             self.face40_credit[tid] = credit
             # ★ 套数：1 星按囤卡算能炼几套（炉位排满不空转）；其他星 1 套（见 _calc_sets）
-            sets = self._calc_sets(p, stock, pending, free_stove)
+            #   cap_hours 取「顶层卡自身的炼时」= 一张最慢卡的占炉时长（150=4h）：
+            #   引擎是持续循环投空闲炉，一个 4h 的 150 投进去就要占 4h，期间其他炉
+            #   只能炼 1h 的 40；所以一轮能消化的套数上限 ≈ 空闲炉 × 顶层炼时 / 每套炉·h。
+            top_secs = 0.0
+            _md = max((p.depth.get(c, 0) for c in p.ids), default=0)
+            for _c in p.ids:
+                if p.depth.get(_c, 0) == _md and p.comp.get(_c):
+                    top_secs = max(top_secs, self._card_secs(p, _c) / 3600.0)
+                    break
+            sets = self._calc_sets(p, stock, pending, free_stove, cap_hours=top_secs)
             self._last_sets[tid] = sets
             runs, buy = p.net_plan(stock, pending, credit, sets=sets)
             plans_net[tid] = (runs, buy)
@@ -934,8 +1023,15 @@ class AutoRefine:
         #   卡占住炉位而排队** —— 表现出来就是「主线是 1810，结果一直在炼 40 面」。
         #   素材不够的 target 会被 _prepare_turn 挡掉（缺的是还得炼出来的成品卡 →
         #   return None），所以降序不会死循环：高面额等不到素材就让位给下一张。
-        buckets = {tid: sorted(plans_net.get(tid, ({}, {}))[0],
-                               key=lambda c: -self.plans[tid].depth.get(c, 0))
+        #
+        # ★ 2026-10-03 用户指出「要考虑炼卡时间，150 的 4 小时、40 的 1 小时」，
+        #   改成**时间感知排序**（见 `_sort_time_aware`）：纯深度降序把「还没凑齐
+        #   素材的 150(4h)」排在「素材齐的 40(1h)」前面，引擎反复试投 150 都被挡、
+        #   白跑；而真��占炉 4 小时的 150 应该素材一齐就**立刻**投进去（早投早占炉），
+        #   腾出的炉位再用 1h 的 40 补料下一轮 —— 长短任务交织才是流水线。
+        buckets = {tid: self._sort_time_aware(self.plans[tid],
+                                             plans_net.get(tid, ({}, {}))[0],
+                                             stock)
                    for tid in order}
         seq: list[tuple[int, int]] = []
         while any(buckets.values()):
