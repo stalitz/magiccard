@@ -1027,8 +1027,20 @@ async def union_task(session) -> dict:
 
 
 async def union_chip(session) -> dict:
-    """工会碎片/贡献（union act=16）。读：data=22315。"""
-    return await _act(session, EP_TRAVEL_UNION, 16)
+    """工会贡献/碎片/资金（union act=1，只读）。
+
+    ⚠️ 历史误标修复（2026-10-03 查 bisai2.har 实锤）：旧版调 act=16，但 act=16 真实返回
+    的是**摇水果盘 5 位码**（22315/22224/55514/…每次不同=重摇），并非贡献；且每次调用会
+    **副作用重摇水果盘**。真正贡献/资金/成员在 union act=1（union_info）里（chip/coin/
+    mem_num）。故改调 union_info 取真值，消除「刷新工会页悄悄重摇水果盘」的副作用。
+    act=16 现仅由 union_fruit_reset（摇水果重置）持有，编号撞车解除。
+    """
+    info = await union_info(session)
+    if not info.get("ok"):
+        return info
+    return {"ok": True, "code": info.get("code"),
+            "data": info.get("chip"), "chip": info.get("chip"),
+            "coin": info.get("coin")}
 
 
 async def union_fruit_reset(session) -> dict:

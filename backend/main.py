@@ -2563,7 +2563,7 @@ async def match_pvp_extra():
 
 @app.get("/api/match/union-extra")
 async def match_union_extra(level: int = 8):
-    """工会：任务（act=15）+ 贡献（act=16）+ 商店（act=30）+ 关卡对手（act=27）。只读。"""
+    """工会：任务（act=15）+ 贡献（act=1，经 union_info，旧误标 act=16）+ 商店（act=30）+ 关卡对手（act=27）。只读。"""
     if err := _require_login():
         return err
     return {"ok": True,
