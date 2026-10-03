@@ -4347,7 +4347,9 @@ function renderMatchXiyouTeam() {
 
 // 三国战役关卡表（sanguo act=9）：只读，字段语义未证实 → 只报条数与原始关卡号
 async function loadMatchSanguoLevels() {
-  const r = await fetch("/api/match/sanguo-extra?levelid=0")
+  // 不再依赖 act=9 原始关卡表（字段不可读、与界面语义不符）；改用 plan_sg_layers 推演的
+  // 全 9 大关 chapters（套名/进度/推荐关号都按套卡算出，已打过的关有真实 have，未打的全 0）。
+  const r = await fetch("/api/match/sanguo-box")
     .then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
   matchSanguoLevels = r;
   renderMatchSanguoLevels();
@@ -4361,23 +4363,34 @@ function renderMatchSanguoLevels() {
     cnt.textContent = "失败";
     return;
   }
-  // act=9 的关卡表是 {levelid: {...}} 字典（不是数组），这里统一成数组再展示
-  const pack = d.levels || {};
-  const raw = pack.data || {};
-  const lv = Array.isArray(raw) ? raw
-    : Object.keys(raw).map((k) => Object.assign({}, raw[k] || {}, { levelid: (raw[k] || {}).levelid ?? k }));
-  cnt.textContent = `${lv.length} 关`;
-  const head = lv.slice(0, 12).map((x) =>
-    `<div class="rv"><span class="k">关卡 ${x.levelid ?? "-"}</span><span class="v">boss ${x.bossid ?? "-"} · 掉 ${x.dropitem || "-"}</span></div>`).join("");
-  // 闯关按钮从「各玩法一键」搬到这里：合法关卡 id 从 101 起（1~9 会被判「错误的关卡ID」）
-  const runs = lv.filter((x) => Number(x.levelid) >= 101).slice(0, 3);
-  box.innerHTML = `<div class="state-box">${head || "-"}` +
-    `<div class="rv"><span class="k">关卡总数</span><span class="v">${lv.length}</span></div>` +
-    (lv.length > 12 ? `<div class="empty-tip" style="font-size:12px">只列前 12 条，其余关卡的字段原样返回、未解读。</div>` : "") +
-    `</div>` +
-    (runs.length ? `<div class="lib-toolbar" style="gap:6px;flex-wrap:wrap;padding:6px 8px">` +
-      runs.map((x) => `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${x.levelid}" data-idle="闯关 L${x.levelid}">闯关 L${x.levelid}（消耗）</button>`).join("") +
-      `<span class="hint" style="font-size:12px">闯关会消耗次数（先喂猫到 80 再上阵）。</span></div>` : "");
+  const chs = (d.layers && d.layers.chapters) || [];
+  cnt.textContent = `${chs.length} 大关`;
+  if (!chs.length) {
+    box.innerHTML = `<div class="state-box">无大关数据</div>`;
+    return;
+  }
+  const rows = chs.map((c) => {
+    const pct = c.need ? Math.round((c.have / c.need) * 100) : 0;
+    const pct2 = Math.max(4, Math.min(100, pct));
+    let status, stColor;
+    if (c.done) { status = "已通关"; stColor = "var(--ok,#3a9)"; }
+    else if (!c.unlocked) { status = "未解锁"; stColor = "var(--muted,#999)"; }
+    else { status = `还差 ${c.gap}`; stColor = "var(--danger,#c33)"; }
+    // 闯关按钮：只对已解锁且未通关的大关给（用按套算对的推荐关号，不推未解锁关）
+    const runBtn = (c.unlocked && !c.done && c.levelid)
+      ? `<button class="btn sm danger" data-act="mm-run-sg" data-levelid="${c.levelid}" data-idle="闯关 L${c.levelid}">闯关 L${c.levelid}</button>`
+      : "";
+    return `<div style="padding:5px 2px;border-top:1px solid var(--line)">` +
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">` +
+      `<span style="font-weight:600">第 ${c.chapter} 大关 · ${c.name}</span>` +
+      `<span style="color:${stColor};font-size:12px">${status}</span></div>` +
+      `<div style="font-size:11.5px;opacity:.7;margin:1px 0 3px">套 ${c.theme} · 进度 ${c.have}/${c.need}</div>` +
+      `<div style="height:6px;border-radius:3px;background:var(--line);overflow:hidden">` +
+      `<div style="height:100%;width:${pct2}%;background:${stColor}"></div></div>` +
+      (runBtn ? `<div style="margin-top:4px">${runBtn}</div>` : "") +
+      `</div>`;
+  }).join("");
+  box.innerHTML = rows;
 }
 
 async function loadMatchGold() {
