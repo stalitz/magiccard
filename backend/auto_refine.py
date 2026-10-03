@@ -315,7 +315,17 @@ class ThemePlan:
         avail = Counter(stock)
         if credit:
             avail.update({int(c): n for c, n in credit.items() if n > 0})
-        need: dict[int, int] = {cid: max(1, int(sets)) for cid in self.ids}
+        # ★ 2026-10-03 修正：只有【顶层收藏卡】按 sets 放大，**素材/中间层不放大**。
+        #   40 面卡是「每套**消耗** 1 张」的素材，不是「每套要**收集** N 张」的藏品。
+        #   旧写法 need={cid: sets} 把每张套内卡都按 sets 算 → 40 面被「收藏需求 +
+        #   素材消耗」双重放大（实测 sets=6：种生求子被算成要炼 7 张，而囤 4 张本已
+        #   够 6 套用 → 超采、偷炉去炼囤多的那张）。现在素材层 need 初始为 0，只靠
+        #   顶层需求沿配方树传导 —— 炼 N 张顶层就正好消耗各 N 张 40 面，不多不少。
+        maxd = max((self.depth.get(c, 0) for c in self.ids), default=0)
+        tops = {c for c in self.ids
+                if self.depth.get(c, 0) == maxd and self.comp.get(c)}
+        need: dict[int, int] = {cid: (max(1, int(sets)) if cid in tops else 0)
+                                for cid in self.ids}
         runs: dict[int, int] = {}
         buy: dict[int, int] = {}
         for cid in sorted(self.depth, key=lambda c: -self.depth[c]):
