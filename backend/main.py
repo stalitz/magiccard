@@ -306,13 +306,18 @@ async def auto_status():
 async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0,
                     steal: int = 1, steal_friend: str = "",
                     gift_drain: int = 0, gift_dst: int = 0,
-                    gift_upper: int = 0, gift_lower: int = 0):
+                    gift_upper: int = 0, gift_lower: int = 0,
+                    sets: int = 0):
     """启动自动炼卡（**可多套并行**）。先按**实时库存算净需求**做启动预检。
 
     · `tids` = 逗号分隔的套卡 id 列表（队列，按序轮转，空着的炉位给各套分着用）；
       兼容旧参数 `tid`（单套）。
     · `rounds` = **每套**集齐上限，0 = 不限。某套达标后自动移出队列，队列空即停止。
       队列里有几套就炼几套 —— 长炉时（如魏书 10h）炉位不会闲着。
+    · `sets` = **套数设置**（每轮排几套，2026-10-03 用户定调）：
+      0 = 默认，**一直炼、不空卡炉** —— 1 星套按「当前囤的 40 面卡能炼几套顶层卡」
+      自动算（炉位能排多少排多少；缺料引擎自己变卡/买底卡补）；其他星仍按 1 套。
+      >0 = 固定每轮排这么多套。
 
     净需求口径（2026-09-16 改）：只补「凑齐一套还缺的卡」，已有的成品卡直接抵扣，
     不再像旧版那样按「全套从零」展开——旧口径会把已持有卡那份素材需求全额压到
@@ -331,6 +336,7 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
         eng = AutoRefine(_session, ids, buy=bool(buy), max_rounds=rounds)
     except Exception as exc:  # noqa: BLE001  (tid 不存在等)
         return {"ok": False, "message": f"无法加载该套卡计划：{exc}"}
+    eng.surplus_sets = max(0, int(sets or 0))   # 套数设置：0=自动（1星按囤卡多套）
     eng.steal_enabled = bool(steal)
     if steal_friend.strip():
         eng.preferred_steal_friend = steal_friend.strip()

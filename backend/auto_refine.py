@@ -297,7 +297,7 @@ class ThemePlan:
         return card_name(cid)
 
     def net_plan(self, stock: Counter, pending: Counter,
-                 credit: Counter | None = None) -> tuple[dict, dict]:
+                 credit: Counter | None = None, sets: int = 1) -> tuple[dict, dict]:
         """净需求：返回 (要炼的 {卡id: 次数}, 要买的 {底卡id: 张数})。
 
         库存（箱内 + 炉内在炼）从总需求里抵扣；只有**实际要新炼/新买**的数量
@@ -306,11 +306,16 @@ class ThemePlan:
         `credit` = **变卡环节接下来会产出的 40 面卡**（见 `_face40_credit`），
         先算作已到货。否则净需求会把「集卡册那一份 40 面卡」当成还得从底卡炼出来，
         于是「变卡变出 40 面卡」和「炼卡再炼一张 40 面卡」两头同时做 —— 变卡就白变了。
+
+        ★ 2026-10-03 用户定调「加套数设置，默认 0 = 一直炼、不空炉、1 星按囤卡炼多套」：
+        `sets` = 每张套内卡要几张（= 炼几套）。`sets=1` 是旧行为（凑 1 套）。
+        更大的 `sets` 让引擎一次排更多炉次（多套并行、炉位不闲）；库存抵扣照旧，
+        所以「按囤卡炼多套」是自动的 —— 囤够就多炼、囤不够就少炼，绝不空转。
         """
         avail = Counter(stock)
         if credit:
             avail.update({int(c): n for c, n in credit.items() if n > 0})
-        need: dict[int, int] = {cid: 1 for cid in self.ids}
+        need: dict[int, int] = {cid: max(1, int(sets)) for cid in self.ids}
         runs: dict[int, int] = {}
         buy: dict[int, int] = {}
         for cid in sorted(self.depth, key=lambda c: -self.depth[c]):
@@ -505,6 +510,13 @@ class AutoRefine:
         self.queue = [t for t in self.tids]
         self.buy = buy
         self.max_rounds = max_rounds          # 0 = 不限（**每套**的上限）
+        # ★ 2026-10-03 用户定调「加一个套数设置，默认 0 = 一直炼、不停、不空卡炉；
+        #   1 星卡按囤的卡炼多套，其他星先不用这个逻辑」。
+        # surplus_sets = 每轮 net_plan 的「套数」倍数（每张套内卡要几张）：
+        #   0  = 自动（1 星套按当前囤卡能炼几套就算几套，炉位排满；其他星 = 1 套）；
+        #   >0 = 固定每轮排这么多套。
+        self.surplus_sets = 0
+        self._last_sets: dict[int, int] = {}  # 每套本轮实际用的 sets（status/日志用）
         self.running = False
         self.interval = 45.0
         self.log: list[dict] = []
@@ -584,6 +596,44 @@ class AutoRefine:
     def net_plan(self, stock: Counter, pending: Counter, tid: int | None = None):
         p = self.plans[tid or self.tids[0]]
         return p.net_plan(stock, pending)
+
+    # ---------- 套数（每轮排几套）★ 2026-10-03 用户定调 ----------
+    def _calc_sets(self, plan: "ThemePlan", stock: Counter, pending: Counter,
+                   free_slots: int = 0) -> int:
+        """这一套本轮排几套（= `net_plan` 的 sets 倍数）。
+
+        `surplus_sets`（用户设置的「套数」，默认 0）：
+          · >0  —— 固定每轮排这么多套；
+          · 0   —— **自动**：1 星套按「当前囤的 40 面卡能炼几套顶层卡」算（不设上限、
+                  炉位能排多少排多少）；其他星仍按 1 套（用户定调「其他星先不用这个
+                  逻辑」，其配方结构未必是 1 星这种「顶层 = 3 张不同 40 面各 1」）。
+
+        1 星「按囤卡算套数」：顶层卡（如七夕情人节 150 面）= 若干张 40 面各 1，
+        能炼几套 = 这些 40 面持有数的**最小值**（瓶颈）。但 0 套会空炉，所以至少
+        排 1 套（缺的那部分引擎会自己变卡/买底卡炼出来）；同时不超炉位数 + 1，
+        免得一次排出几十个炉次、白买一堆底卡。
+        """
+        if self.surplus_sets and self.surplus_sets > 0:
+            return int(self.surplus_sets)
+        if plan.star != 1:                     # 其他星先不启用「按囤卡炼多套」
+            return 1
+        # 1 星：找顶层卡（depth 最大）及其需要的 40 面卡
+        if not plan.ids:
+            return 1
+        maxd = max((plan.depth.get(c, 0) for c in plan.ids), default=0)
+        tops = [c for c in plan.ids if plan.depth.get(c, 0) == maxd and plan.comp.get(c)]
+        if not tops:
+            return 1
+        comp = plan.comp[tops[0]]
+        ing = [int(m) for m in (comp[3], comp[4], comp[5]) if m]
+        if not ing:
+            return 1
+        have = [stock.get(c, 0) + pending.get(c, 0) for c in ing]
+        by_stock = min(have)                   # 瓶颈：这些 40 面各要 1 张/套
+        sets = max(1, by_stock)                # 0 也至少 1 套（缺料引擎自己补，不空炉）
+        # 上限：炉位数 + 1（够把空炉排满并留一点余量，不至于一次买爆底卡）
+        cap = max(1, int(free_slots) + 1) if free_slots else sets
+        return max(1, min(sets, cap))
 
     @staticmethod
     def _stock_from(st: dict | None) -> Counter:
@@ -863,7 +913,10 @@ class AutoRefine:
             # 再炼一张同款 40 面卡，变卡就白做了（详见 _face40_credit）
             credit = self._face40_credit(p, st)
             self.face40_credit[tid] = credit
-            runs, buy = p.net_plan(stock, pending, credit)
+            # ★ 套数：1 星按囤卡算能炼几套（炉位排满不空转）；其他星 1 套（见 _calc_sets）
+            sets = self._calc_sets(p, stock, pending, free_stove)
+            self._last_sets[tid] = sets
+            runs, buy = p.net_plan(stock, pending, credit, sets=sets)
             plans_net[tid] = (runs, buy)
             planned |= set(runs) | set(buy) | set(credit)
         bought = 0
@@ -1387,6 +1440,10 @@ class AutoRefine:
                 "themes": themes or self.live_plans,
                 "queue": list(self.queue),
                 "stats": self.stats, "interval": self.interval,
+                # 套数设置（0=自动：1 星按囤卡炼多套不空炉；>0 固定每轮排这么多套）
+                "surplus_sets": self.surplus_sets,
+                "sets_now": {self.plans[t].name: self._last_sets.get(t, 1)
+                             for t in self.queue},
                 "randchance": self.randchance,
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
