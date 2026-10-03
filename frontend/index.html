@@ -1580,8 +1580,19 @@
               <button class="btn sm ok" data-act="mm-raid-sg" data-idle="一键出战（出战中…）">一键出战（今日剩余 3 次）</button>
               <button class="btn sm ok" data-act="mm-claim" data-only="sanguo" data-idle="一键领奖">一键领奖</button>
             </div>
-            <div class="lib-body dg-cols">
-              <div class="dg-col" style="flex:1">
+            <!-- 两列（cols-2）：左宽列放信息最密的「关卡卡箱+保险箱」，更矮、不再独占整行；
+                 右窄列上下堆叠「三国战役状态 + 关卡列表」，填充满右栏，消除原先的空列。 -->
+            <div class="lib-body dg-cols cols-2">
+              <div class="dg-col">
+                <div class="lst" style="max-height:none">
+                  <div class="lst-head"><span class="t">关卡卡箱 + 保险箱</span>
+                    <span class="cnt" id="match-sgbox-cnt"></span></div>
+                  <div id="match-sgbox-box">
+                    <div class="state-box"><span class="spinner"></span>正在读取关卡卡箱…</div>
+                  </div>
+                </div>
+              </div>
+              <div class="dg-col">
                 <div class="lst" style="max-height:none">
                   <div class="lst-head"><span class="t">三国战役</span>
                     <span class="cnt" id="match-sanguo-cnt"></span></div>
@@ -1589,22 +1600,10 @@
                     <div class="state-box"><span class="spinner"></span>正在读取三国战役…</div>
                   </div>
                 </div>
-              </div>
-              <div class="dg-col" style="flex:1">
                 <div class="lst" style="max-height:none">
                   <div class="lst-head"><span class="t">三国战役 · 关卡列表</span>
                     <span class="cnt" id="match-sanguo-levels-cnt"></span></div>
                   <div id="match-sanguo-levels"><div class="state-box">读取中…</div></div>
-                </div>
-              </div>
-            </div>
-
-            <div class="lib-body" style="grid-template-columns:minmax(0,1fr);margin-top:8px">
-              <div class="lst" style="max-height:none">
-                <div class="lst-head"><span class="t">关卡卡箱 + 保险箱</span>
-                  <span class="cnt" id="match-sgbox-cnt"></span></div>
-                <div id="match-sgbox-box">
-                  <div class="state-box"><span class="spinner"></span>正在读取关卡卡箱…</div>
                 </div>
               </div>
             </div>
