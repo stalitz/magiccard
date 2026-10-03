@@ -358,7 +358,18 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     for c in st["change"] + st["store"]:
         stock[c["id"]] += 1
     pending: Counter = Counter(c["id"] for c in st["stove"] if c["id"] > 0)
-    plans = [eng.plan_summary(stock, pending, t) for t in ids]
+    # ★ 套数设置：预检必须按同一个 sets 口径算，否则囤了多套也判「已凑齐」硬挡，
+    #   sets 参数形同虚设（用户要「按囤卡炼多套、不空炉」，就得以多套口径启动）。
+    #   sets=0(自动/1星按囤卡) 时按引擎实际会排的套数算（_calc_sets）。
+    pre_sets = eng.surplus_sets if eng.surplus_sets > 0 else 1
+    if eng.surplus_sets <= 0:
+        # sets=0(自动)：按引擎真实口径算（1星按囤卡/炉位·h 排几套），
+        # 否则预检按固定 1 套判「已凑齐」会把自动多套硬挡在门外。
+        nfree = st["cap"].get("stove", {}).get("free_main", 0)
+        pre_sets = max(
+            (eng._calc_sets(eng.plans[t], stock, pending, nfree) for t in ids),
+            default=1)
+    plans = [eng.plan_summary(stock, pending, t, sets=pre_sets) for t in ids]
     bad = [p for p in plans if not p["ok"]]
     if bad:
         return {"ok": False, "plans": plans,

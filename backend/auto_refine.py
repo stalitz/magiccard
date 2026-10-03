@@ -336,13 +336,17 @@ class ThemePlan:
         return runs, buy
 
     def plan_summary(self, stock: Counter | None = None,
-                     pending: Counter | None = None) -> dict:
-        """静态视图：不给库存时按「全套从零」展示（等价旧 mrp 口径）。"""
+                     pending: Counter | None = None, sets: int = 1) -> dict:
+        """静态视图：不给库存时按「全套从零」展示（等价旧 mrp 口径）。
+
+        ★ 2026-10-03 加 `sets`：套数设置 >1 时按多套算净需求（囤了多张 40 面就要
+        炼多套），否则启动预检会按「1 套已凑齐」硬挡、sets 参数形同虚设。
+        """
         if stock is None:
             runs, buy = dict(self.runs), dict(self.base_need)
             ok = bool(self.ok)
         else:
-            runs, buy = self.net_plan(stock, pending or Counter())
+            runs, buy = self.net_plan(stock, pending or Counter(), sets=sets)
             ok = True
         # 与 _refine_all 的 real 排产同口径：深度**降序 = 先炼高面额**，
         # 否则面板列的顺序和引擎实际先提交的不一致（看着像在囤 40 面卡）
@@ -589,9 +593,10 @@ class AutoRefine:
         return self.plans[self.tids[0]].ids
 
     def plan_summary(self, stock: Counter | None = None,
-                     pending: Counter | None = None, tid: int | None = None) -> dict:
+                     pending: Counter | None = None, tid: int | None = None,
+                     sets: int = 1) -> dict:
         p = self.plans[tid or self.tids[0]]
-        return p.plan_summary(stock, pending)
+        return p.plan_summary(stock, pending, sets=sets)
 
     def net_plan(self, stock: Counter, pending: Counter, tid: int | None = None):
         p = self.plans[tid or self.tids[0]]
@@ -667,7 +672,7 @@ class AutoRefine:
         return sorted(runs, key=key)
 
     def _calc_sets(self, plan: "ThemePlan", stock: Counter, pending: Counter,
-                   free_slots: int = 0, cap_hours: float = 0.0) -> int:
+                   free_slots: int = 0) -> int:
         """这一套本轮排几套（= `net_plan` 的 sets 倍数）。
 
         `surplus_sets`（用户设置的「套数」，默认 0）：
@@ -680,11 +685,10 @@ class AutoRefine:
         能炼几套 = 这些 40 面持有数的**最小值**（瓶颈）。但 0 套会空炉，所以至少
         排 1 套（缺的那部分引擎会自己变卡/买底卡炼出来）。
 
-        ★ 2026-10-03 用户指出「要考虑炼卡时间，150 的 4 小时、40 的 1 小时」：
-        sets 的**上限按炉·小时算**而非炉位数 —— 一张 150 面占炉 4h，若按「炉位数+1」
-        排 N 套会高估短期吞吐（引擎是每 tick 投空闲炉的离散循环，150 一投就占 4h，
-        根本投不完那么多），徒买一堆底卡。故 `cap_hours` = 本轮可支配的炉·小时
-        （= 空闲炉位数 × 一个 tick 覆盖的时长），除以每套炉·h 得套数上限。
+        ★ 2026-10-03 修正：套数按「**囤得最多的那张 40 面卡**」(`max`) 算、只以炉位数
+        封顶。曾用「顶层炼时(4h)×炉位/每套炉·h(7)」做 time_cap，那是**错的** —— 引擎
+        45s 一 tick **持续**跑，固定 4h 窗口把套数掐死成 1~2，囤 6 张也只炼 1 套
+        （空炉 + 囤货白囤）。防买爆底卡交给 MAX_BUY_PER_TICK + 换卡箱容量。
         """
         if self.surplus_sets and self.surplus_sets > 0:
             return int(self.surplus_sets)
@@ -702,16 +706,19 @@ class AutoRefine:
         if not ing:
             return 1
         have = [stock.get(c, 0) + pending.get(c, 0) for c in ing]
-        by_stock = min(have)                   # 瓶颈：这些 40 面各要 1 张/套
-        sets = max(1, by_stock)                # 0 也至少 1 套（缺料引擎自己补，不空炉）
-        # 时间上限：可支配炉·h / 每套炉·h（不按张数硬排，避免高估 + 徒买底卡）
-        if cap_hours and free_slots:
-            per_set = self._set_furnace_hours(plan, tops[0])
-            if per_set > 0:
-                # 空闲炉能并行跑 cap_hours 小时 → 能炼几套
-                time_cap = max(1, int((cap_hours * free_slots) / per_set))
-                sets = min(sets, time_cap)
-        # 兜底仍以炉位数封顶（离散循环一轮最多排这么多个空闲炉次）
+        # ★ 2026-10-03 修正为 **max(持有)**（原 min 是错的）：
+        #   用户意图「按**已囤的卡**炼多套」——囤了 6 张种生求子就想炼 6 套，
+        #   缺的求姻缘/斗巧**引擎自己变卡/买底卡炼出来**，不该拖低套数。
+        #   min 会让「种6/姻0/巧0」这种（求姻缘/斗巧还没炼好）恒算成 1 套，
+        #   囤 6 张也只炼 1 套 → 空炉 + 囤货白囤（真机复现：预检判「已凑齐」硬挡）。
+        by_stock = max(have)                   # 囤得多的那张 = 能炼几套
+        sets = max(1, by_stock)                # 至少 1 套（缺料引擎自己补，不空炉）
+        # 兜底以炉位数封顶：一轮最多把空闲炉位排满，剩余的下一 tick 继续（持续循环）。
+        # ⚠ 之前用「顶层炼时(4h)×炉位/每套炉·h」做 time_cap 是**错的**：引擎是 45s
+        #   一 tick 持续跑的，不是「只看 4 小时的单轮」，固定 4h 窗口把套数掐死成 1
+        #   （4炉×4h/7炉·h=2），囤 6 张也只炼 1~2 套 → 空炉 + 囤货白囤。
+        #   防「一次买爆底卡」交给 MAX_BUY_PER_TICK(每 tick 买卡上限) + 换卡箱容量，
+        #   不再用固定时间窗掐套数。
         cap = max(1, int(free_slots) + 1) if free_slots else sets
         return max(1, min(sets, cap))
 
@@ -1001,17 +1008,9 @@ class AutoRefine:
             # 再炼一张同款 40 面卡，变卡就白做了（详见 _face40_credit）
             credit = self._face40_credit(p, st)
             self.face40_credit[tid] = credit
-            # ★ 套数：1 星按囤卡算能炼几套（炉位排满不空转）；其他星 1 套（见 _calc_sets）
-            #   cap_hours 取「顶层卡自身的炼时」= 一张最慢卡的占炉时长（150=4h）：
-            #   引擎是持续循环投空闲炉，一个 4h 的 150 投进去就要占 4h，期间其他炉
-            #   只能炼 1h 的 40；所以一轮能消化的套数上限 ≈ 空闲炉 × 顶层炼时 / 每套炉·h。
-            top_secs = 0.0
-            _md = max((p.depth.get(c, 0) for c in p.ids), default=0)
-            for _c in p.ids:
-                if p.depth.get(_c, 0) == _md and p.comp.get(_c):
-                    top_secs = max(top_secs, self._card_secs(p, _c) / 3600.0)
-                    break
-            sets = self._calc_sets(p, stock, pending, free_stove, cap_hours=top_secs)
+            # ★ 套数：1 星按「囤得最多的那张 40 面卡」算能炼几套，只以炉位数封顶
+            #   （引擎持续循环跑，剩的下一 tick 继续；见 _calc_sets 修正说明）。
+            sets = self._calc_sets(p, stock, pending, free_stove)
             self._last_sets[tid] = sets
             runs, buy = p.net_plan(stock, pending, credit, sets=sets)
             plans_net[tid] = (runs, buy)
