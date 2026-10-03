@@ -4132,14 +4132,13 @@ function renderMatchSanguoBox() {
 function sgLayerPanel(L) {
   const rec = L.recommend || null;
   const head = `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px;font-weight:600">` +
-    `层进度（关卡越靠后掉卡越少：第 1 层 1 张、第 2 层 3 张、第 5 层 8 张）</div>`;
+    `层进度（按大关分开看；关卡越靠后掉卡越少：第 1 层 1 张、第 2 层 3 张、第 5 层 8 张）</div>`;
   const recHtml = rec
     ? `<div style="color:var(--danger);margin:3px 0">` +
       `建议打<b>小关 ${rec.levelid}</b>（游戏第 ${rec.g} 层）：` +
       `${rec.why}，比第 5 层那种 8 张一套的快得多。</div>`
     : `<div style="color:var(--ok,var(--muted,#888));margin:3px 0">每一层都齐了，可以继续上交了。</div>`;
-  // 「还差什么」只列**再打一张就能补齐**的卡（差 1 张的），其余整层表里有。
-  // 全列的话两套加一起 20 张，反而盖住真正该盯的目标（2026-09-28 实测 20 个卡名刷屏）。
+  // 「再打一张就凑齐」的卡（差 1 张），避免整表 20 张刷屏
   const near = [];
   (L.levels || []).forEach((lv) => (lv.by_theme || []).forEach((r) => {
     if (r.need - r.have !== 1) return;
@@ -4148,29 +4147,36 @@ function sgLayerPanel(L) {
   const lackHtml = near.length
     ? `<div style="margin:3px 0">再打一张就能凑齐的：<b>${[...new Set(near)].join("、")}</b></div>`
     : "";
-  const rows = (L.levels || []).map((lv) => {
-    const per = (lv.by_theme || []).map((r) => {
-      if (r.done) return `${r.theme} 套 ${r.have}/${r.need}（已齐）`;
-      // 直接点出还差哪几张的名字，别只给「差 1 张」让人自己猜
-      const lack = (r.missing || []).map((c) => c.name || ("卡" + c.card_id)).join("、");
-      return `${r.theme} 套 ${r.have}/${r.need}（还缺 ${lack}）`;
-    }).join("；");
-    // 推荐关号不一定等于 10N（当前关 204 属于第 4 层），别写成 104
-    const mark = (rec && rec.layer === lv.layer)
-      ? `<br><b style="color:var(--danger)">现在就打小关 ${rec.levelid}</b>` : "";
-    // 按箱合计，别按套重复列（两套各 1 张不该写成「关卡卡箱 1 + 关卡卡箱 1」）
-    const nEx = (lv.by_theme || []).reduce((s, r) => s + r.have_ex, 0);
-    const nSf = (lv.by_theme || []).reduce((s, r) => s + r.have_safe, 0);
-    const where = [];
-    if (nEx) where.push(`关卡卡箱 ${nEx}`);
-    if (nSf) where.push(`保险箱 ${nSf}`);
-    const none = where.length
-      ? where.join(" + ") + "（两套分着算）"
-      : "一个都没有，得打这一档的小关才出";
-    return matchRow(`游戏第 ${lv.g} 层 · 小关 ${lv.levelid}`,
-      `${per}${mark}<br><span style="opacity:.7;font-size:11.5px">现在：${none}</span>`);
+  // ★ 按大关分组：第 1 大关 / 第 2 大关 … 各自独立一块，不混排（用户 2026-10-03 要求）
+  const byCh = {};
+  (L.levels || []).forEach((lv) => (lv.by_theme || []).forEach((r) => {
+    const ch = r.chapter || 0;
+    (byCh[ch] = byCh[ch] || []).push({ lv, r });
+  }));
+  const chs = Object.keys(byCh).map(Number).sort((a, b) => a - b);
+  const blocks = chs.map((ch) => {
+    const items = byCh[ch].sort((a, b) => a.lv.g - b.lv.g);
+    const chName = items[0] ? (items[0].r.chapter_name || "") : "";
+    const rows = items.map(({ lv, r }) => {
+      const per = r.done
+        ? `${r.theme} 套 ${r.have}/${r.need}（已齐）`
+        // 直接点出还差哪几张的名字，别只给「差 1 张」让人自己猜
+        : `${r.theme} 套 ${r.have}/${r.need}（还缺 ${(r.missing || []).map((c) => c.name || ("卡" + c.card_id)).join("、")}）`;
+      const mark = (rec && rec.theme === r.theme && rec.layer === r.layer)
+        ? `<br><b style="color:var(--danger)">现在就打小关 ${rec.levelid}</b>` : "";
+      // 按箱合计（本套内），别按层重复列
+      const where = [];
+      if (r.have_ex) where.push(`关卡卡箱 ${r.have_ex}`);
+      if (r.have_safe) where.push(`保险箱 ${r.have_safe}`);
+      const none = where.length ? where.join(" + ") + "（本套）"
+        : "一个都没有，得打这一档的小关才出";
+      return matchRow(`游戏第 ${lv.g} 层`,
+        `${per}${mark}<br><span style="opacity:.7;font-size:11.5px">现在：${none}</span>`);
+    }).join("");
+    return `<div style="margin-top:5px"><div style="font-weight:600;color:var(--muted);margin-bottom:2px">` +
+      `第 ${ch} 大关${chName ? " · " + chName : ""}</div>${rows}</div>`;
   }).join("");
-  return head + recHtml + lackHtml + rows;
+  return head + recHtml + lackHtml + blocks;
 }
 
 async function sanguoSellSpare(bno) {

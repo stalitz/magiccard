@@ -1866,6 +1866,7 @@ def plan_sg_layers(state: dict) -> dict:
             have = len(have_ids)
             ch = _sg_theme_chapter(th)
             rows.append({"theme": th, "chapter": ch,
+                         "chapter_name": _sg_theme_name(th),
                          # ★ 这一套的这一层该打哪个小关：关号 = **该套所属大关** ×100 + 层。
                          #   2026-09-29 修：以前一律用「当前大关」推，1745（第 1 大关）的缺口
                          #   会被推成 202（第 2 大关），而 202 掉的是 1746 的卡、永远补不到。
