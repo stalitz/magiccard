@@ -1731,6 +1731,8 @@ def plan_box(state: dict, box: str = "ex") -> dict:
             m["layer"] = None
             m["name"] = f"卡{cid}"
         m["ts"] = int(x.get("ts") or 0)
+        m["chapter"] = _sg_theme_chapter(m["theme"])
+        m["chapter_name"] = _sg_theme_name(m["theme"])
         slots.setdefault(m["slot"], []).append(m)
     by_slot, spare = [], []
     for slot, a in sorted(slots.items(), key=lambda kv: -kv[1][0]["ts"]):
@@ -1741,6 +1743,7 @@ def plan_box(state: dict, box: str = "ex") -> dict:
                                 {"slot": slot, "layer": m["layer"],
                                  "g": _sg_g(m["layer"]),   # 游戏界面的层号（1=boss层）
                                  "theme": m["theme"],
+                                 "chapter": m["chapter"], "chapter_name": m["chapter_name"],
                                  "keep": m, "cards": [], "count": 0})
             g["cards"].append(m)
             g["count"] += 1

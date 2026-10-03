@@ -4048,26 +4048,47 @@ async function loadMatchSanguoBox() {
   renderMatchSanguoBox();
 }
 
-// 一个箱子的层卡明细 + 同层多余可卖
+// 一个箱子的层卡明细 + 同层多余可卖。按大关（chapter）分组，卡用网格多列显示。
 function sgBoxPanel(label, plan, bno) {
-  const rows = (plan.slots || []).map((s) => {
-    const keep = s.keep || {};
-    // 同一层里不同的卡都要收集；只有同名卡拿到 2+ 张，多出来的才是多余
-    const extra = s.count > 1 ? `（同名卡拿到 ${s.count} 张，多 ${s.count - 1} 张可卖）` : "";
-    // s.g = 游戏界面的层号（1=boss 层只有 1 张，5=要攒 8 张），别用 s.layer（卡库编号，反的）
-    return matchRow(`第 ${s.g ?? s.layer} 层`, `${keep.name || "?"}${extra}`);
+  const chName = (ch) => {
+    const nm = (groups[ch] && groups[ch][0] && groups[ch][0].chapter_name) || "";
+    return ch ? `第 ${ch} 大关${nm ? " · " + nm : ""}` : "其他";
+  };
+  // 按大关分组 slot
+  const groups = {};
+  (plan.slots || []).forEach((s) => {
+    const ch = s.chapter || 0;
+    (groups[ch] = groups[ch] || []).push(s);
+  });
+  const chOrder = Object.keys(groups).map(Number).sort((a, b) => a - b);
+  const cardsHtml = chOrder.map((ch) => {
+    const grid = groups[ch].map((s) => {
+      const extra = s.count > 1 ? ` <b style="color:var(--danger)">×${s.count}</b>` : "";
+      return `<div class="sg-card">第 ${s.g ?? s.layer} 层 · ${s.keep && s.keep.name ? s.keep.name : "?"}${extra}</div>`;
+    }).join("");
+    return `<div class="sg-ch"><div class="sg-ch-h">${chName(ch)}（${groups[ch].length} 张）</div>` +
+      `<div class="sg-grid">${grid}</div></div>`;
   }).join("");
+  // 重复多余（可卖）按大关分组列出
   const spare = plan.spare || [];
+  let spareHtml;
+  if (spare.length) {
+    const sg = {};
+    spare.forEach((s) => { const ch = s.chapter || 0; (sg[ch] = sg[ch] || []).push(s); });
+    const order = Object.keys(sg).map(Number).sort((a, b) => a - b);
+    const rows = order.map((ch) =>
+      `${chName(ch)}：${sg[ch].map((s) => s.name || "卡" + s.card_id).join("、")}`).join("；");
+    spareHtml = matchRow("重复多余的（可卖）", rows) +
+      `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all" data-box="${bno}">` +
+      `卖掉${label}重复的 ${spare.length} 张（换三国币）</button></div>`;
+  } else {
+    spareHtml = matchRow("重复多余的（可卖）", "无 —— 同一层的不同卡都要留着收集");
+  }
   return `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">` +
     `<div style="font-weight:600;margin-bottom:4px">${label}` +
     `<span style="opacity:.7;font-weight:400">　${plan.filled}/${plan.capacity} 格</span></div>` +
-    (rows || matchRow("层卡", "（空）")) +
-    (spare.length
-      ? matchRow("重复多余的（可卖）", spare.map((s) => `${s.name || "卡" + s.card_id}`).join("、")) +
-        `<div style="margin:6px 0"><button class="btn sm ok" data-act="mm-sgsell-all" data-box="${bno}">` +
-        `卖掉${label}重复的 ${spare.length} 张（换三国币）</button></div>`
-      : matchRow("重复多余的（可卖）", "无 —— 同一层的不同卡都要留着收集")) +
-    `</div>`;
+    (cardsHtml || `<div class="empty-tip">（空）</div>`) +
+    spareHtml + `</div>`;
 }
 
 function renderMatchSanguoBox() {
