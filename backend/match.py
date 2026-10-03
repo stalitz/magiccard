@@ -1093,6 +1093,53 @@ async def union_shake_fruit(session, reset_first: bool = True) -> dict:
     return r
 
 
+async def run_union_shake(session) -> dict:
+    """一键工会内「摇水果」：循环打满每日次数（SHAKE_DAILY_LIMIT=3）。
+
+    用户 10-03 重新定调机制（覆盖旧 bisai2 解读）：
+      - 每一轮 = **先重置(act=16) 再开始(act=17)**，严格 reset→start，
+        不存在 start→reset→start。3 轮 ×（1 重置 + 1 开始）= **6 次接口**
+        （never 5-same 时）。
+      - 若某一轮重置后已是「5 个相同（五连）」，则下一轮**跳过重置、直接开始**
+        （重置只会把五连重新随机化、得不偿失）：即「已经是 5 个一样的就不用重置了」。
+      - 开始(act=17) 受每日 3 次硬闸（本地 SHAKE_DAILY_LIMIT + 服务端 busy 双保险）；
+        重置(act=16) 不限次（旧注释：当日 6 连发均成功）。
+      - 今日已开始次数已用满（本地配额 blocked）则直接收尾，不再白烧重置。
+
+    返回 rounds 明细，每轮含 reset_ok/reset_fruits/reset_skipped/start_ok/start_used。
+    """
+    rounds = []
+    last_max = 0  # 上一轮重置后的最大相同数（5 连则跳过本轮重置）
+    for i in range(SHAKE_DAILY_LIMIT):
+        q = _union_quota_check("shake", SHAKE_DAILY_LIMIT)
+        if q.get("blocked"):
+            rounds.append({"round": i + 1, "reset_ok": None, "reset_fruits": None,
+                           "reset_skipped": None, "start_ok": False,
+                           "start_used": q.get("used"),
+                           "msg": q.get("message") or "今日已开始次数已用完"})
+            break  # 今日已开始次数已用完，不重置（避免白烧）
+        # 5 连则跳过重置，直接开始
+        if last_max >= 5:
+            rst = None
+        else:
+            rst = await union_fruit_reset(session)
+            last_max = rst.get("max_same", 0)
+        s = await union_shake_fruit(session, reset_first=False)
+        rounds.append({
+            "round": i + 1,
+            "reset_ok": (rst or {}).get("ok"),
+            "reset_fruits": (rst or {}).get("fruits"),
+            "reset_skipped": last_max >= 5,
+            "start_ok": s.get("ok"),
+            "start_used": s.get("used"),
+            "msg": ((rst or {}).get("text", "") + " → " + (s.get("text") or s.get("message") or "")).strip(" →"),
+        })
+        if s.get("blocked") or not s.get("ok"):
+            break
+    return {"ok": any(r.get("start_ok") for r in rounds), "rounds": rounds,
+            "count": len(rounds)}
+
+
 async def union_exchange_redstone(session, optype: int = 4, uptype: int = 1) -> dict:
     """工会商店兑换（union act=21 {optype, uptype}）—— **每日 1 次策略闸**。
 
@@ -1394,11 +1441,13 @@ def _save_union_run(payload: dict) -> None:
 async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
                     do_redpacket: bool = True, feed: bool = True,
                     do_battle: bool = True) -> dict:
-    """「一键工会」：摇水果(act=17，每日3次) → 商店兑换(act=21，每日1次策略闸) →
-    抢红包(act=19+20) → 公会战出战(act=23)。
+    """「一键工会」：摇水果(act=16 重置 + act=17 开始，每日3轮×(重置+开始)=6接口) →
+    商店兑换(act=21，每日1次策略闸) → 抢红包(act=19+20) → 公会战出战(act=23)。
 
-    2026-09-29 三次实证修正：
-      - act=17 = **摇水果**（每日 3 次，第 4 次服务端 busy 拒绝）。
+    2026-09-29 三次实证修正 + 2026-10-03 摇水果循环定调：
+      - 摇水果每轮 = **先 act=16 重置 再 act=17 开始**（严格 reset→start，非 start→reset）；
+        3 轮共 6 次接口；若某轮重置后已五连(5 个相同)，下一轮**跳过重置直接开始**。
+        act=17 每日 3 次（第 4 次服务端 busy 拒绝），act=16 重置不限次。
       - act=21 = **商店兑换**（每周刷新 1 次、每件 maxnum=1、无日限额；每日 1 次是
         任务策略闸，靠 EXCHANGE_DAILY_LIMIT=1 当日已兑就不再发）。
       - act=19+20 抢红包：自己 uin 不在 listN 里才发 act=20。
@@ -1412,11 +1461,14 @@ async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
     coin0 = before.get("coin")
     chip0 = before.get("chip")
 
-    # 1) 摇水果（act=17，每日 3 次；本地硬闸 + 服务端 busy 双保险）
+    # 1) 摇水果（act=17 开始 / act=16 重置，每日 3 轮 ×（重置+开始）= 6 接口；
+    #    本地硬闸 + 服务端 busy 双保险；5 连跳过重置换直接开始）
     if do_shake:
-        s = await union_shake_fruit(session)
-        steps.append({"act": "shake", "ok": s.get("ok"),
-                      "msg": s.get("text") or s.get("message") or "摇水果无返回"})
+        sh = await run_union_shake(session)
+        steps.append({"act": "shake", "ok": sh.get("ok"),
+                      "rounds": sh.get("rounds"),
+                      "msg": "；".join(f"第{r['round']}轮：{r['msg']}"
+                                      for r in sh.get("rounds", [])) or "摇水果无返回"})
 
     # 2) 商店兑换（act=21，每日 1 次策略闸；当日已兑就跳过不发，省周库存）
     if do_exchange:
