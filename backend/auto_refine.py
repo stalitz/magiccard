@@ -899,6 +899,14 @@ class AutoRefine:
                     continue
                 for cid in miss_base:
                     if self._free_change(st) <= 0:
+                        # ★ 收尾补集卡册底卡也要能腾位（此前只在 _prepare_turn 腾，
+                        #   这里换卡箱满就报「0 空位」买不进底卡 → 集卡册永远补不齐）。
+                        freed = await self._make_room(tid, 1, st, steps)
+                        if freed > 0:
+                            rd = await self._read_state()
+                            if rd is not None:
+                                st, stock, slots, pending = rd
+                    if self._free_change(st) <= 0:
                         self._log("买卡", False,
                                   f"卡箱 0 空位，{card_name(cid)} 买不进来："
                                   f"{plan.name} 集卡册还差 {len(miss_base)} 张底卡 —— 这是真的空间不足")

@@ -378,6 +378,18 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     #  那时引擎会明确报出来）。
     need = 1
     if free["change"] < need:
+        # ★ 2026-10-03：换卡箱满时不再直接拒绝启动，而是**先腾位**（优先移保险箱、
+        #   10 面底卡卖掉；见 AutoRefine._make_room）再重试。真机复现：收尾补集卡册
+        #   底卡时换卡箱 0 空位 → 启动预检直接拒绝，引擎根本起不来。
+        freed = await eng._make_room(ids[0], need - free["change"], st, [])
+        if freed > 0:
+            mp = await _session.post(EP_MAINPAGE, code="", opuin=_session.uin)
+            if mp.get("code") == 0:
+                st = parse_full(mp.get("raw", ""))
+                free = {k: max(0, st["cap"].get(k, {}).get("cur", 0)
+                               - st["cap"].get(k, {}).get("used", 0))
+                        for k in ("change", "store")}
+    if free["change"] < need:
         return {"ok": False, "plan": plan, "plans": plans, "free": free, "need": need,
                 "message": (f"换卡箱 0 空位，连 1 张底卡都买不进来："
                             f"请先从换卡箱挪走一些卡（保险箱还剩 {free['store']} 格）")}
