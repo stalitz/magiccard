@@ -4214,6 +4214,7 @@ async function loadMatchXiyou(withTask = false) {
   matchXiyou = r;
   renderMatchXiyou();
   renderMatchXiyouBox();
+  renderMatchXiyouChapters();
   renderMatchXiyouGap();
   renderMatchXiyouTeam();
   if (!r || r.ok === false) mlogFail("西游记探索", r);
@@ -4265,12 +4266,32 @@ function renderMatchXiyouBox() {
   }
   const p = d.raw || {}, bs = p.boxes || {};
   const label = { new: "探索收获箱", safe: "保险箱", ex: "关卡卡箱" };
+  const chByTheme = {};
+  (p.chapters || []).forEach((c) => { chByTheme[c.theme] = c; });
   let free = 0, tot = 0;
-  const rows = Object.keys(bs).map((k) => {
+  // 每个箱子按主题分组、组内网格多列显示逐张卡（第N层·卡名），不一行一卡
+  const panels = Object.keys(bs).map((k) => {
     const v = bs[k] || {};
+    const items = v.items || [];
     free += Number(v.free || 0); tot += Number(v.filled || 0);
-    return matchRow(label[k] || k,
-      `${v.filled ?? 0} 张${v.capacity ? ` / ${v.capacity}` : ""}${v.free ? `（空 ${v.free} 格）` : ""}`);
+    const byTheme = {};
+    items.forEach((it) => {
+      if (!byTheme[it.theme]) byTheme[it.theme] = [];
+      byTheme[it.theme].push(it);
+    });
+    const groups = Object.keys(byTheme).map((th) => {
+      const cs = byTheme[th].slice().sort((a, b) =>
+        (a.game_layer || 0) - (b.game_layer || 0) || a.card_id - b.card_id);
+      const grid = cs.map((it) =>
+        `<span class="sg-card">第${it.game_layer ?? "?"}层·${it.name}</span>`).join("");
+      const cc = chByTheme[th];
+      const ttl = cc ? `第 ${cc.chapter} 大关 · ${cc.name}` : `套 ${th}`;
+      return `<div class="sg-ch">${ttl}　${cs.length} 张</div><div class="sg-grid">${grid}</div>`;
+    }).join("");
+    return `<div style="border-top:1px solid var(--line);margin-top:6px;padding-top:6px">` +
+      `<div style="font-weight:600;margin-bottom:4px">${label[k] || k}` +
+      `<span style="opacity:.7;font-weight:400">　${v.filled ?? 0} 张${v.capacity ? ` / ${v.capacity}` : ""}${v.free ? `（空 ${v.free} 格）` : ""}</span></div>` +
+      (groups || `<div style="opacity:.6;font-size:12px">（空箱）</div>`) + `</div>`;
   }).join("");
   const dupes = p.dupes || [];
   const drows = dupes.map((x) =>
@@ -4278,7 +4299,7 @@ function renderMatchXiyouBox() {
     `<span class="v">${x.boxes.join("+")} 各一份` +
     (x.boxes[0] === x.boxes[1] ? "" : `，可卖第 2 份`) + `</span></div>`).join("");
   cnt.textContent = `共 ${tot} 张 / 空 ${free} 格 · 重复 ${dupes.length} 组`;
-  box.innerHTML = `<div class="state-box">${rows || "-"}</div>` +
+  box.innerHTML = `<div class="state-box">${panels || "-"}</div>` +
     (dupes.length
       ? `<div class="rv" style="border-top:1px solid var(--line)"><span class="k" style="font-weight:600">重复卡（卖掉腾空间，找不回来）</span><span class="v">${dupes.length} 组</span></div>` +
         drows +
@@ -4290,6 +4311,45 @@ function renderMatchXiyouBox() {
             `data-cid="${s.card_id}" data-idle="卖卡中…">卖 ${x.name}（第 ${i + 1} 份）</button>`;
         }).join("") + `</div>`
       : `<div class="rv" style="border-top:1px solid var(--line)"><span class="k">重复卡</span><span class="v">没有重复的</span></div>`);
+}
+
+// 全部 8 主题地图（对称三国「全部 9 大关」）：基于 plan_xiyou 的 chapters（套卡推，
+// 未开启的主题也列出、have=0）。每主题显示进度条 + 状态，已解锁未通关给出发按钮。
+function renderMatchXiyouChapters() {
+  const box = $("match-xy-chapters"), cnt = $("match-xy-chapters-cnt");
+  const d = matchXiyou || {};
+  if (!d.ok) {
+    box.innerHTML = `<div class="state-box"><span style="color:var(--danger)">${d.message || "读取失败"}</span></div>`;
+    cnt.textContent = "失败";
+    return;
+  }
+  const chs = (d.raw && d.raw.chapters) || [];
+  cnt.textContent = `${chs.length} 主题`;
+  if (!chs.length) {
+    box.innerHTML = `<div class="state-box">无主题数据</div>`;
+    return;
+  }
+  const rows = chs.map((c) => {
+    const pct = c.need ? Math.round((c.have / c.need) * 100) : 0;
+    const pct2 = Math.max(4, Math.min(100, pct));
+    let status, stColor;
+    if (c.done) { status = "已通关"; stColor = "var(--ok,#3a9)"; }
+    else if (!c.unlocked) { status = "未解锁"; stColor = "var(--muted,#999)"; }
+    else { status = `还差 ${c.gap}`; stColor = "var(--danger,#c33)"; }
+    const runBtn = (c.unlocked && !c.done)
+      ? `<button class="btn sm danger" data-act="mm-xy-start-at" data-levelid="${c.levelid}" data-idle="出发 L${c.levelid}">出发 L${c.levelid}（消耗）</button>`
+      : "";
+    return `<div style="padding:5px 2px;border-top:1px solid var(--line)">` +
+      `<div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px">` +
+      `<span style="font-weight:600">第 ${c.chapter} 大关 · ${c.name}</span>` +
+      `<span style="color:${stColor};font-size:12px">${status}</span></div>` +
+      `<div style="font-size:11.5px;opacity:.7;margin:1px 0 3px">套 ${c.theme} · 进度 ${c.have}/${c.need}</div>` +
+      `<div style="height:6px;border-radius:3px;background:var(--line);overflow:hidden">` +
+      `<div style="height:100%;width:${pct2}%;background:${stColor}"></div></div>` +
+      (runBtn ? `<div style="margin-top:4px">${runBtn}</div>` : "") +
+      `</div>`;
+  }).join("");
+  box.innerHTML = rows;
 }
 
 function renderMatchXiyouGap() {
@@ -4546,6 +4606,11 @@ function bindMatchModeActs() {
         } else if (act === "mm-xy-task") {
           await xyPost("/api/match/xiyou-task", { id: parseInt(b.dataset.id, 10) },
             "任务奖 " + (b.dataset.id ?? ""));
+        } else if (act === "mm-xy-start-at") {
+          const lv = parseInt(b.dataset.levelid, 10);
+          if (!confirm(`出发一次高级探索（去第 ${lv} 大关）？会消耗一次探索机会，最长 24 小时。`)) return;
+          await xyPost("/api/match/xiyou-start", { levelid: lv }, "出发探索 L" + lv);
+          xyPickChapter = lv;
         }
       } finally {
         restore();

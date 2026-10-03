@@ -286,8 +286,12 @@ def plan_xiyou(state: dict) -> dict:
     except (TypeError, ValueError):
         maxlv = 0
     chapters = []
-    for n in range(1, maxlv + 1):
+    # 全部 8 大关（套 1604..1611）都列出来，未开启的也显示（套卡推，have=0），
+    # 对称三国「全部 9 大关」地图；unlocked 标记是否已开启（≤ maxLevelId）。
+    for n in range(1, 9):
         th = level_theme(n)
+        if not th:
+            continue
         cids = [c for c, m in lib.items() if m["theme"] == th]
         miss = [{"card_id": c, "name": lib[c]["name"], "layer": lib[c]["layer"],
                  "game_layer": _xy_g(lib[c]["layer"])}
@@ -296,6 +300,7 @@ def plan_xiyou(state: dict) -> dict:
             "chapter": n, "levelid": n, "theme": th, "name": theme_name(th),
             "need": len(cids), "have": len(cids) - len(miss), "gap": len(miss),
             "done": bool(cids) and not miss, "current": n == level,
+            "unlocked": n <= maxlv,
             "missing": miss})
 
     tasks = [{"id": t.get("id"), "type": t.get("type"), "cnt": t.get("cnt"),
