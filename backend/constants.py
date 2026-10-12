@@ -42,7 +42,8 @@ EP_ACT_FREE     = "card_act_get_free"            # 活动免费次数
 EP_ACT_PAY      = "card_act_pay"                 # 活动付费
 EP_ACT_DIG      = "card_act_dig"                 # 挖宝
 EP_SPIRITE      = "card_user_spirite"            # 宠物探险
-EP_ZCG          = "card_user_zcg"                # 种子罐/杂物柜
+EP_ZCG          = "card_user_zcg"                # 珍藏阁（炼卡炉：投10面卡→三色魔晶）
+EP_TEMP_SLOT    = "card_user_temp_slot"           # 临时卡槽（机会卡/炼卡素材临时存放）
 EP_SHARE_INFO   = "card_user_share_info"         # 分享信息
 EP_SHARE_GET    = "card_user_share_get"          # 分享领奖
 
@@ -52,6 +53,7 @@ EP_USER_LIST    = "card_user_list"               # **好友列表**（uin/nick/e
                                                  # 玩过本游戏的人（含自己 + 若干 exp=0 的僵尸号），
                                                  # 忽略分页参数、与请求者参数无关；可作换卡补充池
 EP_MINI_GET     = "card_mini_get"                # 集卡册进度：<Node theme_id num lv>，覆盖全库套卡
+EP_COLLECTION_GET = "card_collection_get"        # 集卡册详情：每套 <Node ... cnt 已集主题秀 total_cnt 总数 qqshow_str 立绘>，主题秀真源
 # ---- 2026-09-18 探明：猫咪探险（「每日比赛」下的两个大地图）----
 # 定位过程：card_run_base.version_list 里有 XiYouModule_v_41.swf / SanGuoModule_v_14.swf
 # → 解压取字符串，在其中找到 cgi 名 card_worldexplore / card_worldsanguo（SWF 内另有

@@ -732,46 +732,49 @@ def current_cover(equip: dict, worn: list, theme: dict) -> dict:
     return round(sum(prov.get(k, 0) * (theme.get(k, 0) / 100.0) for k in theme), 1)
 
 
-async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dict:
-    """一键比赛：把今日能打的场次**连续打完**（每次都换最优装），返回逐场明细。
+async def run_match_all(session, max_races: int = 0, stop_mood: int = 80):
+    """一键比赛（async generator，逐场 yield 便于前端实时显示）。
 
-    这是「一键比赛」的后端编排，步骤全部走真实接口、参数均按 HAR/真机实证：
-
+    步骤全部走真实接口、参数均按 HAR/真机实证：
       1. competition act=2   读今日主题 + 本场 id（每场随机，必须打之前现读）
       2. competition act=6   读衣橱（best_equip 的输入）
       3. competition act=1   读猫列表 + performe_num（今日剩余次数）
-      4. 循环 competition act=4 上台：
-           · 每轮都重新算最优穿装（主题每场独立随机，不能沿用上轮组合）
-           · 出战猫 = 心情达标 + 满 4 件装备 + 等级最高，没有就退而求「满 4 件装备」
-           · 一次非 code=0 立即停（参数错误不扣次数，但成功返错会白丢次数）
-           · performe_num 归零或到 max_races 上限即收工
-      5. 收工回读 act=1 拿最终状态，供前端刷新
+      4. 循环 competition act=4 上台（每轮重算最优穿装、重读 race_id）
+      5. 收工回读 act=1 拿最终状态
 
-    **会消耗 performe_num**，由前端 confirm 后才调用；来一个 max_races 可限制场次。
+    **会消耗 performe_num**，由前端 confirm 后才调用；max_races 可限制场次。
+    每完成一步 yield 一条（feed / race / error），末尾 yield __done__ 带汇总。
     """
     # 心情门槛（用户 2026-09-27 定调）：一键比赛要用猫，出战前先把 4 只猫喂到 80，
     # 否则 stop_mood 过滤会把猫全筛掉、或上台直接被拒。喂失败即中止（不扣次数）。
     feed = await ensure_mood(session, stop_mood)
     if not feed.get("ok"):
-        return {"ok": False, "message": f"喂猫到 {stop_mood} 失败，已中止一键比赛（不消耗次数）："
-                                        f"{feed.get('message') or '糖果可能不足'}"}
+        yield {"act": "__error__", "ok": False,
+               "message": f"喂猫到 {stop_mood} 失败，已中止一键比赛（不消耗次数）："
+                          f"{feed.get('message') or '糖果可能不足'}"}
+        return
     fed_n = len([s for s in (feed.get("steps") or []) if s.get("candy")])
+    yield {"act": "feed", "ok": True, "candies": fed_n}
 
     try:
         th = await competition_theme(session)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"读主题异常：{e}"}
+        yield {"act": "__error__", "ok": False, "message": f"读主题异常：{e}"}
+        return
     if not th.get("ok") or th.get("race_id") is None:
-        return {"ok": False, "message": f"读本场比赛 id 失败："
-                                        f"{th.get('message') or th.get('code')}"}
+        yield {"act": "__error__", "ok": False, "message": f"读本场比赛 id 失败："
+              f"{th.get('message') or th.get('code')}"}
+        return
     theme = {a["id"]: a["value"] for a in (th.get("theme") or [])}
 
     try:
         st = await match_state(session, want_equip=True)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"读比赛状态异常：{e}"}
+        yield {"act": "__error__", "ok": False, "message": f"读比赛状态异常：{e}"}
+        return
     if not st.get("ok"):
-        return {"ok": False, "message": st.get("message") or "读比赛状态失败"}
+        yield {"act": "__error__", "ok": False, "message": st.get("message") or "读比赛状态失败"}
+        return
 
     equip = st.get("equip") or {}
     cats = st.get("cats") or []
@@ -785,15 +788,15 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
     ready = [c for c in cats
              if len([x for x in (c.get("equip") or []) if x]) == 4]
     if not ready:
-        return {"ok": False, "message": "没有满 4 件装备的猫，无法出战（不消耗次数）",
-                "left": total0}
+        yield {"act": "__error__", "ok": False, "message": "没有满 4 件装备的猫，无法出战（不消耗次数）",
+              "left": total0}
+        return
 
     races, theme_rows = [], (th.get("theme") or [])
     race_id = int(th["race_id"])
     n = 0
     while left > 0 and (max_races <= 0 or n < max_races):
         # 2026-09-26 修：每场都必须重读 act=2 拿**本场**的 race_id。
-        # 此前沿用首轮 id，第 2 场起 race_id 过期 → act=4 回 code=-1 → 提前收工。
         th_next = await competition_theme(session)
         if th_next.get("ok") and th_next.get("race_id") is not None:
             race_id = int(th_next["race_id"])
@@ -802,7 +805,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
         sug = best_equip(equip, theme) if theme else {}
         ids = (sug.get("equip_ids") or [])
         if len(ids) != 4:
-            races.append({"err": "算不出 4 件最优装，停止"})
+            yield {"act": "race", "no": n + 1, "err": "算不出 4 件最优装，停止"}
             break
         pool = sorted(ready, key=lambda c: -(c.get("level") or 0))
         pool = [c for c in pool
@@ -815,13 +818,14 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
                                    feed=False,
                                    dress=equip)
         if not r.get("ok"):
-            races.append({"err": r.get("message") or "请求异常"})
+            yield {"act": "race", "no": n + 1, "err": r.get("message") or "请求异常"}
             break
         d = r.get("data") or {}
         if d.get("code") != 0:
-            races.append({"cat_id": cat.get("elf_id"), "code": d.get("code"),
-                          "err": d.get("desc") or d.get("message") or "失败",
-                          "total_value": d.get("total_value")})
+            yield {"act": "race", "no": n + 1, "cat_id": cat.get("elf_id"),
+                  "code": d.get("code"),
+                  "err": d.get("desc") or d.get("message") or "失败",
+                  "total_value": d.get("total_value")}
             break
         left = d.get("performe_num")
         try:
@@ -829,7 +833,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
         except (TypeError, ValueError):
             left = 0
         n += 1
-        races.append({
+        row = {
             "cat_id": cat.get("elf_id"),
             "cat_level": cat.get("level"),
             "equip": ids,
@@ -840,20 +844,18 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80) -> dic
             "content": d.get("content"),
             "left": left,
             "theme": theme_rows,
-        })
-        # 下一轮的主题/race_id 已在循环开头重读，这里不再重复拉
+        }
+        races.append(row)
+        yield {"act": "race", "no": n, **row}
 
     try:
         after = await match_state(session)
     except Exception:  # noqa: BLE001
         after = {}
-    return {
-        "ok": True, "ran": n, "left_before": total0, "left_after": left,
-        "races": races,
-        "theme": theme_rows,
-        "cats": (after.get("cats") if after.get("cats") else cats),
-        "feed": {"ok": True, "candies": fed_n},   # 出战前把心情喂到 stop_mood 的结果
-    }
+    yield {"act": "__done__", "ok": True, "ran": n, "left_before": total0, "left_after": left,
+          "races": races, "theme": theme_rows,
+          "cats": (after.get("cats") if after.get("cats") else cats),
+          "feed": {"ok": True, "candies": fed_n}}
 
 
 # ---------------- 换装（2026-09-26 bisai2.har 实证，补齐了此前缺失的一环）----------------
@@ -1477,24 +1479,30 @@ async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
     #    本地硬闸 + 服务端 busy 双保险；5 连跳过重置换直接开始）
     if do_shake:
         sh = await run_union_shake(session)
-        steps.append({"act": "shake", "ok": sh.get("ok"),
-                      "rounds": sh.get("rounds"),
-                      "msg": "；".join(f"第{r['round']}轮：{r['msg']}"
-                                      for r in sh.get("rounds", [])) or "摇水果无返回"})
+        step = {"act": "shake", "ok": sh.get("ok"),
+                "rounds": sh.get("rounds"),
+                "msg": "；".join(f"第{r['round']}轮：{r['msg']}"
+                                for r in sh.get("rounds", [])) or "摇水果无返回"}
+        steps.append(step)
+        yield step
 
     # 2) 商店兑换（act=21，每日 1 次策略闸；当日已兑就跳过不发，省周库存）
     if do_exchange:
         x = await union_exchange_redstone(session)
-        steps.append({"act": "exchange", "ok": x.get("ok"),
-                      "blocked": x.get("blocked"),
-                      "msg": x.get("text") or x.get("message") or "商店兑换无返回"})
+        step = {"act": "exchange", "ok": x.get("ok"),
+                "blocked": x.get("blocked"),
+                "msg": x.get("text") or x.get("message") or "商店兑换无返回"}
+        steps.append(step)
+        yield step
 
     # 3) 抢红包（act=19 读列表 + act=20 {id:N} 逐个领，已领过的跳过）
     if do_redpacket:
         rp = await union_redpacket_grab(session)
-        steps.append({"act": "redpacket", "ok": rp.get("ok"),
-                      "grabbed": rp.get("grabbed"), "skipped": rp.get("skipped"),
-                      "msg": rp.get("text") or rp.get("message") or "抢红包无返回"})
+        step = {"act": "redpacket", "ok": rp.get("ok"),
+                "grabbed": rp.get("grabbed"), "skipped": rp.get("skipped"),
+                "msg": rp.get("text") or rp.get("message") or "抢红包无返回"}
+        steps.append(step)
+        yield step
 
     # 4) 公会战出战（act=23，消耗挑战次数；本地硬闸 + 服务端限额双保险）
     #    2026-09-30 修正：原版只打 1 场（union_run.json 实证「今日 1/3」就停）；
@@ -1511,12 +1519,14 @@ async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
                 break
             if int(b.get("used") or 0) >= BATTLE_DAILY_LIMIT:
                 break
-        steps.append({"act": "battle",
-                      "ok": any(x.get("ok") for x in rounds),
-                      "win": sum(1 for x in rounds if x.get("win")),
-                      "rounds": rounds,
-                      "msg": "；".join(f"第{i+1}场：{x['msg']}"
-                                      for i, x in enumerate(rounds)) or "出战无返回"})
+        step = {"act": "battle",
+                "ok": any(x.get("ok") for x in rounds),
+                "win": sum(1 for x in rounds if x.get("win")),
+                "rounds": rounds,
+                "msg": "；".join(f"第{i+1}场：{x['msg']}"
+                                for i, x in enumerate(rounds)) or "出战无返回"}
+        steps.append(step)
+        yield step
 
     after = await union_info(session)
     out = {"ok": True, "steps": steps,
@@ -1524,7 +1534,7 @@ async def run_union(session, do_shake: bool = True, do_exchange: bool = True,
            "chip_before": chip0, "chip_after": after.get("chip"),
            "members": len(after.get("members") or {})}
     _save_union_run(out)
-    return out
+    yield {"act": "__done__", **out}
 
 
 # ---------- 世界探索 ----------
@@ -2171,7 +2181,7 @@ def _sanguo_battle_text(d: dict) -> str:
 
 
 async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | None = None,
-                          feed: bool = True, clear_box: bool = True) -> dict:
+                          feed: bool = True, clear_box: bool = True):
     """三国「一键出战」：用**真实阵容**连打到今日次数用尽（每天 SGUO_DAILY_MAX 次）。
 
     `chapter` = 界面上选的「打第几大关」（1..9，见 `_SG_CHAPTER_THEMES`）：给了它就
@@ -2195,11 +2205,12 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
     """
     st = await sanguo_state(session)
     if not st.get("ok"):
-        return {"ok": False, "message": st.get("message") or "读取三国战役失败"}
+        yield {"act": "__error__", "ok": False, "message": st.get("message") or "读取三国战役失败"}
+        return
     box_before = plan_ex_box(st)
     box_sold = []
     if clear_box and box_before["free"] <= 1 and box_before["spare"]:
-        r = await auto_sell_spare(st, keep_free=1)
+        r = await auto_sell_spare(session, st, keep_free=1)
         box_sold = r.get("sold") or []
         st = await sanguo_state(session)   # 卖完立刻回读，后续步骤用真实卡箱
         box_before = plan_ex_box(st)
@@ -2207,9 +2218,15 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
     # 这正是「剩 N 次不能进行」的根因：关卡清了奖励没领，levelData 卡着后续关出不来。
     pre_claim = await sanguo_claim(session, 0)
     pre_claimed = (pre_claim.get("claimed") or []) if isinstance(pre_claim, dict) else []
+    if pre_claimed:
+        yield {"act": "pre_claim", "ok": True, "claimed": pre_claimed,
+               "text": f"预领已通关奖励 {len(pre_claimed)} 关"}
     # 顺带领掉「开局就可领的每日任务」（act=7 查 + act=8 领），避免漏领（jiangli.har）。
     pre_tasks = await sanguo_claim_tasks(session)
     pre_task_claimed = (pre_tasks.get("claimed") or []) if isinstance(pre_tasks, dict) else []
+    if pre_task_claimed:
+        yield {"act": "pre_task", "ok": True, "claimed": pre_task_claimed,
+               "text": f"预领每日任务奖励 {len(pre_task_claimed)} 项"}
     used = int(st.get("freenum") or 0)
     cur_level = st.get("levelId")
     # 界面上选了「打第几大关」（大关可选）→ 在该大关内挑该打的小关，手动覆盖自动推荐。
@@ -2223,12 +2240,14 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
     if levelid is None or levelid == 0:
         levelid = cur_level
     if not levelid:
-        return {"ok": False, "message": "没读到当前关卡号，未做闯关"}
+        yield {"act": "__error__", "ok": False, "message": "没读到当前关卡号，未做闯关"}
+        return
     left = SGUO_DAILY_MAX - used
     if left <= 0:
-        return {"ok": True, "skipped": True,
-                "message": f"今日已出战 {used}/{SGUO_DAILY_MAX} 次，不再消耗",
-                "used": used, "rounds": 0}
+        yield {"act": "__done__", "ok": True, "skipped": True,
+               "message": f"今日已出战 {used}/{SGUO_DAILY_MAX} 次，不再消耗",
+               "used": used, "rounds": 0}
+        return
     rounds, i = [], 0
     for i in range(left):
         lu = await sanguo_lineup(session, levelid)
@@ -2236,9 +2255,11 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
         d = d if isinstance(d, dict) else {}
         lcode = d.get("code") if "code" in d else lu.get("code")
         if lcode not in (0, None):
-            rounds.append({"no": i + 1, "ok": False,
-                           "msg": f"阵容读取失败 code={lcode} "
-                                  f"{d.get('desc') or lu.get('desc') or ''}".strip()})
+            row = {"no": i + 1, "ok": False,
+                   "msg": f"阵容读取失败 code={lcode} "
+                          f"{d.get('desc') or lu.get('desc') or ''}".strip()}
+            rounds.append(row)
+            yield {"act": "round", **row}
             break
         elves = d.get("elf_list") or []
         cats = [int(e.get("id")) for e in elves if e.get("id") is not None]
@@ -2246,26 +2267,31 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
         for e in elves:
             eqs.extend(int(x) for x in (e.get("equip_list") or []))
         if not cats or len(eqs) != len(cats) * 4:
-            rounds.append({"no": i + 1, "ok": False,
-                           "msg": f"阵容异常 cats={len(cats)} eqs={len(eqs)}，未提交"})
+            row = {"no": i + 1, "ok": False,
+                   "msg": f"阵容异常 cats={len(cats)} eqs={len(eqs)}，未提交"}
+            rounds.append(row)
+            yield {"act": "round", **row}
             break
         r = await sanguo_run(session, levelid, cats, eqs, mode=0,
                              feed=(feed and i == 0))
         rd = r.get("data") if isinstance(r.get("data"), dict) else {}
         ok = bool(r.get("ok")) and rd.get("code") in (0, None)
-        rounds.append({"no": i + 1, "ok": ok,
-                       "levelid": int(levelid), "cats": cats, "eq_count": len(eqs),
-                       "text": _sanguo_battle_text(rd) if ok else
-                               (rd.get("desc") or r.get("message") or f"code={rd.get('code')}"),
-                       "code": rd.get("code") if "code" in rd else r.get("code")})
+        row = {"no": i + 1, "ok": ok,
+               "levelid": int(levelid), "cats": cats, "eq_count": len(eqs),
+               "text": _sanguo_battle_text(rd) if ok else
+                       (rd.get("desc") or r.get("message") or f"code={rd.get('code')}"),
+               "code": rd.get("code") if "code" in rd else r.get("code")}
+        rounds.append(row)
+        if ok:
+            # 打完立刻领奖（act=2），避免奖励卡在 levelData、后续关出不来。
+            cr = await sanguo_claim(session, int(levelid))
+            crd = cr.get("data") if isinstance(cr.get("data"), dict) else {}
+            row["claim"] = crd.get("content") if (cr.get("ok")
+                             and crd.get("code") in (0, None)) else \
+                (crd.get("desc") or cr.get("message") or f"code={crd.get('code')}")
+        yield {"act": "round", **row}
         if not ok:
             break
-        # 打完立刻领奖（act=2），避免奖励卡在 levelData、后续关出不来。
-        cr = await sanguo_claim(session, int(levelid))
-        crd = cr.get("data") if isinstance(cr.get("data"), dict) else {}
-        rounds[-1]["claim"] = crd.get("content") if (cr.get("ok")
-                                 and crd.get("code") in (0, None)) else \
-            (crd.get("desc") or cr.get("message") or f"code={crd.get('code')}")
     # 战后补领每日任务奖励（act=7 查 + act=8 领）：打满 3 次的任务(id=1)此刻才达标。
     post_tasks = await sanguo_claim_tasks(session)
     post_task_claimed = (post_tasks.get("claimed") or []) if isinstance(post_tasks, dict) else []
@@ -2284,7 +2310,7 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
                    "note": ("同层多余的旧卡已卖掉腾位置" if box_sold else
                             "卡箱未清空位，未动卡" if clear_box else "未检查卡箱")}}
     _save_sanguo_raid(out)
-    return out
+    yield {"act": "__done__", **out}
 
 
 # ---------------------------------------------------------------------------

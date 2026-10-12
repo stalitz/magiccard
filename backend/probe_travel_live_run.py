@@ -15,7 +15,7 @@ async def main():
         print("未登录，先扫码")
         return
     print("=== 实跑一轮（真实出发）===")
-    out = await te.run_once(s, dry_run=False)
+    out = [step async for step in te.run_once(s, dry_run=False)]
     for it in out:
         print(f"  [{it.get('act')}] elf={it.get('elf_id')} ok={it.get('ok')} -> {it.get('text')}")
 

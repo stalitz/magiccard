@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 
 from .constants import EP_MONEY_DRAW, err_msg
 from . import gift as _gift
+from . import zcg as _zcg
 
 
 def _xml_attrs(raw: str) -> dict:
@@ -74,12 +75,18 @@ async def _daily_send_gift(session) -> dict:
 ACTIONS = [
     ("gift", "每日登陆礼包", _daily_gift),
     ("sendgift", "每日送礼（48卡，按等级送，每日上限50）", _daily_send_gift),
+    # 珍藏阁炼卡：zhencang.har 真机实证。只投 10 面卡、绝不调用加速（card_zhongkong_zk），
+    # 炉没炼完就等自然炼完。详见 backend/zcg.py 顶部铁律注释。
+    ("zcg", "珍藏阁炼卡（投10面卡→三色魔晶，不加速）", _zcg.daily_zcg),
 ]
 
 
-async def run(session, keys: list[str] | None = None) -> list[dict]:
-    """按顺序跑一遍；keys 为空 = 全跑。单项异常不影响后续项。"""
-    out: list[dict] = []
+async def run(session, keys: list[str] | None = None):
+    """按顺序跑一遍（async generator）。
+
+    每完成一项就 yield 该 item 字典，便于前端边跑边显示（不再等整段跑完才出日志）。
+    keys 为空 = 全跑。单项异常不影响后续项。
+    """
     for key, name, fn in ACTIONS:
         if keys is not None and key not in keys:
             continue
@@ -88,5 +95,4 @@ async def run(session, keys: list[str] | None = None) -> list[dict]:
         except Exception as e:  # noqa: BLE001
             item = {"ok": False, "code": -1, "text": f"异常：{e}"}
         item["key"], item["name"] = key, name
-        out.append(item)
-    return out
+        yield item

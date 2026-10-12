@@ -311,15 +311,22 @@ class LoginSession:
         }
 
     async def draw_random_cards(self, fetch_type: int = 2) -> dict:
-        """随机抽卡（累积机会，最高16次，可单抽/全抽）。
-        - type=1：单抽一次；type=2：一次抽完当前可抽次数（服务端可能分批返回）。
+        """随机抽卡（累积机会，最高16次，一次抽一张、减1）。
+
+        - 必须用 type=2：调一次抽一次（remain 减1），auto_random_draw_and_sell 循环
+          调直到 remain=0 即抽完所有；diagnose_card.py 与 constants.py 注释均证实
+          有效参数是 type=2。
+        - ⚠️ type=1 服务端不认（返回错误、抽卡次数不减），切勿使用——2026-10-11 踩坑：
+          zcg 抽卡曾用 type=1 被拒、次数不减，一度误以为 code 误判，实为参数错。
         - 成功返回 <QQHOME num="N" remain="M"><card .../>...，随机卡进换卡箱。
         - remain 即剩余抽奖次数。
         """
         r = await self.post(EP_RANDOM_GET, type=fetch_type)
         code = r.get("code")
         raw = r.get("raw") or ""
-        n = len(re.findall(r"<card\b", raw))
+        # num 才是本次抽到的真实张数；<card 标签数不可靠（实测 9 张卡只数出 3 个标签）
+        num_match = re.search(r'<QQHOME[^>]*\bnum="(\d+)"', raw)
+        n = int(num_match.group(1)) if num_match else len(re.findall(r"<card\b", raw))
         remain_match = re.search(r'<QQHOME[^>]*\bremain="(\d+)"', raw)
         remain = int(remain_match.group(1)) if remain_match else 0
         cards = r.get("cards") or []
@@ -434,11 +441,12 @@ class LoginSession:
             "raw": (r.get("raw") or "")[:300],
         }
 
-    async def auto_random_draw_and_sell(self, max_rounds: int = 30) -> dict:
-        """一键抽完所有随机抽卡次数，并自动卖掉 10 面额卡。
+    async def auto_random_draw_and_sell(self, max_rounds: int = 30):
+        """一键抽完所有随机抽卡次数，并自动卖掉 10 面额卡（SSE 流式）。
+
         - 循环调 draw_random_cards(type=2)，直到 remain=0 或出错或达到 max_rounds。
         - 抽到的卡中 price=10 的调用 sell_card 卖掉。
-        - 返回统计：抽卡次数、获得卡数、卖出卡数、金币收入、剩余机会。
+        - 每轮 yield 进度（act=sell/draw/error）；末尾 yield __done__ 带汇总统计。
         """
         from . import card_plan
 
@@ -457,10 +465,14 @@ class LoginSession:
             sold_now, gold_now = await self._sell_all_ten()
             sold += sold_now
             gold += gold_now
+            if sold_now:
+                yield {"ok": True, "act": "sell", "sold": sold_now, "gold": gold_now,
+                       "text": f"卖出 {sold_now} 张 10 面额卡，得 {gold_now} 金币"}
 
             st = await self.post(EP_MAINPAGE, code="", opuin=self.uin)
             if st.get("code") != 0:
                 errors += 1
+                yield {"ok": False, "act": "error", "text": "读取主页状态失败，停止抽卡"}
                 break
             randchance = 0
             m = re.search(r'<user\b[^>]*\brandchance="(\d+)"', st.get("raw", ""))
@@ -473,6 +485,7 @@ class LoginSession:
             if randchance == last_remain:
                 # 防止 stuck
                 errors += 1
+                yield {"ok": False, "act": "error", "text": "机会数未变化，疑似卡死，停止抽卡"}
                 break
             last_remain = randchance
 
@@ -482,9 +495,15 @@ class LoginSession:
             total_draws += 1
             if not r.get("ok"):
                 errors += 1
+                yield {"ok": False, "act": "draw",
+                       "text": f"第 {total_draws} 次抽卡失败：{r.get('message') or ''}"}
                 break
 
             total_cards += r.get("n_cards", 0)
+            yield {"ok": True, "act": "draw", "no": total_draws, "n_cards": r.get("n_cards", 0),
+                   "remain": r.get("remain", 0), "randchance": randchance,
+                   "text": f"第 {total_draws} 次抽卡：得 {r.get('n_cards', 0)} 张，"
+                           f"剩机会 {r.get('remain', 0)}，随机抽卡余 {randchance}"}
             if r.get("remain", 0) <= 0:
                 break
 
@@ -492,6 +511,9 @@ class LoginSession:
         sold_now, gold_now = await self._sell_all_ten()
         sold += sold_now
         gold += gold_now
+        if sold_now:
+            yield {"ok": True, "act": "sell", "sold": sold_now, "gold": gold_now,
+                   "text": f"收尾卖出 {sold_now} 张 10 面额卡，得 {gold_now} 金币"}
 
         message = "完成"
         if randchance_before <= 0:
@@ -499,17 +521,10 @@ class LoginSession:
         elif total_draws == 0:
             message = "未进行抽卡，可能卡箱已满或机会已耗尽"
 
-        return {
-            "ok": errors == 0 and total_draws > 0,
-            "draws": total_draws,
-            "cards": total_cards,
-            "sold": sold,
-            "gold": gold,
-            "remain": last_draw_remain,
-            "randchance_before": randchance_before,
-            "errors": errors,
-            "message": message,
-        }
+        yield {"act": "__done__", "ok": errors == 0 and total_draws > 0,
+               "draws": total_draws, "cards": total_cards, "sold": sold, "gold": gold,
+               "remain": last_draw_remain, "randchance_before": randchance_before,
+               "errors": errors, "message": message}
 
     async def _sell_all_ten(self) -> tuple[int, int]:
         """扫描换卡箱，把目前所有 10 面额卡卖光（type=1），腾出空位。

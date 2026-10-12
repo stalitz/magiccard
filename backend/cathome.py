@@ -183,8 +183,21 @@ async def like(session, target: str, only_if_unliked: bool = True) -> dict:
         cand = [x for x in (rd.get("list") or []) if x.get("zan") is not None]
         if not cand:
             return {"ok": False, "code": -1, "message": "今日竞技榜没有可点赞的对象（可能已赞过）"}
-        r = await _act(session, EP_TRAVEL_PVP, 22,
-                       rank_uin=str((cand[0] or {}).get("uin")), rank_idx=0)
+        # ⚠️ 只试 cand[0] 不稳：某对象此刻偶发被服务端回 `system busy`（非限流，是
+        #    该对象不允许赞），单列[0]失败就整榜没点上 → 日常卡住。改为遍历可赞列表，
+        #    命中第一个成功（code∈{0,None}）即停，最小化副作用（每天仍只点 1 次）。
+        r = None
+        last_msg = ""
+        for c in cand:
+            rr = await _act(session, EP_TRAVEL_PVP, 22,
+                            rank_uin=str((c or {}).get("uin")), rank_idx=0)
+            if rr.get("ok") and (rr.get("data") or {}).get("code") in (0, None):
+                r = rr
+                break
+            last_msg = (rr.get("data") or {}).get("desc") or rr.get("message") or "点赞被拒"
+        if r is None:
+            return {"ok": False, "code": -1,
+                    "message": f"竞技榜逐个点赞均失败（试了 {len(cand)} 个）：{last_msg}"}
     if not r.get("ok"):
         return r
     d = r.get("data") or {}

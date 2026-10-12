@@ -452,9 +452,9 @@ def _xy_read_box(arr, box_key: str):
 
 
 async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
-                    do_task: bool = True, levelid=None, feed: bool = True) -> dict:
-    """西游记一键：收满 24 个收获点（卡箱满先跨箱卖重复卡，低级卡先卖）
-    → 出发一次新的 24h 探索 → 领每日任务奖。
+                    do_task: bool = True, levelid=None, feed: bool = True):
+    """西游记一键（async generator，逐条 yield 便于前端实时显示）：
+    收满 24 个收获点（卡箱满先跨箱卖重复卡，低级卡先卖）→ 出发一次新的 24h 探索 → 领每日任务奖。
 
     顺序按用户 2026-09-29 定调：先收完上一轮，再出发新一轮，最后领奖。
     每一步都看服务端脸色，失败即停并写明原因；结果落盘 data/xiyou_run.json。
@@ -465,7 +465,8 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
     """
     st = await xiyou_state(session, want_task=True)
     if not st.get("ok"):
-        return {"ok": False, "steps": [], "message": st.get("message")}
+        yield {"act": "__error__", "ok": False, "message": st.get("message")}
+        return
     plan = plan_xiyou(st)
     run = plan["run"]
     try:
@@ -475,6 +476,10 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
     level = picked or plan["level"] or plan.get("maxlevel")
     steps, notes = [], []
 
+    def emit(d):
+        steps.append(d)
+        return d
+
     # 0. 心情门槛：用到猫的一键操作前置，出发前先把猫喂到 80（不够才喂）
     if feed and do_start:
         f = await ensure_mood(session)
@@ -483,7 +488,8 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
                    f"{f.get('message') or '糖果可能不足'}")
             _save_xy_run({"ts": int(time.time()), "ok": False, "steps": steps,
                           "level": level, "message": msg})
-            return {"ok": False, "steps": steps, "level": level, "message": msg}
+            yield {"act": "__error__", "ok": False, "level": level, "message": msg}
+            return
 
     # 1. 收收获点（探索完成待收时；卡箱满 → 跨箱卖重复卡再继续）
     if do_get and run["pending"]:
@@ -504,22 +510,22 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
                     continue          # 这一步已被别人收了
                 r = await xiyou_get(session, level or 0, idx)
                 if r["ok"]:
-                    steps.append({"step": f"收获 #{idx}", "ok": True,
+                    yield emit({"step": f"收获 #{idx}", "ok": True,
                                   "note": r.get("content") or ""})
                     continue
                 if r.get("code") == -30009 or "卡箱" in str(r.get("desc") or ""):
                     sold = await _xy_clear_dupes(session, p2)
-                    steps.append({"step": f"收获 #{idx}（卡箱满，卖出重复 {sold} 张）",
+                    yield emit({"step": f"收获 #{idx}（卡箱满，卖出重复 {sold} 张）",
                                   "ok": False, "note": r.get("desc") or "卡箱已满"})
                     if not sold:
                         notes.append("卡箱满了且没有可卖的重复卡，先手动清理再收")
                         break
                     r = await xiyou_get(session, level or 0, idx)
                     if r["ok"]:
-                        steps.append({"step": f"收获 #{idx}（卖出后）", "ok": True,
+                        yield emit({"step": f"收获 #{idx}（卖出后）", "ok": True,
                                       "note": r.get("content") or ""})
                     else:
-                        steps.append({"step": f"收获 #{idx}", "ok": False,
+                        yield emit({"step": f"收获 #{idx}", "ok": False,
                                       "note": r.get("desc") or ""})
                         break
                 else:
@@ -528,12 +534,12 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
                     note = str(r.get("desc") or f"code {r.get('code')}")
                     got = False
                     for _try in range(1, 4):
-                        steps.append({"step": f"收获 #{idx}", "ok": False,
+                        yield emit({"step": f"收获 #{idx}", "ok": False,
                                       "note": f"{note}，5s 后重试（{_try}/3）"})
                         await asyncio.sleep(5)
                         r = await xiyou_get(session, level or 0, idx)
                         if r["ok"]:
-                            steps.append({"step": f"收获 #{idx}", "ok": True,
+                            yield emit({"step": f"收获 #{idx}", "ok": True,
                                           "note": r.get("content") or ""})
                             got = True
                             break
@@ -544,7 +550,7 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
                         break       # 探索没跑完、收获点没解锁，重试无意义
                     if got:
                         continue
-                    steps.append({"step": f"收获 #{idx}", "ok": False, "note": note})
+                    yield emit({"step": f"收获 #{idx}", "ok": False, "note": note})
                     break
 
     # 2. 出发新的 24h 探索（收完 / 本来就没在探索时出发；进行中的不重复出发）
@@ -561,19 +567,19 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
                     for buyid in (4, 2):        # 先小包（60）不够再大包（500），照用户抓包顺序
                         b = await explore_shop_buy(session, buyid)
                         if not b.get("ok"):
-                            steps.append({"step": "购买能量", "ok": False,
+                            yield emit({"step": "购买能量", "ok": False,
                                           "note": b.get("desc") or f"buyid={buyid} code {b.get('code')}"})
                             break               # 买失败（如钻石不足）再买大的没意义
-                        steps.append({"step": "购买能量", "ok": True,
+                        yield emit({"step": "购买能量", "ok": True,
                                       "note": f"能量包 buyid={buyid} → {b.get('content') or '已购买'}"})
                         r = await xiyou_start(session, level or 0)
                         if r["ok"]:
                             break
                 if r["ok"]:
-                    steps.append({"step": "出发探索", "ok": True,
+                    yield emit({"step": "出发探索", "ok": True,
                                   "note": r.get("content") or "已出发（高级探索，最长 24h）"})
                 else:
-                    steps.append({"step": "出发探索", "ok": False,
+                    yield emit({"step": "出发探索", "ok": False,
                                   "note": r.get("desc") or f"code {r.get('code')}"})
             elif p2["run"]["remain"] > 0 and not p2["run"]["pending"]:
                 notes.append(f"探索进行中，约 {max(1, p2['run']['remain'] // 3600)} 小时后完成，本次不重复出发")
@@ -588,15 +594,15 @@ async def run_xiyou(session, do_start: bool = True, do_get: bool = True,
             if bits & (1 << i):
                 continue      # bits=已领掩码（HAR 实证），领过的不再发 act=16
             r = await xiyou_claim_task(session, int(t2.get("id")))
-            steps.append({"step": f"任务奖 {t2.get('id')}", "ok": r["ok"],
+            yield emit({"step": f"任务奖 {t2.get('id')}", "ok": r["ok"],
                           "note": r.get("content") or r.get("desc") or ""})
             # 单个任务领取失败（已领过等）继续领下一个，不因一个挡全部
 
     payload = {"ts": int(time.time()), "ok": any(s["ok"] for s in steps),
                "level": level, "steps": steps, "notes": notes}
     _save_xy_run(payload)
-    return {"ok": True, "level": level, "steps": steps, "notes": notes,
-            "log": str(_XY_RUN_LOG)}
+    yield {"act": "__done__", "ok": True, "level": level, "steps": steps,
+          "notes": notes, "log": str(_XY_RUN_LOG)}
 
 
 async def _xy_clear_dupes(session, plan: dict, limit: int = 24) -> int:

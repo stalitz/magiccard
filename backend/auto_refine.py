@@ -60,8 +60,9 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import gift as gf
-from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_MAINPAGE, EP_REFINE, EP_STEAL,
-                        EP_USER_LIST, err_msg)
+from . import buylog
+from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_COLLECTION_GET, EP_MAINPAGE,
+                        EP_REFINE, EP_STEAL, EP_USER_LIST, err_msg)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -100,6 +101,29 @@ def _maps() -> tuple[dict, dict, dict]:
     _lib()
     assert _DERIV is not None
     return _DERIV[0], _DERIV[1], _DERIV[2]
+
+
+# ---- giftid → qq秀(主题秀)实例/名称 映射 ----
+# t[9] 的 giftid（如 614）与 card_collection_get 的 qqshow_str 已收集实例 id（如
+# 608624）是**不同命名空间**：上交 card_collection_add 传的是 t[9] 的 giftid，游戏
+# 内部把它映射到真实 qq秀实例。要「挑未收集的 qq秀上交」，必须靠 gift_list 把
+# giftid 翻成实例 id，再比对 qqshow_str。gift_list 每项 = [giftid, type, qq_show_id, name]。
+_GIFT_INFO: dict | None = None
+
+
+def _gift_info_map() -> dict:
+    """{giftid(str): (qq秀实例id(str), 名称(str))}，来自 card_lib.json 的 gift_list。"""
+    global _GIFT_INFO
+    if _GIFT_INFO is None:
+        lib = _lib()
+        m: dict = {}
+        for g in (lib.get("gift_list") or []):
+            try:
+                m[str(g[0])] = (str(g[2]), str(g[3]) if len(g) > 3 else "")
+            except Exception:
+                pass
+        _GIFT_INFO = m
+    return _GIFT_INFO
 
 
 def card_name(cid: int) -> str:
@@ -257,7 +281,8 @@ class ThemePlan:
         self.prize = int(t[6] or 0)
         self.ids = [int(x) for x in (t[11] or []) if x]
         gifts = str(t[9] or "").split("|")
-        self.giftid = gifts[0].strip() if gifts and gifts[0].strip() else "0"
+        self.gifts = [g.strip() for g in gifts if g.strip()]  # t[9] 全量 qq秀 giftid
+        self.giftid = self.gifts[0] if self.gifts else "0"
 
         from .economy import mrp  # 复用 MRP 展开
 
@@ -324,8 +349,12 @@ class ThemePlan:
         maxd = max((self.depth.get(c, 0) for c in self.ids), default=0)
         tops = {c for c in self.ids
                 if self.depth.get(c, 0) == maxd and self.comp.get(c)}
-        need: dict[int, int] = {cid: (max(1, int(sets)) if cid in tops else 0)
-                                for cid in self.ids}
+        # ★ 每张套内卡（含中间层 40 面卡）都要 1 份进集卡册，所以**所有 id** 都按 sets 算
+        #   收藏需求；中间层既是藏品又是上层卡的素材，缺了这份需求会导致 _spare 死保它、
+        #   上层卡永远炼不出（2026-10-11 吴韵汉风 2 星实测：炉空转、4 空炉不投料）。
+        #   旧「只顶层按 sets」会让中间层收藏需求=0，需求传导只算素材消耗，于是
+        #   planned 不含它 → _spare 挡消费 → 死锁。
+        need: dict[int, int] = {cid: max(1, int(sets)) for cid in self.ids}
         runs: dict[int, int] = {}
         buy: dict[int, int] = {}
         for cid in sorted(self.depth, key=lambda c: -self.depth[c]):
@@ -554,9 +583,15 @@ class AutoRefine:
         # card_stove_stealcard_get + opuin。好友列表取 card_user_list
         # （194 人，顺序=游戏界面顺序，非卡友）。
         self.steal_enabled = True            # 偷炉总开关
-        self.steal_search_depth = 12         # 从最后一名好友往回找的深度
-        self._friends = None                 # 好友 uin 列表（缓存）
+        self.steal_search_depth = 12         # 每 tick 扫描的好友深度（按等级降序取前 N）
+        self._friends = None                 # 好友 uin 列表（card_user_list，uin 序，缓存）
+        self._friends_by_exp = None          # 同上但按 exp(等级代理)降序，活跃优先
         self._friend_cache: dict = {}         # uin -> (empty_count, ts)：好友炉空槽缓存
+        # 已收集 qq秀 实例 id 缓存（来自 card_collection_get 的 qqshow_str），
+        # 用于「上交挑未收集 qq秀」与「非 1 星按未收集数定套数」。一次查询全库缓存。
+        self._show_cache: dict[int, set] = {}
+        self._show_cache_ts: float = 0.0
+        self._tick_collected: dict[int, set] = {}  # 本 tick 各套已收集 qq秀（submit/_calc_sets 共用）
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
         # 礼物箱 → 变卡（可选环节，勾选才做）。2026-09-21 用户定调：
@@ -687,9 +722,12 @@ class AutoRefine:
 
         `surplus_sets`（用户设置的「套数」，默认 0）：
           · >0  —— 固定每轮排这么多套；
-          · 0   —— **自动**：1 星套按「当前囤的 40 面卡能炼几套顶层卡」算（不设上限、
-                  炉位能排多少排多少）；其他星仍按 1 套（用户定调「其他星先不用这个
-                  逻辑」，其配方结构未必是 1 星这种「顶层 = 3 张不同 40 面各 1」）。
+          · 0   —— **自动**：
+               · 1 星套按「当前囤的 40 面卡能炼几套顶层卡」算（不设上限、炉位能排多少排多少）；
+               · 其他星按「还剩几个**未收集**的 qq秀」定套数 = 流水线集满 qq秀、不空炉
+                 （2026-10-12 改：旧逻辑非 1 星永远排 1 套，表现为「等一套齐后才炼新的一套」）。
+                 已收集数来自 card_collection_get 的 qqshow_str（gift_list 把 t[9] 的 giftid
+                 翻成实例 id 比对）。qq秀已全部收集则保持 1（仍持续炼、不空炉）。
 
         1 星「按囤卡算套数」：顶层卡（如七夕情人节 150 面）= 若干张 40 面各 1，
         能炼几套 = 这些 40 面持有数的**最小值**（瓶颈）。但 0 套会空炉，所以至少
@@ -702,8 +740,16 @@ class AutoRefine:
         """
         if self.surplus_sets and self.surplus_sets > 0:
             return int(self.surplus_sets)
-        if plan.star != 1:                     # 其他星先不启用「按囤卡炼多套」
-            return 1
+        if plan.star != 1:
+            # 非 1 星：按「还剩几个未收集 qq秀」定套数（流水线集满 qq秀、不空炉），
+            # 至少 1、以炉位数+1 封顶；qq秀已全部收集则保持 1（仍持续炼、不空炉）。
+            collected = self._tick_collected.get(plan.tid, set())
+            gmap = _gift_info_map()
+            uncollected = sum(1 for g in plan.gifts
+                              if (inst := gmap.get(g)) and inst[0] not in collected)
+            sets = max(1, uncollected) if uncollected else 1
+            cap = max(1, free_slots + 1) if free_slots else sets
+            return max(1, min(sets, cap))
         # 1 星：找顶层卡（depth 最大）及其需要的 40 面卡
         if not plan.ids:
             return 1
@@ -860,19 +906,40 @@ class AutoRefine:
         self.live_plans = [self.plans[t].plan_summary(stock, pending) for t in self.queue]
         self.live_plan = self.live_plans[0] if self.live_plans else None
 
+        # 预读本 tick 各套已收集 qq秀（一次网络，全库缓存）。用途：
+        # ① 上交挑「未收集」的 qq秀；② 非 1 星按未收集数定套数（流水线集满，不空炉）。
+        if self.queue:
+            await self._collected_shows(self.queue[0])
+        self._tick_collected = self._show_cache
+
         # 3) 集齐则上交（按队列逐个检查：每套各自上交、各自计轮次）
         progressed = False
         for tid in list(self.queue):
             plan = self.plans[tid]
             if not all(stock[c] >= 1 for c in plan.ids):
                 continue
-            r = await self.s.post(EP_COLLECTION_ADD, themetype=0, giftid=plan.giftid,
+            # ★ 上交挑「未收集」的 qq秀：遍历 t[9] 各 giftid，用 gift_list 翻成实例 id，
+            #   选第一个不在已收集列表里的（2026-10-12 修：旧逻辑永远传 t[9] 首项，
+            #   套内首个 qq秀已收集时反复上交同一个已收集的，永远集不满）。
+            gmap = _gift_info_map()
+            collected = self._tick_collected.get(tid, set())
+            chosen = plan.giftid
+            chosen_inst = None
+            chosen_name = None
+            for g in plan.gifts:
+                inst, nm = gmap.get(g, (None, ""))
+                if inst and inst not in collected:
+                    chosen, chosen_inst, chosen_name = g, inst, nm
+                    break
+            r = await self.s.post(EP_COLLECTION_ADD, themetype=0, giftid=chosen,
                                   cardtype=1, theme=tid)
             code = r.get("code")
             ok = code == 0
             msg = ("成功放入集卡册" if ok
                    else ((r.get("message") or "").strip() or err_msg(code)))
             detail = f"{plan.name}: {msg}"
+            if chosen != plan.giftid:
+                detail += f"｜选未收集qq秀 {chosen_name}({chosen_inst})"
             if ok:
                 self.stats["collected"] += 1
                 plan.rounds += 1
@@ -889,6 +956,10 @@ class AutoRefine:
                 if not got["items"] and not extra:
                     # 什么都没提出来 → 把原始响应留下来，下次收紧解析
                     detail += f"｜响应原文 {got['raw'][:220]}"
+                # 把刚收集的 qq秀实例写回缓存，避免同缓存窗口（20s）内下一轮重复选它
+                if chosen_inst:
+                    self._show_cache.setdefault(tid, set()).add(chosen_inst)
+                    self._tick_collected.setdefault(tid, set()).add(chosen_inst)
                 if self.max_rounds and plan.rounds >= self.max_rounds:
                     plan.done = True
                     if tid in self.queue:
@@ -898,8 +969,14 @@ class AutoRefine:
             self._log("上交", ok, detail)
             progressed = True
         if progressed:
-            # 上交消耗了整套卡，库存变了；下一 tick 重新读即可
-            return steps
+            # 上交消耗了整套卡，库存变了；重读后**立刻**续炼下一轮（流水线、炉位不空，
+            # 不等下一 tick 干等 45s）。旧逻辑这里直接 return，导致每轮上交后炉子空 45s、
+            # 表现为「等一套齐后才炼新的一套」。
+            self._log("上交后", True, "重读库存、流水线续炼下一轮")
+            rd2 = await self._read_state()
+            if rd2 is not None:
+                st, stock, slots, pending = rd2
+                self._stock, self._pending = stock, pending
 
         # 4) 按轮转顺序把**空着的主炉位**分给各套（多套并行，长炉时不让炉位闲着）
         await self._refine_all(st, stock, slots, pending, steps)
@@ -1288,6 +1365,8 @@ class AutoRefine:
             st, stock, slots, pending = rd
         if any(stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)
                for m, n in need_cnt.items()):
+            bad = [plan.cname(m) for m, n in need_cnt.items()
+                   if stock.get(m, 0) < n or not self._spare(m, stock, pending, n, planned)]
             return None
         return st, stock, slots, pending, need_cnt, need_buy
 
@@ -1397,6 +1476,33 @@ class AutoRefine:
         # 逐张明细单独成行（成功/失败都记，显示消耗的源卡名与变出的目标卡名）
         self._log_change_attempts(r.get("attempts"), "收礼变卡明细")
 
+    async def _collected_shows(self, tid: int) -> set:
+        """读 card_collection_get，返回该套【已收集】的 qq秀实例 id 集合（字符串）。
+
+        一次调用解析响应里**所有** <Node> 并全库缓存（self._show_cache），本 tick
+        内多次调用只发一次网络。qqshow_str 用 HTML 实体 `&#x2C;`（逗号）分隔实例 id。
+        成功上交后由调用方把实例 id 写回缓存，避免下一轮在同一缓存窗口内重复选到它。
+        """
+        now = time.time()
+        if self._show_cache and now - self._show_cache_ts < 20:
+            return self._show_cache.get(tid, set())
+        try:
+            r = await self.s.post(EP_COLLECTION_GET)
+            raw = r.get("raw", "") or ""
+            cache: dict[int, set] = {}
+            for spec in re.findall(r"<Node\s+([^>]*?)/?>", raw):
+                th = re.search(r'theme_id="(\d+)"', spec)
+                qs = re.search(r'qqshow_str="([^"]*)"', spec)
+                if th and qs:
+                    ids = [x.strip() for x in qs.group(1).replace("&#x2C;", ",").split(",")
+                           if x.strip()]
+                    cache[int(th.group(1))] = set(ids)
+            self._show_cache = cache
+            self._show_cache_ts = now
+            return cache.get(tid, set())
+        except Exception:
+            return self._show_cache.get(tid, set())
+
     async def _read_state(self):
         """读主界面 -> (st, stock, slots, pending)。失败返回 None。"""
         mp = await self.s.post(EP_MAINPAGE, code="", opuin=self.s.uin)
@@ -1418,14 +1524,28 @@ class AutoRefine:
 
     # ---------- 偷炉（借好友空炉炼自己的卡） ----------
     async def _load_friends(self) -> list[str]:
-        """好友 uin 列表（card_user_list，194 人，顺序=游戏界面顺序，非卡友）。缓存。"""
+        """好友 uin 列表（card_user_list）。
+
+        ⚠️ 实测 card_user_list 是 **uin 升序**、与等级/活跃度无关（2026-10-12 拉原始
+        响应确认：<user> 属性只有 uin/nick/exp/vip_*/turn，无 level 字段，顺序=uín）。
+        但 `exp` 是等级代理，故额外建一份按 exp 降序的 `_friends_by_exp`，让偷炉优先
+        挑等级高（更可能活跃）的好友。缓存。"""
         if self._friends is not None:
             return self._friends
         try:
             r = await self.s.post(EP_USER_LIST)
         except Exception:
             return []
-        self._friends = re.findall(r'<user\s+uin="(\d+)"', r.get("raw", ""))
+        raw = r.get("raw", "")
+        users = re.findall(r'<user\s+uin="(\d+)"[^>]*?exp="(\d+)"', raw)
+        if not users:                        # 兜底：regex 没匹配到 exp 就退回纯 uin 序
+            self._friends = re.findall(r'<user\s+uin="(\d+)"', raw)
+            self._friends_by_exp = None
+            return self._friends
+        self._friends = [u for u, _ in users]
+        # 按 exp 降序：等级高≈活跃概率大（用户 2026-10-12 定调），偷炉优先这批
+        self._friends_by_exp = [u for u, _ in
+                                sorted(users, key=lambda x: int(x[1]), reverse=True)]
         return self._friends
 
     async def _friend_stove_empty(self, opuin: str) -> int:
@@ -1452,9 +1572,10 @@ class AutoRefine:
             return -1
 
     async def _pick_steal_friend(self, st: dict) -> str | None:
-        """从最后一名好友往回找第一个可用的偷炉对象。
-        优先选「检测到有空炉」的；若检测盲区（都测不到空炉）则退而取最后一名，
-        交给服务端最终裁决（好友相关错误会被缓存、换下一名重试）。
+        """按「等级高优先」挑第一个可用的偷炉对象。
+        从 exp 降序列表头部取前 N 个（等级高≈活跃概率大，用户 2026-10-12 定调），
+        第一个检测到有空主炉的就借。若检测盲区（都测不到空炉）则退而取扫描到的
+        最后一名，交给服务端最终裁决（好友相关错误会被缓存、换下一名重试）。
         排除：① 近期偷炉失败被缓存的好友；② 已在对方炉上挂着我自己未取回的卡的好友
         （再偷会吃 -33084，等 tick 收卡后自然解除）。"""
         friends = await self._load_friends()
@@ -1469,9 +1590,11 @@ class AutoRefine:
         if pref and pref not in busy and self._friend_fail.get(pref, 0) <= now:
             if await self._friend_stove_empty(pref) != 0:
                 return pref
-        # 否则从最后一名好友往回找
-        window = friends[-self.steal_search_depth:]
-        window.reverse()                      # 从最后往回
+        # 否则按「等级高优先」扫描：从 exp 降序列表头部取前 N 个，第一个有空主炉就借
+        # （exp 是等级代理，用户定调等级高≈活跃；原「从最后 12 名往回」是 uin 序、
+        #  与活跃度无关，已废弃 —— 2026-10-12）
+        ordered = self._friends_by_exp or friends
+        window = ordered[:self.steal_search_depth]
         chosen = None
         for uin in window:
             if self._friend_fail.get(uin, 0) > now:
@@ -1541,6 +1664,8 @@ class AutoRefine:
                 if ok:
                     self.stats["bought"] += 1
                 msg = r.get("message") or err_msg(r.get("code"))
+                buylog.log_buy("engine._buy_for", m, tid, code=r.get("code"),
+                               ok=ok, note=f"{plan.cname(target)}素材 {msg}")
                 self._log("买卡", ok, f"{plan.cname(m)}（{plan.cname(target)}素材） {msg}")
                 steps.append({"action": "买卡", "ok": ok,
                               "detail": f"{plan.cname(m)}（{plan.cname(target)}素材） {msg}"})

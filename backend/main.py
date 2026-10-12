@@ -39,11 +39,13 @@ from . import dig_auto as dg
 from . import match as mt
 from . import xiyou as xy
 from . import cathome as ch
+from . import zcg as zcg_mod
 from . import cat_dress as cd
-from .constants import (EP_BUY, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO, EP_RANDOM_GET,
-                        EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
+from . import buylog
+from .constants import (EP_BUY, EP_COLLECTION_GET, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO,
+                        EP_RANDOM_GET, EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
                         EP_WORLD_EXPLORE, EP_WORLD_SANGUO)
-from .spirite_auto import SPIRITE_MAPS, get_engine, plain_uin
+from .spirite_auto import SPIRITE_MAPS, get_engine, plain_uin, MODES
 
 # 复用 mc_api 里已配好 handler 的 logger（那边 propagate=False，root 不带 handler）
 logger = logging.getLogger("mc.api")
@@ -230,18 +232,26 @@ async def refine_get(slotid: int):
 
 @app.get("/api/random")
 async def random_get():
-    """随机抽卡：单抽一次（type=1）。"""
+    """随机抽卡：抽一次（type=2，一次减1）。"""
     if err := _require_login():
         return err
-    return await _session.draw_random_cards(fetch_type=1)
+    return await _session.draw_random_cards(fetch_type=2)
 
 
 @app.post("/api/random/draw")
 async def random_draw_all():
-    """一键抽完所有随机抽卡次数，并自动卖掉 10 面额卡。"""
+    """一键抽完所有随机抽卡次数，并自动卖掉 10 面额卡（SSE 流式）。"""
     if err := _require_login():
         return err
-    return await _session.auto_random_draw_and_sell()
+
+    async def gen():
+        try:
+            async for step in _session.auto_random_draw_and_sell():
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'运行异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/pai/open")
@@ -573,6 +583,8 @@ async def card_buy(card_id: int, theme_id: int):
         r = await _session.post(EP_BUY, card_id=card_id, theme_id=theme_id)
         code = r.get("code")
         ok = code == 0
+        buylog.log_buy("card_buy", card_id, theme_id, code=code, ok=ok,
+                       note=r.get("message") or "")
         if ok:
             _inv_cache["data"] = None   # 买卡后卡箱有变，立即使持有快照失效
         return {"ok": ok, "code": code,
@@ -673,6 +685,71 @@ async def _owned_snapshot() -> dict | None:
         return None
 
 
+# ---- 集卡册进度（card_mini_get）：每套「已炼成(上交)次数」num，覆盖全库主套卡 ----
+# 这是游戏官方记录的「已炼套数」口径（不是按卡箱持有数估算）。变化频率低，短时缓存。
+import time as _tmod
+_mini_cache: dict = {"ts": 0.0, "data": None}
+MINI_TTL = 60.0
+
+
+async def _mini_sets_map() -> dict[int, tuple[int, int]]:
+    """{theme_id: (num, lv)}，来自 card_mini_get 的 <Node theme_id num lv>。
+
+    num = 集齐套卡次数（官方「已炼成套数」口径，即列表/明细的 sets 字段）；
+    lv  = 集卡册等级（与「主题秀收集数」无关，主题是另一维度，见 _collection_map）。
+    """
+    now = _tmod.time()
+    if _mini_cache["data"] is not None and now - _mini_cache["ts"] < MINI_TTL:
+        return _mini_cache["data"]
+    try:
+        r = await _session.post(EP_MINI_GET)
+        raw = r.get("raw", "") or ""
+        mp = {int(a): (int(b), int(c)) for a, b, c in
+              re.findall(r'<Node\s+theme_id="(\d+)"\s+num="(\d+)"\s+lv="(\d+)"', raw)}
+        _mini_cache["data"] = mp
+        _mini_cache["ts"] = now
+        return mp
+    except Exception:  # noqa: BLE001
+        return _mini_cache["data"] or {}
+
+
+# ---- 主题秀（QQ秀立绘）收集状态：card_collection_get 才是真源 ----
+# 每套 <Node theme_id ... cnt 已收集立绘数 total_cnt 该套立绘总数 qqshow_str 已收集立绘id>。
+# 早期卡 QQ秀分男女，用户常只选男立绘，所以「集齐多次(num 大)」≠「立绘集满(cnt=total)」。
+# 不能用 card_mini_get 的 num 估算主题秀，必须读这里。变化频率低，短时缓存。
+_collection_cache: dict = {"ts": 0.0, "data": None}
+COLL_TTL = 120.0
+
+
+async def _collection_map() -> dict[int, tuple[int, int]]:
+    """{theme_id: (cnt, total_cnt)}，来自 card_collection_get 的 <Node ...>。
+
+    实测语义（2026-10-08 jikace.har + 真机对照；2026-10-09 修正 show_total 来源）：
+    - cnt = 已收集（已获得）的主题秀立绘数——游戏集卡册 UI 的「已获得」章数量，
+      是「主题秀是否集满」的判定依据（与 num 无关）；cnt 可因重复选同立绘而 > 立绘总数。
+    - total_cnt ≡ 集齐次数（与 card_mini_get 的 num 全量相等，会随收集增长），
+      不是立绘总数，本服务不再用它作 show_total。
+    - 该套【立绘总数】取自套卡静态数据 theme_card_list 的 t[9] 项数（card_query.indexes
+      的 show_total 字段）：非 1 星全 4；1 星多数 4、仅时尚男/女·经典男/女 4 套为 1；
+      道具卡=0。list_themes / theme_detail 的 show_total 即此值。
+    - 早期 QQ 秀时代重复选同一立绘只延长有效期不计数 → 老套 cnt<num（真实口径）。
+    - 不在响应里的套（旅行/挖地/三国/西游等模块套）无主题秀数据。
+    """
+    now = _tmod.time()
+    if _collection_cache["data"] is not None and now - _collection_cache["ts"] < COLL_TTL:
+        return _collection_cache["data"]
+    try:
+        r = await _session.post(EP_COLLECTION_GET)
+        raw = r.get("raw", "") or ""
+        mp = {int(a): (int(b), int(c)) for a, b, c in
+              re.findall(r'theme_id="(\d+)"[^>]*cnt="(\d+)"[^>]*total_cnt="(\d+)"', raw)}
+        _collection_cache["data"] = mp
+        _collection_cache["ts"] = now
+        return mp
+    except Exception:  # noqa: BLE001
+        return _collection_cache["data"] or {}
+
+
 @app.get("/api/cards/q")
 async def cards_q(price: int = 0, kw: str = "", star: int = 0,
                   flash: int = -1, offline: int = -1, transferable: int = -1,
@@ -696,17 +773,25 @@ async def cards_q(price: int = 0, kw: str = "", star: int = 0,
 @app.get("/api/cards/themes")
 async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
                        offline: int = -1, module: str = "", transferable: int = -1,
+                       composable: int = -1, theme_show: int = -1,
                        limit: int = 500):
     """套卡目录（卡册 module / 星级 / 闪卡 / 关键词过滤），按上架时间倒序。只读。
 
-    transferable=1 → 只返回「能变卡得到」的套卡（变卡目标套卡候选）。
-    每套附 have（已持有卡种数）/ n（总卡数），供前端标记「已有套卡」。
+    transferable=1 → 只返回「能变卡得到」的套卡；composable=1 → 只返回「有合成配方」的套卡。
+    theme_show=1 → 只返回「主题秀没集满」的套卡（card_collection_get 中 cnt<total_cnt）。
+    每套附 have（已持有卡种数）/ sets（已炼 N 套 = 集卡册进度 num，官方口径）/
+          show / show_total（主题秀已集/总数，真源）/ n（总卡数）。
     """
     if err := _require_login():
         return err
     inv = await _owned_snapshot() or {"avail": {}}
+    mini = await _mini_sets_map()
+    coll = await _collection_map()
     return cq.list_themes(q=q, star=star, flash=flash, offline=offline, module=module,
-                          transferable=transferable, owned=inv["avail"], limit=min(limit, 2000))
+                          transferable=transferable, composable=composable,
+                          theme_show=theme_show,
+                          owned=inv["avail"], mini=mini, collection=coll,
+                          limit=min(limit, 2000))
 
 
 @app.get("/api/cards/theme/{tid}")
@@ -715,7 +800,9 @@ async def cards_theme(tid: int):
     if err := _require_login():
         return err
     inv = await _owned_snapshot() or {"avail": {}}
-    d = cq.theme_detail(tid, owned=inv["avail"])
+    mini = await _mini_sets_map()
+    coll = await _collection_map()
+    d = cq.theme_detail(tid, owned=inv["avail"], mini=mini, collection=coll)
     if d is None:
         return {"ok": False, "message": f"未找到主题 {tid}"}
     d["ok"] = True
@@ -1163,17 +1250,31 @@ async def players():
 
 @app.post("/api/daily/run")
 async def daily_run(body: dict | None = None):
-    """一键日常：跑 daily.ACTIONS 里**已实证**的每日领取动作。
+    """一键日常（SSE 流式）：跑 daily.ACTIONS 里**已实证**的每日领取动作。
 
     body 可选 {"keys": ["gift"]} 只跑指定项；不传 = 全跑。
+    每完成一项推一行（item 字典），前端边收边显示；末尾推 __done__ 带汇总。
     ⚠️ 只有 daily.py 里写明实证依据的动作才会执行 —— 需要抓包确认的（签到 /
     连续登录领奖 / 猫咪旅行等）宁缺勿滥，不在这里凭猜测补。
     """
     if err := _require_login():
         return err
     keys = (body or {}).get("keys") or None
-    items = await daily.run(_session, keys)
-    return {"ok": bool(items) and all(i["ok"] for i in items), "items": items}
+
+    async def gen():
+        items: list[dict] = []
+        try:
+            async for item in daily.run(_session, keys):
+                items.append(item)
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'act': '__done__',
+                                      'ok': bool(items) and all(i['ok'] for i in items),
+                                      'items': items}, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False,
+                                      'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ---- 免费礼物 + 变卡（card.qzone.qq.com，songli.har 实证） ----
@@ -1854,22 +1955,25 @@ async def travel_run(body: dict | None = None):
     if err := _require_login():
         return err
     b = body or {}
-    try:
-        out = await te.run_once(
-            _session,
-            food_num=int(b.get("food_num") or te.DEFAULT_FOOD_NUM),
-            harvest_only=bool(b.get("harvest_only")),
-            dry_run=bool(b.get("dry_run")),
-            do_clover=bool(b.get("do_clover", True)),
-            do_water=bool(b.get("do_water", True)),
-            do_tasks=bool(b.get("do_tasks", True)),
-        )
-        if not b.get("dry_run"):
-            _travel_aux_invalidate()
-        return {"ok": bool(out) and all(i.get("ok") for i in out),
-                "dry_run": bool(b.get("dry_run")), "items": out}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"运行异常：{e}"}
+
+    async def gen():
+        try:
+            async for step in te.run_once(
+                _session,
+                food_num=int(b.get("food_num") or te.DEFAULT_FOOD_NUM),
+                harvest_only=bool(b.get("harvest_only")),
+                dry_run=bool(b.get("dry_run")),
+                do_clover=bool(b.get("do_clover", True)),
+                do_water=bool(b.get("do_water", True)),
+                do_tasks=bool(b.get("do_tasks", True)),
+            ):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'运行异常：{e}'}, ensure_ascii=False)}\n\n"
+    if not b.get("dry_run"):
+        _travel_aux_invalidate()
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/travel/clover")
@@ -2034,11 +2138,11 @@ async def spirite_auto_stop(body: dict = None):
     if err := _require_login():
         return err
     mode = str(((body or {}) or {}).get("mode") or "") if body else ""
-    if mode in ("map", "island", "across"):
+    if mode in MODES:
         return get_engine(_session, mode).stop()
     # 不带 mode → 停止全部正在跑的玩法
     stopped = {}
-    for m in ("map", "island", "across"):
+    for m in MODES:
         eng = get_engine(_session, m)
         if eng.running:
             stopped[m] = eng.stop()
@@ -2050,7 +2154,7 @@ async def spirite_auto_status():
     if err := _require_login():
         return err
     modes = {}
-    for m in ("map", "island", "across"):
+    for m in MODES:
         st = get_engine(_session, m).status()
         st["mode"] = m
         modes[m] = st
@@ -2486,23 +2590,28 @@ async def match_xiyou_task(req: dict | None = None):
 
 @app.post("/api/match/xiyou-run")
 async def match_xiyou_run(req: dict | None = None):
-    """西游记一键：收满收获点（卡箱满先跨箱卖重复卡）→ 出发新 24h 探索 → 领任务奖。
+    """西游记一键（SSE 流式）：收满收获点 → 出发新 24h 探索 → 领任务奖。
 
-    每一步都看服务端返回，失败即停并写明原因；结果落盘 data/xiyou_run.json。
+    每步 yield（step/ok/note），末尾 __done__ 带汇总；结果落盘 data/xiyou_run.json。
     """
     if err := _require_login():
         return err
     req = req or {}
     lv = req.get("chapter") or req.get("levelid")
-    try:
-        return await xy.run_xiyou(_session,
-                                  do_start=bool(req.get("start", True)),
-                                  do_get=bool(req.get("get", True)),
-                                  do_task=bool(req.get("task", True)),
-                                  levelid=int(lv) if lv else None,
-                                  feed=bool(req.get("feed", True)))
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"异常：{e}"}
+
+    async def gen():
+        try:
+            async for step in xy.run_xiyou(_session,
+                                          do_start=bool(req.get("start", True)),
+                                          do_get=bool(req.get("get", True)),
+                                          do_task=bool(req.get("task", True)),
+                                          levelid=int(lv) if lv else None,
+                                          feed=bool(req.get("feed", True))):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -2618,13 +2727,19 @@ async def match_explore_extra():
 
 @app.get("/api/home/state")
 async def home_state():
-    """主界面每日玩法状态：点赞 bit / 扭蛋免费 / 积分 / 猫心情 / 竞技场剩余 / 金币福利。只读。"""
+    """主界面每日玩法状态：点赞 bit / 扭蛋免费 / 积分 / 猫心情 / 竞技场剩余 / 金币福利 / 珍藏阁。只读。"""
     if err := _require_login():
         return err
     try:
-        return await ch.home_state(_session)
+        st = await ch.home_state(_session)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
+    # 珍藏阁（card_user_zcg）状态并入猫窝日常，复用同一端点（最小改动；前端 mode-grid 加同名片）
+    try:
+        st["zcg"] = await zcg_mod.get_zcg_state(_session)
+    except Exception as e:  # noqa: BLE001
+        st["zcg"] = {"ok": False, "text": f"珍藏阁状态读取失败：{e}"}
+    return st
 
 
 @app.post("/api/home/like")
@@ -2793,11 +2908,11 @@ def _claim_group(req, g: str, k: str, coro):
 
 @app.post("/api/match/claim-all")
 async def match_claim_all(req: dict | None = None):
-    """一键领奖：依次领各玩法的奖励（都是零消耗的领奖 act）。
+    """一键领奖（SSE 流式）：依次领各玩法的奖励（都是零消耗的领奖 act）。
 
     覆盖 competition act=17/21、pvp act=15、union act=17、explore act=25、sanguo act=2。
     **only** 可选，传 "comp"/"pvp"/"union"/"explore"/"sanguo" 时只领该玩法（其余子块一键用）。
-    返回每一项的结果，失败的单独标出，不影响其他项。
+    每领一项 yield 一条，末尾 __done__ 带汇总；失败的单独标出，不影响其他项。
     """
     if err := _require_login():
         return err
@@ -2808,27 +2923,40 @@ async def match_claim_all(req: dict | None = None):
     async def want(g: str) -> bool:
         return (not only) or (only == g)
 
-    out = []
-    if await want("comp"):
-        for cid in cids:
-            out.append(_claim_group(req, "comp", f"比赛领奖 act=17 id={cid}",
-                                    await mt.comp_claim(_session, cid)))
-            out.append(_claim_group(req, "comp", f"比赛领奖 act=21 id={cid}",
-                                    await mt.comp_claim2(_session, cid)))
-    if await want("pvp"):
-        out.append(_claim_group(req, "pvp", "竞技场领奖 act=15",
-                                await mt.pvp_claim(_session, req.get("pvp_id", 1))))
-    if await want("union"):
-        out.append(_claim_group(req, "union", "工会领奖 act=17", await mt.union_claim(_session)))
-    if await want("explore"):
-        out.append(_claim_group(req, "explore", "探索领奖 act=25",
-                                await mt.explore_claim(_session, req.get("explore_id", 1))))
-    if await want("sanguo"):
-        out.append(_claim_group(req, "sanguo", "三国领奖 act=2",
-                                await mt.sanguo_claim(_session, req.get("sanguo_id", 0))))
-        out.append(_claim_group(req, "sanguo", "三国每日任务领奖 act=8",
-                                await mt.sanguo_claim_tasks(_session)))
-    return {"ok": True, "items": out}
+    async def gen():
+        out = []
+        try:
+            if await want("comp"):
+                for cid in cids:
+                    it = _claim_group(req, "comp", f"比赛领奖 act=17 id={cid}",
+                                      await mt.comp_claim(_session, cid))
+                    out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+                    it = _claim_group(req, "comp", f"比赛领奖 act=21 id={cid}",
+                                      await mt.comp_claim2(_session, cid))
+                    out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+            if await want("pvp"):
+                it = _claim_group(req, "pvp", "竞技场领奖 act=15",
+                                  await mt.pvp_claim(_session, req.get("pvp_id", 1)))
+                out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+            if await want("union"):
+                it = _claim_group(req, "union", "工会领奖 act=17", await mt.union_claim(_session))
+                out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+            if await want("explore"):
+                it = _claim_group(req, "explore", "探索领奖 act=25",
+                                  await mt.explore_claim(_session, req.get("explore_id", 1)))
+                out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+            if await want("sanguo"):
+                it = _claim_group(req, "sanguo", "三国领奖 act=2",
+                                  await mt.sanguo_claim(_session, req.get("sanguo_id", 0)))
+                out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+                it = _claim_group(req, "sanguo", "三国每日任务领奖 act=8",
+                                  await mt.sanguo_claim_tasks(_session))
+                out.append(it); yield f"data: {json.dumps(it, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'act': '__done__', 'ok': True, 'items': out}, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/match/sanguo-auto")
@@ -2873,8 +3001,9 @@ async def match_sanguo_auto(req: dict | None = None):
 
 @app.post("/api/match/sanguo-raid")
 async def match_sanguo_raid(req: dict | None = None):
-    """三国一键出战：用真实阵容连打到今日次数用尽（**消耗闯关次数**）。
+    """三国一键出战（SSE 流式）：用真实阵容连打到今日次数用尽（**消耗闯关次数**）。
 
+    逐场 yield（pre_claim / pre_task / round / post_task），末尾 __done__ 带汇总。
     今日已打满时直接 skipped，不发任何写请求。步骤落盘 data/sanguo_raid.json。
     传 `chapter`（1..9）＝ 界面上选的「打第几大关」，后端在该大关内挑该打的小关；
     不传则沿用服务端给的当前关。
@@ -2884,10 +3013,18 @@ async def match_sanguo_raid(req: dict | None = None):
     req = req or {}
     lv = req.get("levelid")
     ch = req.get("chapter")
-    return await mt.run_sanguo_raid(_session, int(lv) if lv else None,
-                                    chapter=int(ch) if ch else None,
-                                    feed=bool(req.get("feed", True)),
-                                    clear_box=bool(req.get("clear_box", True)))
+
+    async def gen():
+        try:
+            async for step in mt.run_sanguo_raid(_session, int(lv) if lv else None,
+                                                chapter=int(ch) if ch else None,
+                                                feed=bool(req.get("feed", True)),
+                                                clear_box=bool(req.get("clear_box", True))):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/match/sanguo-box")
@@ -3015,18 +3152,27 @@ async def match_union_info_query(req: dict | None = None):
 
 @app.post("/api/match/union-all")
 async def match_union_all(req: dict | None = None):
-    """「一键工会」：摇水果(17，每日3次) → 抢红包(19+20) → 公会战出战(23，消耗挑战次数)。
+    """「一键工会」（SSE 流式）：摇水果(17，每日3次) → 抢红包(19+20) → 公会战出战(23)。
 
-    act=21（旧误标摇水果）已全线撤下。抢红包只领自己没领过的。步骤落盘 data/union_run.json。
+    每步 yield（shake/exchange/redpacket/battle），末尾 __done__ 带汇总。
+    抢红包只领自己没领过的。步骤落盘 data/union_run.json。
     """
     if err := _require_login():
         return err
     req = req or {}
-    return await mt.run_union(_session,
-                              do_shake=bool(req.get("shake", True)),
-                              do_redpacket=bool(req.get("redpacket", True)),
-                              feed=bool(req.get("feed", True)),
-                              do_battle=bool(req.get("battle", True)))
+
+    async def gen():
+        try:
+            async for step in mt.run_union(_session,
+                                           do_shake=bool(req.get("shake", True)),
+                                           do_redpacket=bool(req.get("redpacket", True)),
+                                           feed=bool(req.get("feed", True)),
+                                           do_battle=bool(req.get("battle", True))):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/match/sanguo-run")
@@ -3095,12 +3241,10 @@ async def match_theme():
 
 @app.post("/api/match/run-all")
 async def match_run_all(req: dict):
-    """一键比赛：连续打完今日剩余场次（**消耗 performe_num**）。
+    """一键比赛（SSE 流式）：连续打完今日剩余场次（**消耗 performe_num**）。
 
-    前端点同一个按钮时先调本接口、再调 /api/match/claim-all 领奖（领奖零消耗），
-    后端不在这里重造领奖逻辑。
-
-    max_races>0 可限制最多打几场。逐场明细在 r.races 里。
+    逐场 yield（feed / race），末尾 __done__ 带汇总；前端边收边显示。
+    max_races>0 可限制最多打几场。
     """
     if err := _require_login():
         return err
@@ -3108,10 +3252,15 @@ async def match_run_all(req: dict):
         max_races = int((req or {}).get("max_races") or 0)
     except (TypeError, ValueError):
         max_races = 0
-    try:
-        return await mt.run_match_all(_session, max_races=max_races)
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"异常：{e}"}
+
+    async def gen():
+        try:
+            async for step in mt.run_match_all(_session, max_races=max_races):
+                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/match/lineup")

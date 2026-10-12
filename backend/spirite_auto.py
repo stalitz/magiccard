@@ -19,7 +19,12 @@
   客户端「一次派两只」的真实参数仍未找到（疑与 `hy_*` 槽位有关）。
 
 自动策略：轮询（默认 30s）。有探险在跑 → 满 min_wait 就试着收；收到 → 若还有
-免费次数就派下一只。全程只用 act=1/3/4，不触碰其它活动。
+免费次数就派下一只。四套玩法（map/island/across/invite）各自独立引擎、互不干扰。
+- invite（邀请好友探险，2026-10-04 tanxian.har 真机实证，**act 语义已校正**）：
+  **act=9 发起（置 fri_explore_ts=起始时间戳、今日已做+1）→ 等约 1 分钟 → act=10 领取
+  （返回 pack_str 奖励）**。⚠️ 此前把 act 语义记反（以为 act=10 发起/act=9 关闭），
+  导致一点自动就 `act=10` 因无在途探险返回 -1 立即 break、「没开始」。每天3次，
+  剩余次数从 act=1 的 today_fri_explore_cnt 真实回读（remaining = 3 - 该值）。
 """
 import asyncio
 import logging
@@ -47,6 +52,13 @@ ACROSS_DAILY_MAX = 10
 #: 荒岛（c_island）每天探险次数上限。游戏内普通 5 次/天（VIP 更多），
 #: act=1 只回已用次数（today_hy_explore_cnt），上限由这里给默认值。
 ISLAND_DAILY_MAX = 5
+#: 邀请好友探险（fri）每天次数上限。用户口述「每天3次，每次1分钟」。
+#: act=1 回 `today_fri_explore_cnt`（**今日已做次数**），剩余 = 3 - 该值
+#: （2026-10-04 tanxian.har 真机实证：act=10 发起 / act=9 关闭）。
+FRI_DAILY_MAX = 3
+#: 邀请好友探险单次时长（秒）。用户口述「每次1分钟」；act=10 发起后
+#: fri_explore_ts 置为到点时间戳，需等待此窗口才能 act=9 关闭当次。
+FRI_MIN_WAIT = 60
 
 
 def plain_uin(session) -> str:
@@ -161,6 +173,10 @@ class SpiriteAuto:
             "today_hy": d.get("today_hy_explore_cnt"),
             # 穿越丛林（官方 c_across，act=11）。**计数器叫 torrid_zone**（实测 +1）
             "torrid_used": d.get("torrid_zone_explore_cnt"),
+            # 邀请好友探险（官方 fri，act=10 发起 / act=9 关闭，每天 3 次）
+            "fri_ts": int(d.get("fri_explore_ts") or 0),
+            "fri_used": int(d.get("today_fri_explore_cnt") or 0),
+            "fri_remain": max(0, FRI_DAILY_MAX - int(d.get("today_fri_explore_cnt") or 0)),
         }
 
     async def _loop(self) -> None:
@@ -171,6 +187,8 @@ class SpiriteAuto:
                 await self._loop_island()
             elif mode == "across":
                 await self._loop_across()
+            elif mode == "invite":
+                await self._loop_invite()
             else:
                 await self._loop_map()
         except asyncio.CancelledError:
@@ -374,13 +392,78 @@ class SpiriteAuto:
             self._log("历练成功", True, f"{label} → {txt}")
             await asyncio.sleep(c["interval"])
 
+    async def _loop_invite(self) -> None:
+        """邀请好友探险（官方 fri）：act=9 发起 → 等约 1 分钟 → act=10 领取。
+
+        ⚠️ **act 语义已校正（2026-10-04 抓包记反的修正）**：
+        - act=9 = 发起：置 fri_explore_ts（起始时间戳）、今日已做次数 +1；
+        - 等满最短时长（约 1 分钟，fri_explore_ts 起算）后；
+        - act=10 = 领取：返回 pack_str 奖励，**清空 fri_explore_ts**。
+        抓包里看到的是「act=10 领取上一轮 → act=9 发起下一轮」成对操作，
+        因用户当时已在游戏内发起、处于在途态；干净起点必须先 act=9 发起。
+        流程：
+          - fri_explore_ts != 0（有在途探险）→ 等满最短时长再 act=10 领取；
+          - 否则 已做 < 上限 → act=9 发起（dispatches+1）→ 下一轮轮询等到点再 act=10；
+          - 已做 >= 上限 → 结束。
+        ⚠️ 不加速、不调任何额外道具；act=9/act=10 非0 即停（服务端拒=次数满/状态不允许）。
+        """
+        c = self.opts
+        while not self._stop:
+            code, d = await self._query()
+            if code != 0:
+                self._log("查询失败", False, f"code={code}")
+                await asyncio.sleep(c["interval"])
+                continue
+            self._snapshot(d)
+            fri_ts = int(d.get("fri_explore_ts") or 0)
+            used = int(d.get("today_fri_explore_cnt") or 0)
+
+            if fri_ts:
+                # 有进行中的邀请好友探险：等它到点再 act=10 领取
+                elapsed = time.time() - fri_ts
+                if elapsed < c["min_wait"]:
+                    self._log("邀请好友探险进行中", True,
+                              f"{elapsed / 60:.1f}/{c['min_wait'] / 60:.0f} 分钟")
+                    await asyncio.sleep(c["interval"])
+                    continue
+                r = await self._post(10)
+                pack = (r.get("data") or {}).get("pack_str") or r.get("pack_str") or ""
+                if r.get("code") != 0:
+                    self._log("领取邀请好友探险失败", False, f"code={r.get('code')}")
+                    await asyncio.sleep(c["interval"])
+                    continue
+                self.rewards.append({"ts": int(time.time()), "text": f"pack_str={pack}"})
+                self._log("领取邀请好友探险成功（act=10）", True, f"pack_str={pack}")
+                await asyncio.sleep(c["interval"])
+                continue
+
+            # 无进行中
+            if c["daily_max"] and used >= c["daily_max"]:
+                self._log("今日邀请好友探险次数已用尽", True, f"{used}/{c['daily_max']}")
+                break
+            if c["max_rounds"] and self.dispatches >= c["max_rounds"]:
+                self._log("已达轮数上限", True)
+                break
+            if c["dry_run"]:
+                self._log("模拟发起邀请好友探险（未真发）", True)
+                break
+
+            r = await self._post(9)
+            if r.get("code") != 0:
+                self._log("发起邀请好友探险失败", False,
+                          f"code={r.get('code')}（可能次数已满 / 状态不允许）")
+                break
+            self.dispatches += 1
+            self._log("发起邀请好友探险成功（act=9）", True)
+            await asyncio.sleep(c["interval"])
+
     # ---------- 对外控制 ----------
     def start(self, **opts) -> dict:
         if self.running:
             return {"ok": False, "message": "自动探险已在运行"}
         mode = str(opts.get("mode") or "map")
-        if mode not in ("map", "island", "across"):
-            return {"ok": False, "message": f"未知玩法 {mode}（可选 map / island / across）"}
+        if mode not in ("map", "island", "across", "invite"):
+            return {"ok": False, "message": f"未知玩法 {mode}（可选 map / island / across / invite）"}
         ch = int(opts.get("across_chapter") or 0)
         idx = int(opts.get("across_index") or 0)
         sub_id, aid = spm.across_param(ch, idx) if (ch and idx) else (0, 0)
@@ -404,7 +487,11 @@ class SpiriteAuto:
             "max_rounds": max(0, int(opts.get("max_rounds") or 0)),
             "interval": min(600, max(10, int(opts.get("interval") or 30))),
             "min_wait": min(3600, max(60, int(
-                opts.get("min_wait") or (ISLAND_MIN_WAIT if mode == "island" else SPIRITE_MIN_WAIT)))),
+                # 邀请好友探险时长由游戏固定（约1分钟），忽略前端传入值，强制 FRI_MIN_WAIT
+                (None if mode == "invite" else opts.get("min_wait")) or (
+                    ISLAND_MIN_WAIT if mode == "island"
+                    else FRI_MIN_WAIT if mode == "invite"
+                    else SPIRITE_MIN_WAIT)))),
             "dry_run": bool(opts.get("dry_run", False)),
         }
         if mode == "island":
@@ -427,6 +514,11 @@ class SpiriteAuto:
                 return {"ok": False, "message": f"穿越丛林没有 第{ch}章 第{idx}关（官方配置 11 章 62 关）"}
             self.opts["daily_max"] = self.opts["daily_max"] or ACROSS_DAILY_MAX
             self.opts["across_label"] = f"{p.get('chapter_name')} 第{idx}关"
+        elif mode == "invite":
+            # 邀请好友探险：每天 3 次，每次约 1 分钟；剩余次数由 act=1 的
+            # today_fri_explore_cnt 真实回读（见 _loop_invite / _snapshot）。
+            self.opts["daily_max"] = self.opts["daily_max"] or FRI_DAILY_MAX
+            self.opts["invite_label"] = "邀请好友探险"
         else:
             if self.opts["section_id"] < 1 or self.opts["pass_id"] < 1:
                 return {"ok": False,
@@ -471,8 +563,8 @@ class SpiriteAuto:
         }
 
 
-#: 三套玩法各自一个独立引擎，互不干扰（各自一个 asyncio 任务、各自的 running 标志）。
-MODES = ("map", "island", "across")
+#: 四套玩法各自一个独立引擎，互不干扰（各自一个 asyncio 任务、各自的 running 标志）。
+MODES = ("map", "island", "across", "invite")
 _ENGINES: dict[str, "SpiriteAuto"] = {}
 
 

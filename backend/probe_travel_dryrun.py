@@ -27,7 +27,7 @@ async def main():
         print(f"  猫{c.get('elf_id')}: {tag} end_ts={end} food={c.get('food_id')} num={c.get('food_num')}")
 
     print("\n=== dry-run 一轮（不发请求）===")
-    plan = await te.run_once(s, dry_run=True)
+    plan = [step async for step in te.run_once(s, dry_run=True)]
     for it in plan:
         print(f"  [{it.get('act')}] elf={it.get('elf_id')} -> {it.get('text')}")
 

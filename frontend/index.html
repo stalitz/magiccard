@@ -308,6 +308,12 @@
   .lib-group-title .meta{font-size:12px;color:var(--muted)}
   .v-badge{font-weight:700;font-size:12.5px;color:#1a9c5a;background:#e5f8ec;border-radius:6px;padding:1px 7px}
   .own-badge{font-size:12px;color:var(--qq-blue-d);font-weight:600}
+  .own-badge.sets{color:#1a9c5a;background:#e5f8ec;border-radius:6px;padding:1px 7px;font-weight:700}
+  .own-badge.sets.zero{color:#9e9e9e;background:#f5f5f5;border-radius:6px;padding:1px 7px;font-weight:600}
+  .own-badge.sets.zero.mod{color:#b0a07a;background:#f7f3e8;border-radius:6px;padding:1px 7px;font-weight:600}
+  .own-badge.show{font-size:12px;color:#8e44ad;font-weight:600}
+  .own-badge.show.zero{color:#c0392b;background:#fdeaea;border-radius:6px;padding:1px 7px}
+  .own-badge.show.na{color:#9e9e9e;background:#f5f5f5;border-radius:6px;padding:1px 7px;font-weight:600}
   .empty-tip{color:var(--muted);text-align:center;padding:48px 20px;font-size:13px;line-height:2}
   /* 套卡明细里的卡行 */
   .card-row{padding:7px 10px;border-radius:8px;border:1px solid var(--line);margin-bottom:6px}
@@ -811,36 +817,29 @@
       <div id="pane-overview" class="pane">
         <div class="cards-grid">
           <div class="stat-card">
-            <h3>游戏数据</h3>
-            <div id="state-box" class="state-box">
-              <span class="spinner"></span>正在读取游戏数据…
+            <h3>快捷操作</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button id="lot-draw-all" class="btn sm ok">一键抽卡 + 自动卖10面额</button>
+              <button id="lot-pai-once" class="btn sm primary">手动翻一次牌</button>
+              <button id="daily-run" class="btn sm ok">一键日常</button>
+              <span id="daily-last" class="hint"></span>
+            </div>
+            <details class="hint" style="margin-top:8px">
+              <summary style="cursor:pointer;color:var(--muted)">操作说明</summary>
+              <div style="margin-top:6px">
+                抽卡机会随时间累积（上限 16 次）；每次从炉位取卡得 1 次翻牌机会，自动炼卡已默认取卡后立即翻牌。结果写入右侧<b>操作日志</b>。<br>
+                一键日常只放<b>已实证</b>动作：每日登陆礼包（<b>+100 金币</b>）、每日送礼（48卡，每天上限 50）、<b>珍藏阁炼卡</b>（投 10 面卡→三色魔晶，<b>不加速</b>）。结果写入右侧<b>操作日志</b>。
+              </div>
+            </details>
+            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
+              <h3>游戏数据</h3>
+              <div id="state-box" class="state-box">
+                <span class="spinner"></span>正在读取游戏数据…
+              </div>
             </div>
             <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
               <h3 style="margin-bottom:10px">炼卡道具</h3>
               <div id="ov-props" style="display:flex;flex-wrap:wrap;gap:6px;font-size:11.5px"></div>
-            </div>
-            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
-              <h3 style="margin-bottom:10px">随机抽卡 / 翻牌</h3>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                <button id="lot-draw-all" class="btn sm ok">一键抽卡 + 自动卖10面额</button>
-                <button id="lot-pai-once" class="btn sm primary">手动翻一次牌</button>
-              </div>
-              <div class="hint" style="margin-top:8px">抽卡机会随时间累积（上限 16 次，见上方「随机抽卡」）；
-                每次从自己炉位取卡得 1 次翻牌机会，自动炼卡已默认取卡后立即翻牌。<br>
-                结果写入右侧<b>操作日志</b>，不在这里重复留档。</div>
-            </div>
-            <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
-              <h3 style="margin-bottom:10px">一键日常</h3>
-              <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                <button id="daily-run" class="btn sm ok">跑一遍</button>
-                <span id="daily-last" class="hint"></span>
-              </div>
-              <div class="hint" style="margin-top:8px">只放<b>已实证</b>的动作：每日登陆礼包（<b>+100 金币</b>，每天 1 次，重复跑会提示「今日已领过」）。<br>
-                签到 / 连续登录领奖要签名参数、猫咪旅行与挖地的端点还没定位 —— 抓包确认前不写进来。<br>
-                结果写入右侧<b>操作日志</b>。</div>
-            </div>
-            <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
-              <button id="probe-btn" class="btn sm">探测接口（调试）</button>
             </div>
           </div>
           <div class="console">
@@ -878,6 +877,20 @@
               <span class="chip" data-s="3">★3</span>
               <span class="chip" data-s="4">★4</span>
               <span class="chip" data-s="5">★5</span>
+            </div>
+            <div class="chiprow hidden" id="lib-transfilter">
+              <span class="chip active" data-t="0">全部可变</span>
+              <span class="chip" data-t="1">可变</span>
+              <span class="chip" data-t="2">不可变</span>
+            </div>
+            <div class="chiprow hidden" id="lib-compfilter">
+              <span class="chip active" data-c="0">全部合成</span>
+              <span class="chip" data-c="1">可合成</span>
+              <span class="chip" data-c="2">免合成</span>
+            </div>
+            <div class="chiprow hidden" id="lib-showfilter">
+              <span class="chip active" data-sh="0">全部主题秀</span>
+              <span class="chip" data-sh="1">主题秀未集满</span>
             </div>
           </div>
 
@@ -1642,7 +1655,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261003f"></script>
+<script src="/app.js?v=20261011b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

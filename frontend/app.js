@@ -19,6 +19,9 @@ const libState = {
   mode: "price",          // price | theme
   price: "", kw: "", star: 0, ownOnly: false,
   module: "main",         // 卡册：main=普通卡 | 挖地 | 猫咪旅行 | 猫咪探险·西游记 | 猫咪探险·三国战役
+  trans: 0,               // 可变筛选：0=全部 | 1=可变 | 2=不可变
+  comp: 0,                // 可合成筛选：0=全部 | 1=可合成 | 2=免合成
+  show: 0,                // 主题秀筛选：0=全部 | 1=未集满(按该套立绘总数, 含1星; 仅道具卡等无数据套除外)
   curThemeTid: null,
 };
 
@@ -61,6 +64,29 @@ function attrTags(o) {
     ? '<span class="tag trans" title="可用≥面额的其他卡变卡得到">可变</span>'
     : '<span class="tag notrans" title="不能通过变卡得到">不可变</span>';
   return c + t;
+}
+// 「已炼 N 套 / 未炼」徽章：sets 来自集卡册进度（card_mini_get 的 num，游戏官方口径）。
+// 只有主卡箱在售套才显示「未炼」；模块套/绝版/特殊套不计入普通炼卡，显示「非集卡册套」。
+function setsBadge(o) {
+  if (o.sets > 0) return `<span class="own-badge sets">已炼 ${o.sets} 套</span>`;
+  const mainRefinable = (!o.module || o.module === "") && o.kind !== "绝版" && o.kind !== "特殊";
+  return mainRefinable
+    ? `<span class="own-badge sets zero">未炼</span>`
+    : `<span class="own-badge sets zero mod">非集卡册套</span>`;
+}
+// 「主题秀 N/M」徽章：show = 已收集立绘数（card_collection_get 的 cnt），
+// show_total = 该套立绘总数（套卡静态数据 t[9] 项数：非1星全4，1星多4/少数为1）。
+// cnt 可能含重复选同立绘(延长QQ秀有效期)而大于总数，显示封顶到总数；n<total 即「未集满」标红。
+// 1 星套不再排除——只有 show_total=0(道具卡等)或无收藏数据的模块套才显示「主题秀 —」。
+function showBadge(o) {
+  const n = o.show == null ? null : (o.show | 0);
+  const total = o.show_total | 0;
+  // total=0：该套无主题秀数据（道具卡/模块套）
+  if (n == null || total === 0) return `<span class="own-badge show na">主题秀 —</span>`;
+  const v = Math.min(n, total);
+  return n < total
+    ? `<span class="own-badge show zero">主题秀 ${v}/${total}</span>`
+    : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
 // ---------- 操作日志（持久化到 localStorage，刷新/重开仍在） ----------
@@ -375,7 +401,6 @@ function switchPane(pane) {
   if (pane === "spirite") { initSpiriteOnce(); spStartLive(); }
   else spStopLive();
   if (pane === "travel") initTravelOnce();
-  else travelStopAuto();
   if (pane === "dig") initDigOnce();
   else digStopPoll();
   if (pane === "match") { initMatchOnce(); initHomeOnce(); }
@@ -533,17 +558,20 @@ async function travelRun(harvestOnly) {
   const foodNum = parseInt($("travel-foodnum").value, 10) || 4;
   const restore = busyBtn($("travel-run"), "运行中…");
   try {
-    const r = await fetch("/api/travel/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const final = await streamRun("/api/travel/run", {
+      body: {
         food_num: foodNum, harvest_only: !!harvestOnly, dry_run: dry,
         do_clover: true, do_water: true, do_tasks: true,
-      }),
-    }).then((x) => x.json());
-    if (!r.ok) { log(`[旅行] 运行失败：${r.message || "未知"}`, "err"); return; }
-    for (const it of (r.items || [])) log(`[旅行] ${it.text}`, it.ok ? "ok" : "err");
-    if (r.dry_run) log("[旅行] 模拟运行，未发真实请求。", "info");
+      },
+      onStep: (it) => {
+        if (!it || it.act === "__done__" || it.act === "__error__") return;
+        const tag = ({ harvest: "收获", depart: "出发", buy: "购食", clover: "三叶草",
+                      water: "浇水", task: "任务", tasks: "任务", none: "提示" })[it.act] || it.act;
+        log(`[旅行·${tag}] ${it.text}`, it.ok ? "ok" : "err");
+      },
+    });
+    if (final && final.act === "__error__") log(`[旅行] 运行失败：${final.message || "未知"}`, "err");
+    else if (dry) log("[旅行] 模拟运行，未发真实请求。", "info");
   } catch (e) {
     log(`[旅行] 请求异常：${esc(e.message)}`, "err");
   } finally {
@@ -1361,26 +1389,6 @@ $("auto-refresh").onchange = (e) => {
   log(e.target.checked ? "已开启自动刷新（60 秒）" : "已关闭自动刷新", "info");
 };
 
-$("probe-btn").onclick = async () => {
-  const btn = $("probe-btn");
-  btn.disabled = true; btn.textContent = "探测中…";
-  log("开始探测魔法卡片真实接口…", "info");
-  try {
-    const d = await (await fetch("/api/probe")).json();
-    if (d.hosts_found && d.hosts_found.length)
-      log("入口页出现的主机：" + d.hosts_found.join("、"), "info");
-    else if (d.page_error) log("拉取入口页失败：" + d.page_error, "err");
-    (d.tests || []).forEach((t) => {
-      if (t.error) log(`${t.base} → 错误：${t.error}`, "err");
-      else log(`${t.base} → HTTP ${t.status}　${(t.head || "").replace(/\s+/g, " ").slice(0, 70)}`, t.status === 200 ? "ok" : "warn");
-    });
-    log("探测完成：card.show.qq.com 活着，返回标准 XML。", "ok");
-  } catch (e) {
-    log("探测请求失败：" + e, "err");
-  } finally {
-    btn.disabled = false; btn.textContent = "探测接口（调试）";
-  }
-};
 
 // ============================================================
 // 换卡（手动模式）
@@ -2360,6 +2368,9 @@ function setLibMode(mode) {
   $("lib-sep1").classList.toggle("hidden", !isPrice);
   $("lib-themefilter").classList.toggle("hidden", isPrice);
   $("lib-modfilter").classList.toggle("hidden", isPrice);
+  $("lib-transfilter").classList.toggle("hidden", isPrice);
+  $("lib-compfilter").classList.toggle("hidden", isPrice);
+  $("lib-showfilter").classList.toggle("hidden", isPrice);
   $("lst-title").textContent = isPrice ? "面值查卡" : "浏览套卡";
   $("lib-detail").innerHTML = '<div class="empty-tip">在左侧点一套卡，这里显示每张卡的面值与合成路径。</div>';
   $("dt-title").textContent = "套卡明细";
@@ -2397,6 +2408,30 @@ document.querySelectorAll("#lib-themefilter .chip").forEach((c) => {
     document.querySelectorAll("#lib-themefilter .chip").forEach((x) => x.classList.remove("active"));
     c.classList.add("active");
     libState.star = Number(c.dataset.s);
+    runThemeQuery();
+  };
+});
+document.querySelectorAll("#lib-transfilter .chip").forEach((c) => {
+  c.onclick = () => {
+    document.querySelectorAll("#lib-transfilter .chip").forEach((x) => x.classList.remove("active"));
+    c.classList.add("active");
+    libState.trans = Number(c.dataset.t);
+    runThemeQuery();
+  };
+});
+document.querySelectorAll("#lib-compfilter .chip").forEach((c) => {
+  c.onclick = () => {
+    document.querySelectorAll("#lib-compfilter .chip").forEach((x) => x.classList.remove("active"));
+    c.classList.add("active");
+    libState.comp = Number(c.dataset.c);
+    runThemeQuery();
+  };
+});
+document.querySelectorAll("#lib-showfilter .chip").forEach((c) => {
+  c.onclick = () => {
+    document.querySelectorAll("#lib-showfilter .chip").forEach((x) => x.classList.remove("active"));
+    c.classList.add("active");
+    libState.show = Number(c.dataset.sh);
     runThemeQuery();
   };
 });
@@ -2470,6 +2505,10 @@ async function runThemeQuery() {
     if (kw) params.set("q", kw);
     if (libState.star) params.set("star", libState.star);
     if (libState.module) params.set("module", libState.module);
+    // 可变 / 可合成 筛选：1=是，2=否（后端 0/1 布尔取反）
+    if (libState.trans) params.set("transferable", libState.trans === 1 ? 1 : 0);
+    if (libState.comp) params.set("composable", libState.comp === 1 ? 1 : 0);
+    if (libState.show) params.set("theme_show", libState.show);
     params.set("limit", 2000);
     const d = await (await fetch(`/api/cards/themes?${params}`)).json();
     const isMain = libState.module === "main";
@@ -2497,10 +2536,12 @@ async function runThemeQuery() {
       html += `<div class="lib-group"><div class="lib-group-title">` +
         `<span class="tag ${g.cls}">${g.label}</span>` +
         `<span class="meta">${items.length} 套</span></div>`;
-      html += items.map((t) => `<div class="it" data-tid="${t.tid}">
+      html += items.map((t) => {
+        return `<div class="it" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
-          ${kindTag(t.kind)}${attrTags(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
-        <div class="sub">主题 #${t.tid}</div></div>`).join("");
+          ${kindTag(t.kind)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
+        <div class="sub">主题 #${t.tid}</div></div>`;
+      }).join("");
       html += `</div>`;
     }
     $("lib-list").innerHTML = html;
@@ -2533,6 +2574,7 @@ async function openTheme(tid, focusCid = null) {
     detail.innerHTML =
       `<div class="card-row"><div class="head">${esc(t.name)}　${stars(t.star)}
          ${kindTag(t.kind)}${attrTags(t)}
+         ${setsBadge(d)}${showBadge(d)}
          <span class="meta" style="margin-left:auto;color:var(--muted);font-size:12px">共 ${t.n} 张卡 · 面值区间以卡为准</span></div>
        </div>` + renderSynTiers(syn);
     mountSynView(detail, syn, () => {
@@ -3751,24 +3793,31 @@ async function unionAll() {
   if (!confirm("一键工会 = 摇水果（每日3次）+ 抢红包（只领没领过的）+ 公会战出战（消耗 1 次今日挑战机会），确认？")) {
     return { ok: false, message: "已取消" };
   }
-  const r = await unionAct($("union-all"), "/api/match/union-all",
-    { shake: true, redpacket: true, battle: true }, "一键工会", "[工会] 一键工会完成");
-  if (r && r.ok !== false) {
-    const st = r.steps || [];
-    mlog("[工会] " + st.map((s) => `${s.act}:${s.ok ? "ok" : "✗"}`).join(" → "), "ok");
+  const final = await streamRun("/api/match/union-all", {
+    body: { shake: true, redpacket: true, battle: true },
+    onStep: (s) => {
+      if (!s || s.act === "__done__" || s.act === "__error__") return;
+      if (s.act === "battle" && s.rounds) {
+        // 公会战出战循环：逐场实时记日志，每场成功计入本地挑战次数
+        for (const rd of s.rounds) {
+          mlog(`[工会] 公会战${rd.ok ? (rd.win ? " 胜利" : " 结束") : " 失败"}：${rd.msg}`,
+               rd.ok ? (rd.win === false ? "warn" : "ok") : "err");
+          if (rd.ok) gvgChallengeInc();
+        }
+        if (s.ok !== false) mlog(`[工会] 公会战完成：${s.rounds.length} 场`, "ok");
+      } else {
+        mlog(`[工会] ${s.act}: ${s.msg || s.text || ""}`, s.ok ? "ok" : "err");
+      }
+    },
+  });
+  if (final && final.act === "__error__") mlog("[工会] 一键工会失败：" + (final.message || ""), "err");
+  else if (final) {
+    const st = final.steps || [];
     for (const s of st) if (s.ok === false) mlog(`[工会] ${s.act} 未成功：${s.msg}`, "err");
     const bt = st.find((s) => s.act === "battle");
-    if (bt) {
-      // 出战循环（09-30 起打到每日上限）：逐场记日志，每场成功都计入本地次数
-      for (const rd of bt.rounds || []) {
-        mlog(`[工会] 公会战${rd.ok ? (rd.win ? " 胜利" : " 结束") : " 失败"}：${rd.msg}`,
-             rd.ok ? (rd.win === false ? "warn" : "ok") : "err");
-        if (rd.ok) gvgChallengeInc();
-      }
-      if (bt.ok === false) mlog(`[工会] battle 未成功：${bt.msg}`, "err");
-    }
+    if (bt && bt.rounds) for (const rd of bt.rounds) if (rd.ok) gvgChallengeInc();
   }
-  return r;
+  return final;
 }
 
 async function unionChallenge() {
@@ -3977,19 +4026,17 @@ async function loadMatchGvg() {
 // 三国一键出战：连打到今日次数用尽（后端内部每轮重读真实阵容，次数由服务端回读）
 // sgPickChapter 是界面上选的大关（0 = 跟服务端当前关）：选了就在那一大关里打缺口最小的层。
 async function sanguoRaid() {
-  const r = await fetch("/api/match/sanguo-raid", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chapter: sgPickChapter || 0 }),
-  }).then((x) => x.json()).catch(() => null);
-  if (!r || r.ok === false) {
-    mlog("[三国] 一键出战失败：" + ((r && r.message) || "网络异常"), "err");
-    return;
-  }
-  if (r.skipped) { mlog("[三国] " + (r.message || "今日已出满，无需再出"), "warn"); return; }
-  const rs = (r.rounds || []).map((x) => `第${x.no}场 ${x.ok ? (x.text || "成功") : (x.msg || "失败")}`);
-  mlog(`[三国] 一键出战：${r.chapter ? `第 ${r.chapter} 大关 · ` : ""}关卡 L${r.levelid} 出战 ${r.played} / ${(r.rounds || []).length} 场` +
-    `（今日 ${r.used_before}→${r.used_after} 次）` + (rs.length ? "｜" + rs.join("；") : ""),
-    r.played ? "ok" : "");
+  const final = await streamRun("/api/match/sanguo-raid", {
+    body: { chapter: sgPickChapter || 0 },
+    onStep: (s) => {
+      if (!s || s.act === "__done__" || s.act === "__error__") return;
+      if (s.act === "round") mlog(`[三国] 第${s.no}场 ${s.ok ? (s.text || "成功") : (s.msg || "失败")}`, s.ok ? "ok" : "err");
+      else mlog(`[三国] ${s.text || s.act || ""}`, s.ok ? "ok" : "warn");
+    },
+  });
+  if (final && final.act === "__error__") mlog("[三国] 一键出战失败：" + (final.message || "网络异常"), "err");
+  else if (final && final.skipped) mlog("[三国] " + (final.message || "今日已出满，无需再出"), "warn");
+  else if (final) mlog(`[三国] 一键出战：${final.chapter ? "第 " + final.chapter + " 大关 · " : ""}关卡 L${final.levelid} 出战 ${final.played} / ${(final.rounds || []).length} 场（今日 ${final.used_before}→${final.used_after} 次）`, final.played ? "ok" : "");
   await loadMatchSanguo(true); await loadMatchSanguoLevels();
 }
 
@@ -4474,25 +4521,27 @@ function arrLen(x) {
 // 子块一键领奖：only 填空即全量（原「一键领奖（全玩法）」也走这里）
 
 async function claimGroup(only) {
-  const r = await fetch("/api/match/claim-all", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ only: only || "" }),
-  }).then((x) => x.json()).catch(() => null);
-  const items = (r && r.items) || [];
-  if (!items.length) { mlog("[领奖] 没有可领的项目", "warn"); return false; }
-  let ok = 0;
-  for (const it of items) {
-    const d = (it.r && it.r.data) || {};
-    const bad = (it.r && it.r.ok === false) || (d.code !== undefined && d.code !== 0);
-    if (bad) {
-      mlog("[领奖] " + it.k + " → 无奖励或失败 " + (d.desc || d.code || (it.r && it.r.message) || ""), "");
-    } else {
-      ok += 1;
-      mlog("[领奖] " + it.k + " → " + (d.content || "成功"), "ok");
-    }
-  }
-  mlog("[领奖] 成功 " + ok + " / " + items.length, ok ? "ok" : "");
-  return ok > 0;
+  let okCount = 0, total = 0;
+  const final = await streamRun("/api/match/claim-all", {
+    body: { only: only || "" },
+    onStep: (it) => {
+      if (!it || it.act === "__done__" || it.act === "__error__") return;
+      const r = it.r || {};
+      const d = r.data || {};
+      const bad = (r.ok === false) || (d.code !== undefined && d.code !== 0);
+      total++;
+      if (bad) {
+        mlog("[领奖] " + it.k + " → 无奖励或失败 " + (d.desc || d.code || r.message || ""), "");
+      } else {
+        okCount++;
+        mlog("[领奖] " + it.k + " → " + (d.content || "成功"), "ok");
+      }
+    },
+  });
+  if (final && final.act === "__error__") mlog("[领奖] 失败：" + (final.message || "网络异常"), "err");
+  else if (total === 0) mlog("[领奖] 没有可领的项目", "warn");
+  else mlog("[领奖] 成功 " + okCount + " / " + total, okCount ? "ok" : "");
+  return okCount > 0;
 }
 
 async function claimAll() {
@@ -4702,6 +4751,19 @@ async function loadHomeState() {
     ? `共 ${pool.length} 件（未锻 ${fresh.length}）` +
       (best ? ` · 建议锻：${best.k}部 ${best.id}（要材料 ${best.chip ?? 0}）` : "")
     : "读取失败";
+  // 珍藏阁（card_user_zcg）：三色魔晶计数 + 3 个免费炉占用/炼制进度
+  const z = d.zcg;
+  if (z && z.ok) {
+    const m = z.mojing || {};
+    const pz = (z.puzi || []).filter((p) => p.id < 10000)
+      .map((p) => `${p.id}=${p.state}`).join(" ");
+    $("home-zcg-st").textContent =
+      `魔晶 橙${m.cmj ?? 0} 红${m.hmj ?? 0} 紫${m.zmj ?? 0} · 炉 ${pz}`;
+  } else if (z) {
+    $("home-zcg-st").textContent = "读取失败：" + (z.text || "?");
+  } else {
+    $("home-zcg-st").textContent = "读取中…";
+  }
 }
 
 async function homePost(url, body) {
@@ -4784,6 +4846,52 @@ async function homeRunAll(btn) {
   }
 }
 
+// 通用 SSE 流式消费助手：所有「一键跑多个操作」按钮共用。
+// 后端每完成一步 yield 一个 dict（普通步骤 / __done__ 汇总 / __error__ 异常），
+// 前端边收边调用 onStep(stp) 实时打日志，不再等整段跑完才打印。
+// 返回最后的 __done__ 或 __error__ 负载（无则 null）。
+async function streamRun(url, opts = {}) {
+  const { body = {}, onStep } = opts;
+  let final = null;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = { act: "__error__", ok: false, message: `HTTP ${resp.status}` };
+      if (onStep) onStep(err);
+      return err;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const line = chunk.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        let stp; try { stp = JSON.parse(payload); } catch { continue; }
+        if (stp.act === "__done__") { final = stp; continue; }
+        if (stp.act === "__error__") { final = stp; if (onStep) onStep(stp); continue; }
+        if (onStep) onStep(stp);
+      }
+    }
+  } catch (e) {
+    const err = { act: "__error__", ok: false, message: `流读取失败：${e}` };
+    if (onStep) onStep(err);
+    final = err;
+  }
+  return final;
+}
+
 function initHomeOnce() {
   if (homeInited) return;
   homeInited = true;
@@ -4851,14 +4959,14 @@ function initMatchOnce() {
   });
   bind("match-xy-run", async (b) => {
     const restore = busyBtn(b, "探索跑完中…", "一键探索");
-    const r = await fetch("/api/match/xiyou-run", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chapter: xyPickChapter || 0 }),
-    }).then((x) => x.json()).catch(() => ({ ok: false, message: "网络错误" }));
-    const steps = (r && r.steps) || [];
-    mlog("[西游记] 一键探索：收满 / 出发 / 领奖 → " +
-      (steps.length ? steps.map((s) => `${s.step}${s.ok ? " 成功" : " 失败：" + (s.note || "")}`).join("；") : "没有可做的步骤"),
-      r && r.ok === false ? "" : "ok");
+    const final = await streamRun("/api/match/xiyou-run", {
+      body: { chapter: xyPickChapter || 0 },
+      onStep: (s) => {
+        if (!s || s.act === "__done__" || s.act === "__error__") return;
+        mlog(`[西游记] ${s.step || ""} ${s.ok ? "成功" : "失败：" + (s.note || "")}`, s.ok ? "ok" : "err");
+      },
+    });
+    if (final && final.act === "__error__") mlog("[西游记] 一键探索失败：" + (final.message || ""), "err");
     await loadMatchXiyou(true);
     restore();
   });
@@ -5042,25 +5150,21 @@ async function runAllMatch() {
   if (!confirm(`一键比赛将连续打完今日剩余场次（当前剩余 ${before} 次）。\n`
     + "上台奖励由系统自动发放，本操作不再去领其他玩法的奖；会真实消耗比赛次数，确认继续？")) return;
   mlog("[一键比赛] 开始：先把心情喂到 80，再读主题与最优穿装、逐场出战…", "ok");
-  const r = await fetch("/api/match/run-all", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  }).then((x) => x.json()).catch(() => null);
-  if (!r || r.ok === false) {
-    mlog("[一键比赛] 失败：" + ((r && r.message) || "网络异常"), "err");
-    await loadMatchState(true);
-    return;
-  }
-  const races = r.races || [];
-  if (!races.length) {
-    mlog("[一键比赛] 一场没打成：" + (r.message || "无出战记录"), "warn");
-  } else {
-    for (const x of races) mlog("[一键比赛] 第 " + (races.indexOf(x) + 1) + " 场 " + raceLine(x), "ok");
-  }
-  mlog(`[一键比赛] 完成：打了 ${r.ran || races.length} 场，剩余次数 ${r.left_before ?? "-"} → ${r.left_after ?? "-"}`, "ok");
-  if (r.feed && r.feed.ok) {
-    mlog(`[一键比赛] 出战前已把心情喂到 80（用掉 ${r.feed.candies ?? 0} 颗糖）`, "ok");
-  }
+  const final = await streamRun("/api/match/run-all", {
+    onStep: (s) => {
+      if (!s) return;
+      if (s.act === "feed") {
+        mlog(`[一键比赛] 喂糖：出战前已把心情喂到 80（用掉 ${s.candies ?? 0} 颗糖）`,
+             s.ok ? "ok" : "warn");
+      } else if (s.act === "race") {
+        mlog(`[一键比赛] 第 ${s.no} 场 ` + raceLine(s), s.ok ? "ok" : "err");
+      } else {
+        mlog(`[一键比赛] ${s.text || s.act || ""}`, s.ok ? "ok" : "err");
+      }
+    },
+  });
+  if (final && final.act === "__error__") mlog("[一键比赛] 失败：" + (final.message || "网络异常"), "err");
+  else if (final) mlog(`[一键比赛] 完成：打了 ${final.ran || 0} 场，剩余次数 ${final.left_before ?? "-"} → ${final.left_after ?? "-"}`, "ok");
   // 注意：不打这里领奖。一键比赛只管出战，奖励上台后系统自动发；
   // 跨玩法的一键领奖在「猫窝日常」页，由用户自己决定要不要领。
   await loadMatchState(true);
@@ -5069,18 +5173,20 @@ async function runAllMatch() {
 
 // 只领奖：跑现成的 /api/match/claim-all（零消耗，各玩法独立，失败不影响其他项）
 async function claimOnly() {
-  const r = await fetch("/api/match/claim-all", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-  }).then((x) => x.json()).catch(() => null);
-  const items = (r && r.items) || [];
-  if (!items.length) { mlog("[一键领奖] 没有可领的奖励项", "warn"); return false; }
-  let ok = 0;
-  for (const it of items) {
-    if (it.ok) { ok += 1; mlog("[领奖] " + it.k + " → " + (it.content || "成功"), "ok"); }
-    else mlog("[领奖] " + it.k + " 失败：" + (it.err || it.desc || "失败"), "warn");
-  }
-  mlog("[一键领奖] 成功 " + ok + " / " + items.length, ok ? "ok" : "");
-  return ok > 0;
+  let okCount = 0, total = 0;
+  const final = await streamRun("/api/match/claim-all", {
+    onStep: (it) => {
+      if (!it || it.act === "__done__" || it.act === "__error__") return;
+      const r = it.r || {};
+      total++;
+      if (r.ok) { okCount++; mlog("[领奖] " + it.k + " → " + (r.content || "成功"), "ok"); }
+      else mlog("[领奖] " + it.k + " 失败：" + (r.err || r.desc || "失败"), "warn");
+    },
+  });
+  if (final && final.act === "__error__") mlog("[一键领奖] 失败：" + (final.message || "网络异常"), "err");
+  else if (total === 0) mlog("[一键领奖] 没有可领的奖励项", "warn");
+  else mlog("[一键领奖] 成功 " + okCount + " / " + total, okCount ? "ok" : "");
+  return okCount > 0;
 }
 
 // ---------------- 今日主题与最优穿装（比赛页新卡） ----------------
@@ -5229,27 +5335,34 @@ function initLotteryOnce() {
   $("daily-run").onclick = dailyRun;
 }
 
-// 一键日常：只跑后端 daily.ACTIONS 里「已实证」的动作，结果逐条进全局日志
+// 一键日常：只跑后端 daily.ACTIONS 里「已实证」的动作，结果逐条实时进全局日志
 async function dailyRun() {
   const btn = $("daily-run"), last = $("daily-last");
   btn.disabled = true;
   const old = btn.textContent; btn.textContent = "领取中…";
+  let got = false;
   try {
-    const d = await (await fetch("/api/daily/run", { method: "POST" })).json();
-    if (!d.items) { log("一键日常失败：" + (d.message || "未知原因"), "err"); return; }
-    let got = false;
-    for (const it of d.items) {
-      const lvl = it.ok ? "ok" : (it.quota_done ? "warn" : "err");
-      log(`一键日常 · ${it.name}：${it.text}`, lvl);
-      if (it.ok && it.code === 0 && it.sent_list && it.sent_list.length) {
-        for (const x of it.sent_list) {
-          log(`  · 48面卡 → ${x.uin}${x.nick ? "（" + x.nick + "）" : ""}${x.exp ? " [exp " + x.exp + "]" : ""}`, "info");
+    const final = await streamRun("/api/daily/run", {
+      onStep: (it) => {
+        if (!it || it.act === "__done__" || it.act === "__error__") return;
+        const lvl = it.ok ? "ok" : (it.quota_done ? "warn" : "err");
+        log(`一键日常 · ${it.name}：${it.text}`, lvl);
+        if (it.ok && it.code === 0 && it.sent_list && it.sent_list.length) {
+          for (const x of it.sent_list) {
+            log(`  · 48面卡 → ${x.uin}${x.nick ? "（" + x.nick + "）" : ""}${x.exp ? " [exp " + x.exp + "]" : ""}`, "info");
+          }
         }
-      }
-      if (it.ok && it.code === 0) got = true;
+        if (it.steps && it.steps.length) {
+          for (const s of it.steps) log(`  · ${s.text || s.act || ""}`, (s.code === 0 || s.code === undefined) ? "info" : "warn");
+        }
+        if (it.ok && it.code === 0) got = true;
+      },
+    });
+    if (final && final.act === "__error__") log("一键日常失败：" + (final.message || "未知原因"), "err");
+    else if (final && final.items) {
+      if (last) last.textContent = final.items.map(i => `${i.name}：${i.text}`).join("；");
+      if (got) loadState();   // 金币变了，重读一次
     }
-    if (last) last.textContent = d.items.map(i => `${i.name}：${i.text}`).join("；");
-    if (got) loadState();   // 金币变了，重读一次
   } catch (e) {
     log("一键日常异常：" + e, "err");
   } finally {
@@ -5269,9 +5382,9 @@ async function lotDrawAll() {
   const btn = $("lot-draw-all");
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "抽卡中…";
+  let chance = null;
   try {
     // 点击前强制刷新，避免前端 stale 导致「明明有机会却抽了 0 次」的误解
-    let chance = null;
     try {
       const s = await (await fetch("/api/state")).json();
       if (s.ok && s.user) { chance = s.user.randchance || 0; lotSetChance(chance); }
@@ -5280,12 +5393,18 @@ async function lotDrawAll() {
       log("一键抽卡：当前没有随机抽卡机会（0 次），等待自动恢复后再抽", "err");
       return;
     }
-    const d = await (await fetch("/api/random/draw", { method: "POST" })).json();
-    const summary = d.ok
-      ? `一键抽卡：抽 ${d.draws} 次，得卡 ${d.cards} 张，自动卖出 10 面额 ${d.sold} 张（+${d.gold} 金），剩余 ${d.remain} 次`
-      : `一键抽卡失败：${d.message || d.code || "未知原因"}`;
-    log(summary, d.ok ? "ok" : "err");
-    if (d.ok) { lotSetChance(d.remain || 0); loadState(); }  // 卡进换卡箱/金币变了，重读一次
+    const final = await streamRun("/api/random/draw", {
+      onStep: (stp) => {
+        if (!stp || stp.act === "__done__" || stp.act === "__error__") return;
+        log(`[抽卡] ${stp.text || stp.act}`, stp.ok ? "ok" : "err");
+      },
+    });
+    if (final && final.act === "__error__") log("一键抽卡失败：" + (final.message || "未知原因"), "err");
+    else if (final) {
+      log(`一键抽卡：抽 ${final.draws} 次，得卡 ${final.cards} 张，自动卖出 10 面额 ${final.sold} 张（+${final.gold} 金），剩余 ${final.remain} 次`,
+          final.ok ? "ok" : "err");
+      if (final.ok) { lotSetChance(final.remain || 0); loadState(); }  // 卡进换卡箱/金币变了，重读一次
+    }
   } catch (e) {
     log("一键抽卡异常：" + e, "err");
   } finally {
@@ -5418,6 +5537,7 @@ const SP_MODE_LABELS = {
   map: ["大地图", "小关"],
   island: ["荒岛章节", "关卡"],
   across: ["穿越章节", "关卡"],
+  invite: ["邀请好友", "邀请"],
 };
 
 // 当前玩法下的章节列表 → [[value, name], ...]（value = 大地图 pass_id / 另两套 chapter_id）
@@ -5621,6 +5741,21 @@ function spSetMode(mode) {
   const lb = SP_MODE_LABELS[mode] || SP_MODE_LABELS.map;
   if ($("sp-lab1")) $("sp-lab1").textContent = lb[0];
   if ($("sp-lab2")) $("sp-lab2").textContent = lb[1];
+  // 邀请好友探险无「地图/关卡/灵宠」概念，隐藏对应的设置项（避免误选）
+  const hideMap = (mode === "invite");
+  const mapRow = $("sp-lab1") ? $("sp-lab1").closest("label") : null;
+  const passRow = $("sp-lab2") ? $("sp-lab2").closest("label") : null;
+  if (mapRow) mapRow.style.display = hideMap ? "none" : "";
+  if (passRow) passRow.style.display = hideMap ? "none" : "";
+  if ($("sp-stage-info")) $("sp-stage-info").style.display = hideMap ? "none" : "";
+  const spBox = $("sp-spirites");
+  if (spBox && spBox.parentElement) spBox.parentElement.style.display = hideMap ? "none" : "";
+  if (hideMap) {
+    if ($("sp-minwait")) $("sp-minwait").value = 60;  // 展示真实时长（后端强制，前端值仅作显示）
+  } else if ($("sp-minwait") && Number($("sp-minwait").value) === 60) {
+    // 从 invite 切回其它玩法：把被改成 60 的值还原成该玩法默认，避免时长串味
+    $("sp-minwait").value = (mode === "island") ? 180 : 300;
+  }
   spBuildMaps();
   spBuildStages($("sp-map").value);
   if (!spPicked[spMode]) spApplyDefault();   // 定位到「能去的最新关」
@@ -5719,11 +5854,13 @@ function spRenderAll(d) {
 
   const mts = ex.explore_ts || 0, mput = ex.put_spirites || [];
   const mStage = spPlaceText(d.pass_id, d.section_id);
-  // 大地图免费探索次数（灵宠）：free_explore_cnt = 剩余免费次数（每次出发 -1，归零改扣 permanent）；
-  // today_fri_explore_cnt = 今日已用（随 explore 变）。总数 = 剩余 + 已用。
+  // 大地图免费探索次数（灵宠）：free_explore_cnt = 剩余免费次数（每次出发 -1，归零改扣 permanent）。
+  // 每日上限固定 5 次（2026-10-04 用户实锤），act=1 无独立「大地图已用」字段 → 已用 = 上限 - 剩余。
+  // 注意：today_fri_explore_cnt 是「邀请好友」的已做次数，与大地图无关，绝不能借用它算大地图。
+  const MAP_DAILY_MAX = 5;
   const mFree = Number(d.free_explore_cnt ?? 0);
-  const mUsed = Number(d.today_fri_explore_cnt ?? 0);
-  const mTotal = mFree + mUsed;
+  const mUsed = Math.max(0, MAP_DAILY_MAX - mFree);
+  const mTotal = MAP_DAILY_MAX;
   const mCnt = `免费 ${mUsed}/${mTotal} 次 · 剩 ${mFree}`;
   const mapTxt = (mts && mput.length)
     ? "进行中 " + Math.floor((now - mts) / 60) + " 分 · " + names(mput) + " @ " + mStage + " ｜ " + mCnt
@@ -5741,11 +5878,20 @@ function spRenderAll(d) {
   const acLeft = Math.max(0, acMax - acUsed);
   const acTxt = "今日 " + acUsed + "/" + acMax + " 次 · 剩 " + acLeft + " 次 · 即时到账";
 
+  // 邀请好友探险（fri）：剩余次数从 act=1 真实回读（today_fri_explore_cnt = 今日已做次数）
+  const fri_ts = Number(d.fri_explore_ts || 0);
+  const friMax = 3, friUsed = Number(d.today_fri_explore_cnt || 0);
+  const friLeft = Math.max(0, friMax - friUsed);
+  const friTxt = (fri_ts)
+    ? "进行中 " + Math.floor((now - fri_ts) / 60) + " 分 · 剩 " + friLeft + " 次"
+    : "今日 " + friUsed + "/" + friMax + " 次 · 剩 " + friLeft + " 次";
+
   const pw = d.power ?? "-";
   const rows = [
     ["map", "大地图", mapTxt, ""],
     ["island", "荒岛", islTxt, spLatestTxt(r.island)],
     ["across", "穿越丛林", acTxt, spLatestTxt(r.across)],
+    ["invite", "邀请好友", friTxt, ""],
   ];
   box.innerHTML = rows.map(([mode, nm, txt, extra]) => {
     const au = (spAutoModes && spAutoModes[mode]) || {};
@@ -5976,12 +6122,15 @@ async function spStart(mode, el) {
     if (checked.length) body.spirite_num = checked.length;
     const name = $("sp-pass").selectedOptions[0] ? $("sp-pass").selectedOptions[0].textContent : body.island_seq;
     where = `荒岛「${name}」`;
-  } else {
+  } else if (spMode === "across") {
     const found = spAcrossBySeq(Number($("sp-pass").value || 0));
     if (!found) { spSay("请先选择穿越丛林的关卡", "warn"); return; }
     body.across_chapter = found.chapter;
     body.across_index = found.index;
     where = `穿越「${found.name}」`;
+  } else if (spMode === "invite") {
+    body.min_wait = Number($("sp-minwait").value || 65);
+    where = "邀请好友探险（每天3次，每次约1分钟）";
   }
   if (checked.length) where += ` 灵宠${checked.join(",")}`;
   else where += " 灵宠自动轮换";

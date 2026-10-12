@@ -575,8 +575,8 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                    harvest_only: bool = False, dry_run: bool = False,
                    do_clover: bool = True, do_water: bool = True,
                    do_tasks: bool = True, a_food_ids: list | None = None,
-                   water_uins: list | None = None) -> list[dict]:
-    """跑一轮自动旅行。
+                   water_uins: list | None = None):
+    """跑一轮自动旅行（SSE 流式：每步 yield 一个 dict，末尾 yield __done__）。
 
     顺序：收获已返回的猫 → 用今日剩余免费次数出发空闲猫(各喂一种 A 级食物,不够则购买)
           → 收三叶草 → 给「已种未成熟三叶草且今日未浇」的好友浇水 → 领取可领的每日任务。
@@ -586,9 +586,15 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
     dry_run 只算不发（仍读状态/食物配置）。
     """
     out: list[dict] = []
+
+    def emit(d):
+        out.append(d)
+        return d
+
     st = await get_state(session)
     if st is None:
-        return [{"ok": False, "act": "read", "text": "读取猫咪旅行状态失败"}]
+        yield {"ok": False, "act": "__error__", "text": "读取猫咪旅行状态失败"}
+        return
 
     now = int(time.time())
     elves = st.get("travel_elf_arr") or []
@@ -607,12 +613,12 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
         end = int(c.get("travel_end_ts") or 0)
         if end > 0 and now >= end:
             if dry_run:
-                out.append({"ok": True, "dry": True, "act": "harvest", "elf_id": eid,
+                yield emit({"ok": True, "dry": True, "act": "harvest", "elf_id": eid,
                             "text": f"猫{eid} 已返回，拟收获(act=23)"})
                 continue
             r = await harvest(session, eid)
             code = _resp_code(r)
-            out.append({"ok": code == 0, "act": "harvest", "elf_id": eid, "code": code,
+            yield emit({"ok": code == 0, "act": "harvest", "elf_id": eid, "code": code,
                         "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}"})
 
     # 2) 出发空闲猫（各喂一种不同的 A 级食物；道具不够先买；用尽今日免费次数为止）
@@ -628,13 +634,13 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
         used_foods = set()
         for c in idle:
             if free_left <= 0:
-                out.append({"ok": True, "act": "depart",
+                yield emit({"ok": True, "act": "depart",
                             "text": f"今日免费次数已用完（已用 {free_used}/{free_limit}，剩 0），停止出发"})
                 break
             eid = c.get("elf_id")
             # 每猫每日上限 3 次：这只猫自己到顶就跳过（服务端会返 system busy，不必硬撞）
             if int(per_cat.get(eid) or 0) >= per_cat_limit:
-                out.append({"ok": True, "act": "depart", "elf_id": eid,
+                yield emit({"ok": True, "act": "depart", "elf_id": eid,
                             "text": f"猫{eid} 今日已旅行 {per_cat.get(eid)}/{per_cat_limit} 次（该猫到顶），跳过"})
                 continue
             # 选一种尚未使用的 A 级食物（保证 4 猫各不同）
@@ -649,7 +655,7 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
             have = int(owned.get(food) or 0)
             need_buy = 0 if dry_run else max(0, food_num - have)
             if dry_run:
-                out.append({"ok": True, "dry": True, "act": "depart", "elf_id": eid,
+                yield emit({"ok": True, "dry": True, "act": "depart", "elf_id": eid,
                             "text": f"猫{eid} 拟出发：A级食物 food_id={food}（持有{have}，需{food_num}）"
                                     f"｜今日免费 {(free_used + 1)}/{free_limit}"})
                 free_used += 1
@@ -660,7 +666,7 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
             if need_buy > 0:
                 rb = await buy_food(session, food, need_buy)
                 cb = _resp_code(rb)
-                out.append({"ok": cb == 0, "act": "buy", "elf_id": eid, "food_id": food,
+                yield emit({"ok": cb == 0, "act": "buy", "elf_id": eid, "food_id": food,
                             "code": cb,
                             "text": f"猫{eid} 食物{food}不足，购买{need_buy}个：{rb.get('message') or cb}"})
                 if cb != 0:
@@ -675,22 +681,22 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                 free_used = int((r.get("data") or {}).get("free_cnt") or (free_used + 1))
                 free_left = max(0, free_limit - free_used)
                 per_cat[eid] = int(per_cat.get(eid) or 0) + 1
-                out.append({"ok": True, "act": "depart", "elf_id": eid, "code": code,
+                yield emit({"ok": True, "act": "depart", "elf_id": eid, "code": code,
                             "text": f"猫{eid} 出发(A级食物{food})：成功"
                                     f"（今日免费 {free_used}/{free_limit}，剩 {free_left}）"})
             else:
-                out.append({"ok": False, "act": "depart", "elf_id": eid, "code": code,
+                yield emit({"ok": False, "act": "depart", "elf_id": eid, "code": code,
                             "text": f"猫{eid} 出发失败：{r.get('message') or code}"})
 
     # 3) 收三叶草（act=4）；无可收时服务端返 system busy，按"暂无可收"软处理
     if do_clover:
         if dry_run:
-            out.append({"ok": True, "dry": True, "act": "clover", "text": "拟收取三叶草(act=4)"})
+            yield emit({"ok": True, "dry": True, "act": "clover", "text": "拟收取三叶草(act=4)"})
         else:
             rc = await harvest_clover(session)
             c0 = rc.get("code") == 0
             busy = "busy" in (rc.get("message") or "").lower()
-            out.append({"ok": c0, "act": "clover", "code": rc.get("code"),
+            yield emit({"ok": c0, "act": "clover", "code": rc.get("code"),
                         "text": (f"收三叶草：成功（现 {rc.get('clover_num')}）" if c0
                                  else ("收三叶草：暂无可收（无成熟三叶草）" if busy
                                        else f"收三叶草失败：{rc.get('message') or rc.get('code')}"))})
@@ -701,29 +707,29 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
         col = await collect_water_targets(session)
         targets = [str(u) for u in water_uins] if water_uins is not None else list(col.get("targets") or [])
         if dry_run:
-            out.append({"ok": True, "dry": True, "act": "water",
+            yield emit({"ok": True, "dry": True, "act": "water",
                         "text": f"拟给 {len(targets)} 个「已种三叶草且未成熟、今日未浇」的好友浇水"
                                 f"（已开通 {col.get('opened')} 个，今日已浇 {col.get('watered_today')} 个）"})
         elif not targets:
-            out.append({"ok": True, "act": "water",
+            yield emit({"ok": True, "act": "water",
                         "text": f"浇水：无可浇好友（已开通 {col.get('opened')} 个，"
                                 f"今日已浇 {col.get('watered_today')} 个，其余未种三叶草/已成熟）"})
         else:
             rw = await water_targets(session, targets)
             tail = "（连续被拒，提前收手）" if rw.get("stopped") else ""
             skiptail = f"，跳过 {rw.get('skipped')} 个（好友已被浇满）" if rw.get("skipped") else ""
-            out.append({"ok": (rw.get("ok_cnt") or 0) > 0, "act": "water",
+            yield emit({"ok": (rw.get("ok_cnt") or 0) > 0, "act": "water",
                         "code": 0 if rw.get("ok_cnt") else -1,
                         "text": f"浇水：目标 {len(targets)} 个 → 成功 {rw.get('ok_cnt')}、"
                                 f"失败 {rw.get('fail')}{skiptail}{tail}"})
             for x in rw.get("results") or []:
                 if x.get("skipped"):
-                    out.append({"ok": True, "act": "water", "uin": x["uin"],
+                    yield emit({"ok": True, "act": "water", "uin": x["uin"],
                                 "text": f"  · 好友{x['uin']}：跳过（{x.get('reason')}）"})
                     continue
                 cwt = x.get("can_water_times")
                 quota = f"（他可被浇余 {cwt} 次）" if cwt is not None else ""
-                out.append({"ok": x.get("code") == 0, "act": "water", "uin": x["uin"],
+                yield emit({"ok": x.get("code") == 0, "act": "water", "uin": x["uin"],
                             "code": x.get("code"),
                             "text": f"  · 好友{x['uin']}："
                                     f"{'浇水成功' if x.get('code') == 0 else '浇水失败'}{quota}"})
@@ -731,7 +737,7 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
     # 5) 领取可领的每日任务（cnt>=limit 且 task_bits 未置位=未领过；付费项达不到阈值自然不领）
     if do_tasks:
         if dry_run:
-            out.append({"ok": True, "dry": True, "act": "tasks", "text": "拟领取可领的每日任务(act=33)"})
+            yield emit({"ok": True, "dry": True, "act": "tasks", "text": "拟领取可领的每日任务(act=33)"})
         else:
             info = await get_daily_tasks(session)
             bits = int(info.get("bits") or 0)
@@ -744,15 +750,15 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                 if lim and cnt >= lim and not claimed:
                     pending.append(idx)
             if not pending:
-                out.append({"ok": True, "act": "task", "text": "每日任务：当前无新完成可领（已领/未达标）"})
+                yield emit({"ok": True, "act": "task", "text": "每日任务：当前无新完成可领（已领/未达标）"})
             for idx in pending:
                 rt = await claim_daily_task(session, idx)
-                out.append({"ok": rt.get("code") == 0, "act": "task", "task_id": idx,
+                yield emit({"ok": rt.get("code") == 0, "act": "task", "task_id": idx,
                             "code": rt.get("code"),
                             "text": f"领每日任务#{idx}：{'成功' if rt.get('code')==0 else (rt.get('message') or rt.get('code'))}"})
 
     if not out:
-        out.append({"ok": True, "act": "none",
+        yield emit({"ok": True, "act": "none",
                     "text": f"无需操作（今日免费 已用{free_used}/{free_limit} 剩{free_left}，"
                             f"{len(elves)} 只猫均旅行中/已处理）"})
-    return out
+    yield {"act": "__done__", "ok": True, "items": out}
