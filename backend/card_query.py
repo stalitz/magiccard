@@ -67,33 +67,41 @@ def buyable_themes() -> frozenset[int]:
 
 
 # ---------------------------------------------------------------------------
-# 特殊「出处」套卡（2026-10-13 用户要求标记）
+# 套卡「出处」标注（2026-10-13 用户要求）：普通卡箱显示为 绝版·不可变·免合成、
+# 实际来自特定商店渠道的套卡。
 #
-# 这些套卡在普通卡箱显示为「绝版·不可变·免合成」，但实际来自特定获得渠道，
-# 需在卡库里标注「出处」，避免与正常绝版套混淆：
+# 这些商店以「竞技币一次集齐整套」方式出售、整套价格统一 → 同一商店的套卡【总卡数 n 相同】
+# （用户 2026-10-13 实测规律：天下卡每套总卡数都一样，因为商店有整套管选项、价格相同）。
+# 据此用 n 分档（非游戏直接字段，是「统一价格」的推论，故对未点名套卡需用户复核）：
 #
-#   - 灵宠探险·大地图：源自 spirite_maps.MAP_THEMES（11 套：文明古国 … 悬崖之巅）。
-#        大地图 / 荒岛 / 穿越丛林 三个子玩法掉的都是这 11 套的碎片，故统一归到此处。
-#   - 竞技比赛商店：每日比赛·竞技场荣誉商店轮换出售。当前赛季 = 幽冥玄境(1802)，
-#        上一赛季 = 西汉十五帝(1761)；后续赛季套卡续加 JINGJI_SHOP_THEMES 即可。
-#   - 商店·天下系列：名字含「天下」且为绝版·不可变·免合成的套卡（神驹天下 1803 等，
-#        源自另一个商店；在售的「天下」套如 儒学天下/雄霸天下 等不在此列）。
+#   - 灵宠探险·大地图：灵宠探险大地图/荒岛/穿越丛林三子玩法碎片 → spirite_maps.MAP_THEMES
+#        的 11 套（文明古国 … 悬崖之巅），与下方竞技币商店无关。
+#   - 竞技比赛商店（亦称公会商店）：n == 15 且 绝版·不可变·免合成·主卡箱 的套卡。
+#        幽冥玄境(1802)/西汉十五帝(1761) 为用户点名当前/上赛季；同档还有 全能猫咪/
+#        新时代猫咪/猫咪圈子/健身猫咪（用户确认与幽冥玄境同店）。历史约 10+ 套。
+#   - 天下商店（竞技币整套管店）：n == 20 且 绝版·不可变·免合成·主卡箱 的套卡。
+#        含 14 个「天下」系（神驹天下 1803 等）+ 百态猫咪/摩登猫咪/世界杯冠军
+#        （用户确认与天下同店）。在售「天下」套（儒学/雄霸/凤临/山水甲/落笔妙）n 各异，
+#        不在此列；大明天下(n=8)/天下九州(n=9) 因 n 不符自然排除。
+#
+# ⚠️ n 分档是「整套管统一价格」的推论，非游戏字段。未点名的 n=15/n=20 套（城堡/神话/
+#    凤鸣九天/元朝十五帝/中华美·悬鱼/协和万邦/仙山瑶界/拒绝内耗/权倾天下(下)/世界杯冠军）
+#    若实际出自其他渠道，需用户确认后剔除。
 # ---------------------------------------------------------------------------
-JINGJI_SHOP_THEMES = frozenset({1761, 1802})
-
 # 灵宠探险·大地图的 11 套 theme_id（源自 spirite_maps.MAP_THEMES 的值，不是 pass_id）
 MAP_THEME_IDS = frozenset(MAP_THEMES.values())
 
+# 竞技币整套商店的两条产品线：同店套卡总卡数 n 相同（用户 2026-10-13 实测）。
+SHOP_N_LINES = {15: "竞技比赛商店", 20: "天下商店"}
 
-def _theme_source(tid, name, offline, transferable, composable, module):
+
+def _theme_source(tid, name, offline, transferable, composable, module, n):
     """返回套卡「出处」标签；普通套返回空串。"""
     if tid in MAP_THEME_IDS:
         return "灵宠探险·大地图"
-    if tid in JINGJI_SHOP_THEMES:
-        return "竞技比赛商店"
-    if ("天下" in name and offline and not transferable and not composable
-            and not module):
-        return "天下商店"
+    if (offline and not transferable and not composable and not module
+            and n in SHOP_N_LINES):
+        return SHOP_N_LINES[n]
     return ""
 
 
@@ -204,7 +212,7 @@ def indexes():
         # 特殊「出处」：这些套卡在普通卡箱显示为绝版·不可变·免合成，实际来自特定渠道
         th["source"] = _theme_source(th["tid"], th["name"], th["offline"],
                                      th["transferable"], th["composable"],
-                                     th["module"])
+                                     th["module"], th["n"])
     themes.sort(key=lambda x: (-x["publish"], x["tid"]))
     return {
         "themes": themes,
