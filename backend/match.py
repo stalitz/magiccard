@@ -1608,11 +1608,14 @@ async def sanguo_claim(session, levelid: int = 0) -> dict:
     if levelid:
         return await _act(session, EP_WORLD_SANGUO, 2, levelid=int(levelid))
     # 领掉全部「已通关但奖励未领」的关；每领一张回读一次，避免重复/越界。
+    # ⚠ 只认「通关进度 100% 且未领(isget=0)」的关：关卡奖励(act=2)是独立接口，
+    #    只有真正通关的关才发奖；进度不满 100% 的关调 act=2 会失败，别去碰。
     claimed, failed = [], []
     for _ in range(20):
         st = await sanguo_state(session)
         levels = [lv for lv in (st.get("levelData") or [])
-                  if (lv.get("passData") or {}).get("isget") == 0]
+                  if (lv.get("passData") or {}).get("isget") == 0
+                  and int(lv.get("percent_hp") or 0) >= 100]
         if not levels:
             break
         did = False
@@ -2265,7 +2268,7 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
     pre_claim = await sanguo_claim(session, 0)
     pre_claimed = (pre_claim.get("claimed") or []) if isinstance(pre_claim, dict) else []
     if pre_claimed:
-        txt = f"预领已通关奖励 {len(pre_claimed)} 关"
+        txt = f"【关卡奖励】预领已通关未领奖励 {len(pre_claimed)} 关"
         if pre_claim.get("summary"):
             txt += f"：{pre_claim['summary']}"
         yield {"act": "pre_claim", "ok": True, "claimed": pre_claimed,
@@ -2336,22 +2339,22 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
                        (rd.get("desc") or r.get("message") or f"code={rd.get('code')}"),
                "code": rd.get("code") if "code" in rd else r.get("code")}
         rounds.append(row)
-        if ok:
-            # 打完立刻领奖（act=2），避免奖励卡在 levelData、后续关出不来。
-            cr = await sanguo_claim(session, int(levelid))
-            crd = cr.get("data") if isinstance(cr.get("data"), dict) else {}
-            if cr.get("ok") and crd.get("code") in (0, None):
-                c = crd.get("content")
-                row["claim"] = _sg_reward_text(c) or c or "已领"
-                # 把领到的卡名附到本场文案，日志里一眼可见（用户 2026-10-13 反馈：
-                # 领了卡但日志只显示「成功」、卡名被吞掉）
-                if row["claim"] and row["claim"] != "已领":
-                    row["text"] = (row["text"] or "") + f"；领奖：{row['claim']}"
-            else:
-                row["claim"] = crd.get("desc") or cr.get("message") or f"code={crd.get('code')}"
         yield {"act": "round", **row}
         if not ok:
             break
+    # 关卡奖励是「单独的接口」(act=2)，必须显式领取，不是战斗即时掉落
+    # （每场战斗掉的 92_... 才是即时奖励）。本次闯关把 L{levelid} 打到 100% 通关后，
+    # 这里单独走一遍 act=2，把所有「已通关未领」的关领掉，作为**独立日志步**，
+    # 与战斗奖励明显区分（用户 2026-10-13 反馈：关卡奖励没在日志体现）。
+    post_claim = await sanguo_claim(session, 0)
+    post_claimed = (post_claim.get("claimed") or []) if isinstance(post_claim, dict) else []
+    if post_claimed:
+        txt = f"【关卡奖励】本次闯关达成，领取通关关卡 {len(post_claimed)} 关"
+        if post_claim.get("summary"):
+            txt += f"：{post_claim['summary']}"
+        yield {"act": "level_reward", "ok": True, "claimed": post_claimed,
+               "summary": post_claim.get("summary", ""),
+               "text": txt}
     # 战后补领每日任务奖励（act=7 查 + act=8 领）：打满 3 次的任务(id=1)此刻才达标。
     post_tasks = await sanguo_claim_tasks(session)
     post_task_claimed = (post_tasks.get("claimed") or []) if isinstance(post_tasks, dict) else []
@@ -2367,6 +2370,7 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
            "used_after": (await sanguo_state(session)).get("freenum"),
            "daily_max": SGUO_DAILY_MAX, "rounds": rounds,
            "pre_claimed": pre_claimed,
+           "post_claimed": post_claimed,
            "pre_task_claimed": pre_task_claimed,
            "post_task_claimed": post_task_claimed,
            "played": sum(1 for x in rounds if x.get("ok")),
