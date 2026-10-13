@@ -789,15 +789,18 @@ async def cards_q(price: int = 0, kw: str = "", star: int = 0,
 async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
                        offline: int = -1, module: str = "", transferable: int = -1,
                        composable: int = -1, theme_show: int = -1,
+                       source: str = "",
                        limit: int = 500):
-    """套卡目录（卡册 module / 星级 / 闪卡 / 关键词过滤），按上架时间倒序。只读。
+    """套卡目录（卡册 module / 星级 / 闪卡 / 关键词 / 出处 过滤），按上架时间倒序。只读。
 
     transferable=1 → 只返回「能变卡得到」的套卡；composable=1 → 只返回「有合成配方」的套卡。
     theme_show=1 → 只返回「主题秀没集满」的套卡（cnt < 立绘总数；含一套都未集、从未收集过
           主题秀的套，其 cnt 视为 0，2026-10-13 修正旧逻辑漏算这类套）。
+    source=「灵宠探险·大地图」/「竞技比赛商店」/「天下商店」→ 只返回对应出处的套卡
+          （这些套卡在普通卡箱显示为绝版·不可变·免合成，实际来自特定渠道，2026-10-13 加）。
     每套附 have（已持有卡种数）/ sets（已炼 N 套 = 集卡册进度 num，官方口径）/ n（总卡数）/
           show / show_total（主题秀已集/总数，真源）/ publish（上架时间）/ last_ts /
-          early_ts（最后/最早收集主题秀时间戳）。
+          early_ts（最后/最早收集主题秀时间戳）/ source（出处标签，普通套为空）。
     """
     if err := _require_login():
         return err
@@ -806,7 +809,7 @@ async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
     coll = await _collection_map()
     return cq.list_themes(q=q, star=star, flash=flash, offline=offline, module=module,
                           transferable=transferable, composable=composable,
-                          theme_show=theme_show,
+                          theme_show=theme_show, source=source,
                           owned=inv["avail"], mini=mini, collection=coll,
                           limit=min(limit, 2000))
 

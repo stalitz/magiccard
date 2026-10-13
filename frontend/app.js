@@ -22,6 +22,7 @@ const libState = {
   trans: 0,               // 可变筛选：0=全部 | 1=可变 | 2=不可变
   comp: 0,                // 可合成筛选：0=全部 | 1=可合成 | 2=免合成
   show: 0,                // 主题秀筛选：0=全部 | 1=未集满(按该套立绘总数, 含1星; 仅道具卡等无数据套除外)
+  source: "",             // 出处筛选：""=全部 | 灵宠探险·大地图 | 竞技比赛商店 | 天下商店
   curThemeTid: null,
 };
 
@@ -61,6 +62,18 @@ function kindTag(kind) {
   };
   const m = map[kind] || ["off", kind || "未知"];
   return `<span class="tag ${m[0]}">${m[1]}</span>`;
+}
+// 套卡「出处」标签：这些套卡在普通卡箱显示为绝版·不可变·免合成，实际来自特定渠道
+// （灵宠探险·大地图 / 竞技比赛商店 / 天下商店）。普通套不出标签。
+function sourceTag(src) {
+  if (!src) return "";
+  const map = {
+    "灵宠探险·大地图": ["src-map", "🗺 灵宠探险·大地图"],
+    "竞技比赛商店": ["src-jingji", "🏆 竞技比赛商店"],
+    "天下商店": ["src-tianxia", "🏪 天下商店"],
+  };
+  const m = map[src] || ["src-other", src];
+  return `<span class="tag src ${m[0]}" title="该套卡的实际获得出处">${m[1]}</span>`;
 }
 // 套卡属性标签：可合成/免合成（有无配方）+ 可变/不可变（能否变卡得到）
 function attrTags(o) {
@@ -2379,6 +2392,7 @@ function setLibMode(mode) {
   $("lib-transfilter").classList.toggle("hidden", isPrice);
   $("lib-compfilter").classList.toggle("hidden", isPrice);
   $("lib-showfilter").classList.toggle("hidden", isPrice);
+  $("lib-sourcefilter").classList.toggle("hidden", isPrice);
   $("lst-title").textContent = isPrice ? "面值查卡" : "浏览套卡";
   $("lib-detail").innerHTML = '<div class="empty-tip">在左侧点一套卡，这里显示每张卡的面值与合成路径。</div>';
   $("dt-title").textContent = "套卡明细";
@@ -2440,6 +2454,14 @@ document.querySelectorAll("#lib-showfilter .chip").forEach((c) => {
     document.querySelectorAll("#lib-showfilter .chip").forEach((x) => x.classList.remove("active"));
     c.classList.add("active");
     libState.show = Number(c.dataset.sh);
+    runThemeQuery();
+  };
+});
+document.querySelectorAll("#lib-sourcefilter .chip").forEach((c) => {
+  c.onclick = () => {
+    document.querySelectorAll("#lib-sourcefilter .chip").forEach((x) => x.classList.remove("active"));
+    c.classList.add("active");
+    libState.source = c.dataset.src || "";
     runThemeQuery();
   };
 });
@@ -2517,6 +2539,7 @@ async function runThemeQuery() {
     if (libState.trans) params.set("transferable", libState.trans === 1 ? 1 : 0);
     if (libState.comp) params.set("composable", libState.comp === 1 ? 1 : 0);
     if (libState.show) params.set("theme_show", libState.show);
+    if (libState.source) params.set("source", libState.source);
     params.set("limit", 2000);
     const d = await (await fetch(`/api/cards/themes?${params}`)).json();
     const isMain = libState.module === "main";
@@ -2547,7 +2570,7 @@ async function runThemeQuery() {
       html += items.map((t) => {
         return `<div class="it" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
-          ${kindTag(t.kind)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
         <div class="sub">主题 #${t.tid}　·　发行 ${fmtDate(t.publish)}　·　${t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集"}</div></div>`;
       }).join("");
       html += `</div>`;
@@ -2581,10 +2604,10 @@ async function openTheme(tid, focusCid = null) {
     if (!syn.ok) throw new Error(syn.message || "合成信息加载失败");
     detail.innerHTML =
       `<div class="card-row"><div class="head">${esc(t.name)}　${stars(t.star)}
-         ${kindTag(t.kind)}${attrTags(t)}
+         ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}
          ${setsBadge(d)}${showBadge(d)}
          <span class="meta" style="margin-left:auto;color:var(--muted);font-size:12px">共 ${t.n} 张卡 · 面值区间以卡为准</span></div>
-       <div class="sub" style="padding:4px 0 0 2px;color:var(--muted);font-size:12px">发行 ${fmtDate(t.publish)}　·　${d.last_ts ? "最后收集 " + fmtDate(d.last_ts) : "主题秀未收集"}</div>
+       <div class="sub" style="padding:4px 0 0 2px;color:var(--muted);font-size:12px">发行 ${fmtDate(t.publish)}　·　${d.last_ts ? "最后收集 " + fmtDate(d.last_ts) : "主题秀未收集"}${t.source ? "　·　出处 " + esc(t.source) : ""}</div>
        </div>` + renderSynTiers(syn);
     mountSynView(detail, syn, () => {
       const sel = detail.querySelector(".tchip.sel");

@@ -28,6 +28,8 @@ import json
 from pathlib import Path
 from functools import lru_cache
 
+from .spirite_maps import MAP_THEMES
+
 DATA = Path(__file__).resolve().parent.parent / "data"
 
 _loaded: dict | None = None
@@ -62,6 +64,37 @@ def buyable_themes() -> frozenset[int]:
                 s.add(t["tid"])
                 break
     return frozenset(s)
+
+
+# ---------------------------------------------------------------------------
+# 特殊「出处」套卡（2026-10-13 用户要求标记）
+#
+# 这些套卡在普通卡箱显示为「绝版·不可变·免合成」，但实际来自特定获得渠道，
+# 需在卡库里标注「出处」，避免与正常绝版套混淆：
+#
+#   - 灵宠探险·大地图：源自 spirite_maps.MAP_THEMES（11 套：文明古国 … 悬崖之巅）。
+#        大地图 / 荒岛 / 穿越丛林 三个子玩法掉的都是这 11 套的碎片，故统一归到此处。
+#   - 竞技比赛商店：每日比赛·竞技场荣誉商店轮换出售。当前赛季 = 幽冥玄境(1802)，
+#        上一赛季 = 西汉十五帝(1761)；后续赛季套卡续加 JINGJI_SHOP_THEMES 即可。
+#   - 商店·天下系列：名字含「天下」且为绝版·不可变·免合成的套卡（神驹天下 1803 等，
+#        源自另一个商店；在售的「天下」套如 儒学天下/雄霸天下 等不在此列）。
+# ---------------------------------------------------------------------------
+JINGJI_SHOP_THEMES = frozenset({1761, 1802})
+
+# 灵宠探险·大地图的 11 套 theme_id（源自 spirite_maps.MAP_THEMES 的值，不是 pass_id）
+MAP_THEME_IDS = frozenset(MAP_THEMES.values())
+
+
+def _theme_source(tid, name, offline, transferable, composable, module):
+    """返回套卡「出处」标签；普通套返回空串。"""
+    if tid in MAP_THEME_IDS:
+        return "灵宠探险·大地图"
+    if tid in JINGJI_SHOP_THEMES:
+        return "竞技比赛商店"
+    if ("天下" in name and offline and not transferable and not composable
+            and not module):
+        return "天下商店"
+    return ""
 
 
 @lru_cache(maxsize=1)
@@ -168,6 +201,10 @@ def indexes():
         th["composable"] = len(comp_by_theme.get(th["tid"], {})) > 0
         # 可变 = 可以通过变卡得到（游戏源码 mfkp base.js: checkCanTransfer = !(theme[12]&0x04)）
         th["transferable"] = not (th["type"] & 4)
+        # 特殊「出处」：这些套卡在普通卡箱显示为绝版·不可变·免合成，实际来自特定渠道
+        th["source"] = _theme_source(th["tid"], th["name"], th["offline"],
+                                     th["transferable"], th["composable"],
+                                     th["module"])
     themes.sort(key=lambda x: (-x["publish"], x["tid"]))
     return {
         "themes": themes,
@@ -192,6 +229,7 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
                 composable: int = -1, theme_show: int = -1,
                 owned: dict | None = None, mini: dict | None = None,
                 collection: dict | None = None,
+                source: str = "",
                 limit: int = 400):
     """套卡目录。
 
@@ -238,6 +276,8 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
             continue
         if composable in (0, 1) and th["composable"] != bool(composable):
             continue
+        if source and th["source"] != source:
+            continue
         # 主题秀未集满筛选：cnt(已收集立绘) < 该套立绘总数 show_total（来自 t[9] 项数）。
         # 立绘总数按套不同：非 1 星全 4，1 星多数为 4、仅时尚男/女·经典男/女 4 套为 1，
         # 道具卡=0。故不再以星级一刀切排除 1 星套。
@@ -265,7 +305,8 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
         "shown": len(out),
         "themes": [{**{k: th[k] for k in
                     ("tid", "name", "star", "flash", "offline", "kind", "module",
-                     "composable", "transferable", "n", "pmin", "pmax", "publish")},
+                     "source", "composable", "transferable", "n", "pmin", "pmax",
+                     "publish")},
                     "have": have_of(th),
                     "sets": (mini or {}).get(th["tid"], (0, 0))[0],
                     # show = 已收集立绘数（cnt）；不在 collection 里 = 一套都未集 → 0（不再是
@@ -320,7 +361,7 @@ def theme_detail(tid: int, owned: dict | None = None, mini: dict | None = None,
     return {
         "theme": {k: th[k] for k in
                   ("tid", "name", "star", "flash", "offline", "kind", "module",
-                   "composable", "transferable", "publish", "n")},
+                   "source", "composable", "transferable", "publish", "n")},
         # 套卡级「商店可买」标记：套内存在 10 面额基础卡 = 未下架在售套（buyable_themes 口径）
         "theme_buyable": tid in buyable_themes(),
         "sets": (mini or {}).get(tid, (0, 0))[0],

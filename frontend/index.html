@@ -303,6 +303,14 @@
   .tag.nocomp{background:#f5f5f5;color:#9e9e9e}
   .tag.trans{background:#fff2df;color:#a1580a;border:1px solid #f0c987}
   .tag.notrans{background:#f6f7f9;color:#8a939e;border:1px dashed #d3d9df}
+  /* 套卡「出处」标签（2026-10-13 加）：独立于发售/炼制/变卡维度，用统一深青底 +
+     各出处点缀色，便于与上面那排区分。灵宠探险·大地图=青绿(🗺)、竞技比赛商店=金(🏆)、
+     天下商店=玫红(🏪)。*/
+  .tag.src{background:#e6ecf2;color:#2b3a4a;border:1px solid #c3d0db;font-weight:600}
+  .tag.src-map{background:#e3f7f1;color:#0d7a63;border-color:#a9e3d4}
+  .tag.src-jingji{background:#fff5db;color:#9a6a00;border-color:#f0d98a}
+  .tag.src-tianxia{background:#fde7ef;color:#b3235e;border-color:#f3bcd2}
+  .tag.src-other{background:#e6ecf2;color:#2b3a4a;border-color:#c3d0db}
   .lib-group{margin:6px 0 14px}
   .lib-group-title{display:flex;align-items:center;gap:8px;margin:10px 2px 6px;padding-bottom:5px;border-bottom:2px solid var(--line)}
   .lib-group-title .meta{font-size:12px;color:var(--muted)}
@@ -891,6 +899,12 @@
             <div class="chiprow hidden" id="lib-showfilter">
               <span class="chip active" data-sh="0">全部主题秀</span>
               <span class="chip" data-sh="1">主题秀未集满</span>
+            </div>
+            <div class="chiprow hidden" id="lib-sourcefilter">
+              <span class="chip active" data-src="">全部出处</span>
+              <span class="chip" data-src="灵宠探险·大地图">🗺 灵宠探险·大地图</span>
+              <span class="chip" data-src="竞技比赛商店">🏆 竞技比赛商店</span>
+              <span class="chip" data-src="天下商店">🏪 天下商店</span>
             </div>
           </div>
 
@@ -1655,7 +1669,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261013c"></script>
+<script src="/app.js?v=20261013d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
