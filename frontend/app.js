@@ -39,6 +39,14 @@ function stars(n) {
   if (v <= 0) return '<span class="stars">☆</span>';
   return `<span class="stars">${"★".repeat(v)}</span>`;
 }
+// Unix 秒时间戳 → 本地日期 YYYY-MM-DD；0/空 → "—"
+function fmtDate(ts) {
+  ts = Number(ts) || 0;
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 // 套卡分类标签：主卡箱(发行/下架/闪卡) + 独立模块(挖地/猫咪旅行/猫咪探险·西游记/三国战役)
 function kindTag(kind) {
   const map = {
@@ -2540,7 +2548,7 @@ async function runThemeQuery() {
         return `<div class="it" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
           ${kindTag(t.kind)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
-        <div class="sub">主题 #${t.tid}</div></div>`;
+        <div class="sub">主题 #${t.tid}　·　发行 ${fmtDate(t.publish)}　·　${t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集"}</div></div>`;
       }).join("");
       html += `</div>`;
     }
@@ -2576,6 +2584,7 @@ async function openTheme(tid, focusCid = null) {
          ${kindTag(t.kind)}${attrTags(t)}
          ${setsBadge(d)}${showBadge(d)}
          <span class="meta" style="margin-left:auto;color:var(--muted);font-size:12px">共 ${t.n} 张卡 · 面值区间以卡为准</span></div>
+       <div class="sub" style="padding:4px 0 0 2px;color:var(--muted);font-size:12px">发行 ${fmtDate(t.publish)}　·　${d.last_ts ? "最后收集 " + fmtDate(d.last_ts) : "主题秀未收集"}</div>
        </div>` + renderSynTiers(syn);
     mountSynView(detail, syn, () => {
       const sel = detail.querySelector(".tchip.sel");

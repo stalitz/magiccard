@@ -721,19 +721,24 @@ _collection_cache: dict = {"ts": 0.0, "data": None}
 COLL_TTL = 120.0
 
 
-async def _collection_map() -> dict[int, tuple[int, int]]:
-    """{theme_id: (cnt, total_cnt)}，来自 card_collection_get 的 <Node ...>。
+async def _collection_map() -> dict[int, tuple[int, int, int, int]]:
+    """{theme_id: (cnt, total_cnt, latest_ts, early_ts)}，来自 card_collection_get 的 <Node ...>。
 
-    实测语义（2026-10-08 jikace.har + 真机对照；2026-10-09 修正 show_total 来源）：
+    实测语义（2026-10-08 jikace.har + 真机对照；2026-10-09 修正 show_total 来源；
+    2026-10-13 增补 latest_ts/early_ts）：
     - cnt = 已收集（已获得）的主题秀立绘数——游戏集卡册 UI 的「已获得」章数量，
       是「主题秀是否集满」的判定依据（与 num 无关）；cnt 可因重复选同立绘而 > 立绘总数。
     - total_cnt ≡ 集齐次数（与 card_mini_get 的 num 全量相等，会随收集增长），
       不是立绘总数，本服务不再用它作 show_total。
+    - latest_ts / early_ts = 该套最后/最早收集主题秀的时间戳（Unix 秒），用于「最后收集时间」展示；
+      一套都未集（不在响应里）的套这两个值记 0。
     - 该套【立绘总数】取自套卡静态数据 theme_card_list 的 t[9] 项数（card_query.indexes
       的 show_total 字段）：非 1 星全 4；1 星多数 4、仅时尚男/女·经典男/女 4 套为 1；
       道具卡=0。list_themes / theme_detail 的 show_total 即此值。
     - 早期 QQ 秀时代重复选同一立绘只延长有效期不计数 → 老套 cnt<num（真实口径）。
-    - 不在响应里的套（旅行/挖地/三国/西游等模块套）无主题秀数据。
+    - 不在响应里的套（旅行/挖地/三国/西游等模块套，以及**一套都没收集过**的套）无主题秀数据；
+      后者 cnt=0 也算「未集齐」，theme_show=1 筛选时一并纳入（2026-10-13 修正：旧逻辑因
+      `tid not in collection` 把一套都未集的套漏掉）。
     """
     now = _tmod.time()
     if _collection_cache["data"] is not None and now - _collection_cache["ts"] < COLL_TTL:
@@ -741,8 +746,18 @@ async def _collection_map() -> dict[int, tuple[int, int]]:
     try:
         r = await _session.post(EP_COLLECTION_GET)
         raw = r.get("raw", "") or ""
-        mp = {int(a): (int(b), int(c)) for a, b, c in
-              re.findall(r'theme_id="(\d+)"[^>]*cnt="(\d+)"[^>]*total_cnt="(\d+)"', raw)}
+        mp: dict[int, tuple[int, int, int, int]] = {}
+        for spec in re.findall(r"<Node\s+([^>]*?)/?>", raw):
+            th = re.search(r'theme_id="(\d+)"', spec)
+            cnt = re.search(r'\bcnt="(\d+)"', spec)
+            tc = re.search(r'\btotal_cnt="(\d+)"', spec)
+            if not (th and cnt and tc):
+                continue
+            lt = re.search(r'\blatest_ts="(\d+)"', spec)
+            et = re.search(r'\bearly_ts="(\d+)"', spec)
+            mp[int(th.group(1))] = (int(cnt.group(1)), int(tc.group(1)),
+                                    int(lt.group(1)) if lt else 0,
+                                    int(et.group(1)) if et else 0)
         _collection_cache["data"] = mp
         _collection_cache["ts"] = now
         return mp
@@ -778,9 +793,11 @@ async def cards_themes(q: str = "", star: int = 0, flash: int = -1,
     """套卡目录（卡册 module / 星级 / 闪卡 / 关键词过滤），按上架时间倒序。只读。
 
     transferable=1 → 只返回「能变卡得到」的套卡；composable=1 → 只返回「有合成配方」的套卡。
-    theme_show=1 → 只返回「主题秀没集满」的套卡（card_collection_get 中 cnt<total_cnt）。
-    每套附 have（已持有卡种数）/ sets（已炼 N 套 = 集卡册进度 num，官方口径）/
-          show / show_total（主题秀已集/总数，真源）/ n（总卡数）。
+    theme_show=1 → 只返回「主题秀没集满」的套卡（cnt < 立绘总数；含一套都未集、从未收集过
+          主题秀的套，其 cnt 视为 0，2026-10-13 修正旧逻辑漏算这类套）。
+    每套附 have（已持有卡种数）/ sets（已炼 N 套 = 集卡册进度 num，官方口径）/ n（总卡数）/
+          show / show_total（主题秀已集/总数，真源）/ publish（上架时间）/ last_ts /
+          early_ts（最后/最早收集主题秀时间戳）。
     """
     if err := _require_login():
         return err

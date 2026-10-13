@@ -201,18 +201,21 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
     theme_show=1 → 只返回「主题秀没集满」的套卡：card_collection_get 里
           cnt(已收集立绘数) < 该套立绘总数 show_total（来自套卡静态数据 t[9] 的项数）。
           立绘总数按套不同——非 1 星全 4；1 星多数为 4、仅时尚男/女·经典男/女 4 套为 1；
-          道具卡=0。故 1 星套不再一刀切排除，只有 show_total=0（道具卡等）或无
-          收藏数据的模块套不参与。注意早期卡 QQ 秀分男女、用户常只选男立绘，重复选
-          同一立绘只延长有效期不计数 → 老套 cnt 可能远小于 num，这是真实口径；
-          但 cnt 是「已获得立绘数」（官方 UI「已获得」章），仍按 cnt < show_total 判定。
-          不在 card_collection_get 里的套（旅行/挖地/三国/西游等模块套）无主题秀
-          数据，show=None、不参与筛选。
+          道具卡=0。故 1 星套不再一刀切排除，只有 show_total=0（道具卡等）无主题秀数据
+          的套不参与。**一套都未集（从未收集过主题秀、不在 card_collection_get 响应里）的套
+          也纳入**——不在 collection 里视为 cnt=0，仍算「未集齐」（2026-10-13 修正：旧逻辑
+          因 `tid not in collection` 把一套都未集的套漏掉，如黄巾之乱 1745、虎牢关、西游套、
+          猫咪旅行套等）。注意早期卡 QQ 秀分男女、用户常只选男立绘，重复选同一立绘只延长
+          有效期不计数 → 老套 cnt 可能远小于 num，这是真实口径；但 cnt 是「已获得立绘数」
+          （官方 UI「已获得」章），仍按 cnt < show_total 判定。
     owned: 持有快照 {card_id: 数量} → 每套附 have（已持有的卡种数，用于标记「已有套卡」）。
     mini: 集卡册进度 {theme_id: (num, lv)}（来自 card_mini_get）→ 每套附
           sets（已炼 N 套；不在集卡册里的模块/特殊套 = 0 = 未炼，官方口径）。
-    collection: 主题秀收集 {theme_id: (cnt, total_cnt)}（来自 card_collection_get）→
-          每套附 show(已收集立绘数 cnt)。show_total(该套立绘总数) 取自套卡静态
-          数据 t[9] 项数，仅在 tid 命中 collection 时为有效值。
+    collection: 主题秀收集 {theme_id: (cnt, total_cnt, latest_ts, early_ts)}（来自
+          card_collection_get）→ 每套附 show(已收集立绘数 cnt)、show_total(该套立绘总数，
+          取自套卡静态数据 t[9] 项数，始终有效，不依赖 collection 命中)、
+          last_ts/early_ts(最后/最早收集时间戳)。不在 collection 里的套（一套都未集）
+          show 取 0、时间戳取 0。
     """
     idx = indexes()
     bt = buyable_themes()
@@ -235,14 +238,17 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
             continue
         if composable in (0, 1) and th["composable"] != bool(composable):
             continue
-        # 主题秀未集满筛选：在 card_collection_get 里有数据、且 cnt(已收集立绘) < 该套立绘总数
-        # (show_total，来自 t[9] 项数)。立绘总数按套不同：非 1 星全 4，1 星多数为 4、仅时尚
-        # 男/女·经典男/女 4 套为 1，道具卡=0。故不再以星级一刀切排除 1 星套。
-        # 不在 card_collection_get 里的（模块套/无主题秀数据 show_total=0）不参与。
+        # 主题秀未集满筛选：cnt(已收集立绘) < 该套立绘总数 show_total（来自 t[9] 项数）。
+        # 立绘总数按套不同：非 1 星全 4，1 星多数为 4、仅时尚男/女·经典男/女 4 套为 1，
+        # 道具卡=0。故不再以星级一刀切排除 1 星套。
+        # ★ 一套都未集（从未收集过主题秀、不在 card_collection_get 响应里）也纳入：
+        #   不在 collection 里视为 cnt=0，仍算「未集齐」；只有 show_total==0（道具卡等
+        #   无主题秀数据）才不参与。2026-10-13 修正旧逻辑 `tid not in collection` 漏掉这类套。
         if theme_show == 1:
-            if th["tid"] not in (collection or {}) or th["show_total"] == 0:
+            if th["show_total"] == 0:
                 continue
-            if (collection or {})[th["tid"]][0] >= th["show_total"]:
+            cnt = (collection or {}).get(th["tid"], (0, 0, 0, 0))[0]
+            if cnt >= th["show_total"]:
                 continue
         matches.append(th)
     out = matches[:limit]
@@ -262,12 +268,15 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
                      "composable", "transferable", "n", "pmin", "pmax", "publish")},
                     "have": have_of(th),
                     "sets": (mini or {}).get(th["tid"], (0, 0))[0],
-                    # show=None = 无主题秀数据（不在 card_collection_get，如模块套）
-                    "show": ((collection or {}).get(th["tid"], (None,))[0]),
-                    # show_total = 该套主题秀总数（t[9] 项数）；仅在 collection 里有数据时为
-                    # 有效值，否则置 0（前端据此显示「主题秀 —」）
-                    "show_total": (th["show_total"] if th["tid"] in (collection or {})
-                                   else 0),
+                    # show = 已收集立绘数（cnt）；不在 collection 里 = 一套都未集 → 0（不再是
+                    # None，前端据以显示「主题秀 0/总数」而非「主题秀 —」）。
+                    "show": ((collection or {}).get(th["tid"], (0, 0, 0, 0))[0]),
+                    # show_total = 该套主题秀总数（t[9] 项数），始终取静态值，不再因
+                    # collection 命中与否置 0。
+                    "show_total": th["show_total"],
+                    # 最后/最早收集主题秀的时间戳（latest_ts/early_ts）；一套都未集 → 0。
+                    "last_ts": ((collection or {}).get(th["tid"], (0, 0, 0, 0))[2]),
+                    "early_ts": ((collection or {}).get(th["tid"], (0, 0, 0, 0))[3]),
                     "theme_buyable": th["tid"] in bt} for th in out],
     }
 
@@ -277,7 +286,8 @@ def theme_detail(tid: int, owned: dict | None = None, mini: dict | None = None,
     """整套卡：每张的名称/面值/持有数/是否有配方(可炼)/被哪些卡用作素材。
 
     mini: 集卡册进度 {theme_id: 已炼成次数(num)} → sets（已炼 N 套 / 0=未炼）。
-    collection: 主题秀收集 {theme_id: (cnt, total_cnt)} → show / show_total。
+    collection: 主题秀收集 {theme_id: (cnt, total_cnt, latest_ts, early_ts)} →
+          show / show_total / last_ts / early_ts。
     """
     idx = indexes()
     th = next((t for t in idx["themes"] if t["tid"] == tid), None)
@@ -314,10 +324,13 @@ def theme_detail(tid: int, owned: dict | None = None, mini: dict | None = None,
         # 套卡级「商店可买」标记：套内存在 10 面额基础卡 = 未下架在售套（buyable_themes 口径）
         "theme_buyable": tid in buyable_themes(),
         "sets": (mini or {}).get(tid, (0, 0))[0],
-        # show=None = 无主题秀数据（不在 card_collection_get，如模块套）
-        "show": ((collection or {}).get(tid, (None,))[0]),
-        # show_total = 该套主题秀总数（t[9] 项数）；仅在 collection 里有数据时为有效值
-        "show_total": (th["show_total"] if tid in (collection or {}) else 0),
+        # show = 已收集立绘数；不在 collection 里 = 一套都未集 → 0（前端显示 0/总数）。
+        "show": ((collection or {}).get(tid, (0, 0, 0, 0))[0]),
+        # show_total = 该套主题秀总数（t[9] 项数），始终取静态值。
+        "show_total": th["show_total"],
+        # 最后/最早收集主题秀时间戳；一套都未集 → 0。
+        "last_ts": ((collection or {}).get(tid, (0, 0, 0, 0))[2]),
+        "early_ts": ((collection or {}).get(tid, (0, 0, 0, 0))[3]),
         "cards": cards,
     }
 
