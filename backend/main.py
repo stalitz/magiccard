@@ -1265,7 +1265,10 @@ async def daily_run(body: dict | None = None):
         items: list[dict] = []
         try:
             async for item in daily.run(_session, keys):
-                items.append(item)
+                # 送礼等动作会 yield 逐批 step（带 _step），只透传给前端实时显示，
+                # 不计入末尾汇总（否则 daily-last 会把 step 当动作显示「undefined」）。
+                if not item.get("_step"):
+                    items.append(item)
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'act': '__done__',
                                       'ok': bool(items) and all(i['ok'] for i in items),

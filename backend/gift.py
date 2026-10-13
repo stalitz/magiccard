@@ -45,6 +45,9 @@ logger = logging.getLogger("mc.gift")
 
 # 送礼用的免费礼物 id（HAR 实证：freegift_send freegift_id=81 = 送 48 面卡）。
 FREEGIFT_ID_48 = 81
+# 免费礼物 id → 显示名（送礼日志展示「卡的名字」用，避免只显示笼统的「48面卡」）。
+# freegift_id=81 收礼（action=2）产出 7773=蚕丝（theme=487 手工织锦 48 面卡）。
+FREEGIFT_NAME = {FREEGIFT_ID_48: "蚕丝"}
 # 礼物箱上限（songli.har get_list 实测 + 用户口述；服务端会按 time 丢老件）。
 GIFT_BOX_CAP = 50
 # 送礼：**每次调用最多 5 个好友**（用户口述 + 实测），所以按 5 人拆批。
@@ -175,19 +178,22 @@ async def _level_sorted_gift_friends(session: LoginSession, limit: int):
     return rows[:limit], pool_total
 
 
-async def gift_send(session: LoginSession, friends: Optional[list] = None,
-                    freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT,
-                    sort_by_level: bool = True) -> dict:
-    """送 48 面卡（freegift_id=81）给好友。会真实发出，谨慎调用。
+async def gift_send_stream(session: LoginSession, friends: Optional[list] = None,
+                            freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT,
+                            sort_by_level: bool = True):
+    """送 48 面卡（freegift_id=81）给好友。**async generator，逐批流式产出**：
+
+    - 每完成一批（5 人）先 `yield` 一条 step 字典（带 `_step=True`、卡名、本批昵称），
+      供上层「一条一条」实时显示；
+    - 最后再 `yield` 一条**汇总**字典（不带 `_step`）含 sent/failed/sent_list/message。
 
     ⚠️ 实测服务端**每次调用最多接受 5 个好友**（>5 人一起发不生效），所以按 5 人一批拆。
-    每天上限 50 次（DAILY_CAP，用户 2026-09-24 从游戏界面确认）；每日送礼按当日剩余额度取人，
-    （`limit` 在每日送礼场景下被「当日剩余额度」覆盖）。
+    每天上限 50 次（DAILY_CAP）；每日送礼场景由调用方用「当日剩余额度」覆盖 `limit`。
     friends 留空（自动模式）→ 送礼对象按 **card_user_list 的 exp 从高到低** 取前 limit 人
     （排除自己；不在玩家列表里的好友 exp 记 0，自然排到最后）。sort_by_level=False 则退回
     原始 QQ 好友列表顺序取前 limit 人。
-    返回 sent_list：[{uin, nick, exp}]，供上层打日志显示「送给谁」。
     """
+    card_name = FREEGIFT_NAME.get(freegift_id, f"免费礼物{freegift_id}")
     meta: dict = {}
     pool_total = 0
     if friends is None:
@@ -201,19 +207,21 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
             pool_total = fr.get("total", 0)
     friends = [str(u).strip() for u in friends if str(u).strip().isdigit()]
     if not friends:
-        return {"ok": False, "code": -1, "message": "没有可送的好友",
-                "batches": [], "sent": 0, "failed": 0, "friends_total": pool_total,
-                "sent_list": []}
+        yield {"_step": False, "ok": False, "code": -1, "message": "没有可送的好友",
+               "batches": [], "sent": 0, "failed": 0, "friends_total": pool_total,
+               "sent_list": [], "card_name": card_name}
+        return
     total_friends = len(friends)
     if limit and limit > 0:
         friends = friends[:limit]
 
     batches = [friends[i:i + SEND_BATCH] for i in range(0, len(friends), SEND_BATCH)]
+    total = len(batches)
     results = []
     sent = 0
     failed = 0
     sent_list = []
-    for bt in batches:
+    for idx, bt in enumerate(batches, 1):
         payload = {
             "friends": ";".join(bt),
             "freegift_id": freegift_id,
@@ -224,22 +232,46 @@ async def gift_send(session: LoginSession, friends: Optional[list] = None,
         }
         r = await session.qzone("post", EP_FREEGIFT_SEND, **payload)
         ok = r.get("code") == 0
+        nicks = []
         if ok:
             sent += len(bt)
             for u in bt:
                 m = meta.get(u, {})
                 sent_list.append({"uin": u, "nick": m.get("nick", ""), "exp": m.get("exp", 0)})
+                if m.get("nick"):
+                    nicks.append(m["nick"])
         else:
             failed += len(bt)
         results.append({"uins": bt, "ok": ok,
                         "code": r.get("code"),
                         "message": r.get("message") or ""})
+        # 逐批流式推进：每批完成先出一条，日志「一条一条」出来
+        yield {"_step": True, "batches": f"{idx}/{total}", "count": len(bt),
+               "ok": ok, "code": r.get("code"), "card_name": card_name,
+               "nicks": nicks, "message": (r.get("message") or "") if not ok else ""}
         # 批间稍歇，避免触发限流
         await asyncio.sleep(0.4)
-    return {"ok": failed == 0, "batches": results, "sent": sent, "failed": failed,
-            "friends_total": pool_total or total_friends,
-            "sent_list": sent_list,
-            "message": f"已送 {sent} 人（好友共 {pool_total or total_friends} 人），失败 {failed} 人"}
+    yield {"_step": False, "ok": failed == 0, "batches": results,
+           "sent": sent, "failed": failed,
+           "friends_total": pool_total or total_friends,
+           "sent_list": sent_list, "card_name": card_name,
+           "message": f"已送 {sent} 人（好友共 {pool_total or total_friends} 人），失败 {failed} 人"}
+
+
+async def gift_send(session: LoginSession, friends: Optional[list] = None,
+                    freegift_id: int = FREEGIFT_ID_48, limit: int = SEND_LIMIT,
+                    sort_by_level: bool = True) -> dict:
+    """送 48 面卡（freegift_id=81）给好友。会真实发出，谨慎调用。
+
+    这是 `gift_send_stream` 的**同步收口版**：消费其产出、返回最后一条汇总字典，
+    保持原手动送礼接口（`/api/gift/send`）的返回形态不变。
+    返回 sent_list：[{uin, nick, exp}]，供上层打日志显示「送给谁」。
+    """
+    async for item in gift_send_stream(session, friends, freegift_id, limit, sort_by_level):
+        if not item.get("_step"):
+            return item
+    return {"ok": False, "code": -1, "message": "无结果", "sent": 0, "failed": 0,
+            "sent_list": [], "card_name": FREEGIFT_NAME.get(freegift_id, "")}
 
 
 async def gift_inbox(session: LoginSession) -> dict:

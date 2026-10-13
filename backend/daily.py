@@ -38,37 +38,46 @@ async def _daily_gift(session) -> dict:
     return {"ok": False, "code": code, "text": r.get("message") or err_msg(code)}
 
 
-async def _daily_send_gift(session) -> dict:
-    """每日送礼：freegift_send 送 48 面卡（freegift_id=81）给好友。
+async def _daily_send_gift(session):
+    """每日送礼：freegift_send 送 48 面卡（freegift_id=81）给好友。**async generator**。
 
     2026-09-24 用户从游戏界面确认：**每天只能送 50 次**（gift.DAILY_CAP）。
-    按「当日剩余额度」从 freegift 好友池（今天还没送的人）取前 N 人，按 card_user_list 的
-    exp 从高到低排序（活跃高等级优先）；送完更新本地日计数。额度用尽或列表空如实回报。
+    按「当日剩余额度」从 freegift 好友池取前 N 人，按 card_user_list 的 exp 从高到低排序
+    （活跃高等级优先）；逐批送出、每条 step 实时 yield（日志一条一条出），送完更新本地日计数。
+    额度用尽或列表空如实回报。
     """
+    card_name = _gift.FREEGIFT_NAME.get(_gift.FREEGIFT_ID_48, "48面卡")
     remaining = _gift.gift_daily_remaining()
     if remaining <= 0:
-        return {"ok": False, "code": -2,
-                "text": f"今日送礼额度已用完（{_gift.DAILY_CAP}/{_gift.DAILY_CAP}），明天再送",
-                "quota_done": True, "sent_list": []}
-    r = await _gift.gift_send(session, friends=None, freegift_id=_gift.FREEGIFT_ID_48,
-                              limit=remaining, sort_by_level=True)
-    sent = r.get("sent", 0)
-    failed = r.get("failed", 0)
-    sent_list = r.get("sent_list") or []
-    if sent > 0:
-        d = _gift._load_daily()
-        d["sent"] = d.get("sent", 0) + sent
-        _gift._save_daily(d)
-        left = _gift.gift_daily_remaining()
-        return {"ok": True, "code": 0,
-                "text": f"送礼 48面卡 成功 {sent} 人（按等级从高到低，今日 "
-                        f"{_gift.DAILY_CAP - left}/{_gift.DAILY_CAP}）"
-                        + (f"，{failed} 人失败" if failed else ""),
-                "sent_list": sent_list}
-    return {"ok": False, "code": r.get("code", -1),
-            "text": (r.get("message") or "今日免费礼物列表为空")
-                    + "（游戏内可能已达 50 次上限，或好友都已送过）",
-            "sent_list": []}
+        yield {"ok": False, "code": -2,
+               "text": f"今日送礼额度已用完（{_gift.DAILY_CAP}/{_gift.DAILY_CAP}），明天再送",
+               "quota_done": True, "sent_list": []}
+        return
+    async for s in _gift.gift_send_stream(session, friends=None,
+                                         freegift_id=_gift.FREEGIFT_ID_48,
+                                         limit=remaining, sort_by_level=True):
+        if s.get("_step"):
+            yield s
+            continue
+        # 汇总字典：叠加每日额度统计 + 卡名
+        sent = s.get("sent", 0)
+        failed = s.get("failed", 0)
+        sent_list = s.get("sent_list") or []
+        if sent > 0:
+            d = _gift._load_daily()
+            d["sent"] = d.get("sent", 0) + sent
+            _gift._save_daily(d)
+            left = _gift.gift_daily_remaining()
+            yield {"ok": True, "code": 0,
+                   "text": f"送礼【{card_name}·48面】成功 {sent} 人（按等级从高到低，今日 "
+                           f"{_gift.DAILY_CAP - left}/{_gift.DAILY_CAP}）"
+                           + (f"，{failed} 人失败" if failed else ""),
+                   "sent_list": sent_list}
+        else:
+            yield {"ok": False, "code": s.get("code", -1),
+                   "text": (s.get("message") or "今日免费礼物列表为空")
+                           + "（游戏内可能已达 50 次上限，或好友都已送过）",
+                   "sent_list": []}
 
 
 # (key, 中文名, 执行函数) —— 加项必须先在上面写明实证依据
@@ -84,15 +93,27 @@ ACTIONS = [
 async def run(session, keys: list[str] | None = None):
     """按顺序跑一遍（async generator）。
 
-    每完成一项就 yield 该 item 字典，便于前端边跑边显示（不再等整段跑完才出日志）。
+    每项动作可以是**协程**（返回单条 item 字典）或 **async generator**（逐条 yield，
+    用于送礼这种内部还要分批流式显示的动作）。两种都支持：
+    - 协程：await 后补 key/name 再 yield；
+    - 生成器：逐条 yield，每条 setdefault 补 key/name（step 用 _step 区分）。
     keys 为空 = 全跑。单项异常不影响后续项。
     """
     for key, name, fn in ACTIONS:
         if keys is not None and key not in keys:
             continue
         try:
-            item = await fn(session)
+            res = fn(session)
+            if hasattr(res, "__aiter__"):          # async generator（如 送礼）
+                async for item in res:
+                    item.setdefault("name", name)
+                    item.setdefault("key", key)
+                    yield item
+            else:                                   # 协程（如 登陆礼包/珍藏阁）
+                item = await res
+                item["key"], item["name"] = key, name
+                yield item
         except Exception as e:  # noqa: BLE001
             item = {"ok": False, "code": -1, "text": f"异常：{e}"}
-        item["key"], item["name"] = key, name
-        yield item
+            item["key"], item["name"] = key, name
+            yield item

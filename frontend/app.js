@@ -5345,16 +5345,17 @@ async function dailyRun() {
     const final = await streamRun("/api/daily/run", {
       onStep: (it) => {
         if (!it || it.act === "__done__" || it.act === "__error__") return;
+        // 送礼逐批 step：实时一条一条显示，并带卡名（如「蚕丝·48面」）
+        if (it._step) {
+          const nm = it.card_name ? `【${it.card_name}·48面】` : "【48面卡】";
+          const who = (it.nicks && it.nicks.length) ? it.nicks.join("、") : "";
+          const tail = it.ok ? "" : ` 失败 code=${it.code}`;
+          log(`  · 送${nm} 第${it.batches}批（${it.count}人）${who}${tail}`,
+              it.ok ? "info" : "warn");
+          return;
+        }
         const lvl = it.ok ? "ok" : (it.quota_done ? "warn" : "err");
         log(`一键日常 · ${it.name}：${it.text}`, lvl);
-        if (it.ok && it.code === 0 && it.sent_list && it.sent_list.length) {
-          for (const x of it.sent_list) {
-            log(`  · 48面卡 → ${x.uin}${x.nick ? "（" + x.nick + "）" : ""}${x.exp ? " [exp " + x.exp + "]" : ""}`, "info");
-          }
-        }
-        if (it.steps && it.steps.length) {
-          for (const s of it.steps) log(`  · ${s.text || s.act || ""}`, (s.code === 0 || s.code === undefined) ? "info" : "warn");
-        }
         if (it.ok && it.code === 0) got = true;
       },
     });
