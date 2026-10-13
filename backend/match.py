@@ -1623,14 +1623,20 @@ async def sanguo_claim(session, levelid: int = 0) -> dict:
             r = await _act(session, EP_WORLD_SANGUO, 2, levelid=lid)
             rd = r.get("data") if isinstance(r.get("data"), dict) else {}
             if r.get("ok") and rd.get("code") in (0, None):
-                claimed.append({"levelid": lid, "content": rd.get("content")})
+                c = rd.get("content")
+                claimed.append({"levelid": lid, "content": c,
+                                "name": _sg_reward_text(c)})
                 did = True
             else:
                 failed.append({"levelid": lid,
                                "msg": rd.get("desc") or r.get("message") or f"code={rd.get('code')}"})
         if not did:
             break
+    contents = [c.get("content") for c in claimed if c.get("content")]
+    content_all = ",".join(contents)
     return {"ok": True, "claimed": claimed, "failed": failed,
+            "content": content_all,
+            "summary": _sg_reward_text(content_all) if content_all else "",
             "message": f"已领 {len(claimed)} 关，失败 {len(failed)} 关"}
 
 
@@ -1668,12 +1674,18 @@ async def sanguo_claim_tasks(session) -> dict:
         r = await _act(session, EP_WORLD_SANGUO, 8, id=tid)
         rd = r.get("data") if isinstance(r.get("data"), dict) else {}
         if r.get("ok") and rd.get("code") in (0, None) and rd.get("content"):
-            claimed.append({"id": tid, "type": t.get("type"), "content": rd.get("content")})
+            c = rd.get("content")
+            claimed.append({"id": tid, "type": t.get("type"), "content": c,
+                            "name": _sg_reward_text(c)})
         else:
             skipped.append({"id": tid, "type": t.get("type"),
                              "msg": rd.get("desc") or r.get("message") or f"code={rd.get('code')}"})
+    contents = [c.get("content") for c in claimed if c.get("content")]
+    content_all = ",".join(contents)
     return {"ok": True, "task_bits": bits, "task_detail": d7.get("task_detail"),
             "claimed": claimed, "skipped": skipped,
+            "content": content_all,
+            "summary": _sg_reward_text(content_all) if content_all else "",
             "message": f"已领 {len(claimed)} 个任务，跳过 {len(skipped)} 个"}
 
 
@@ -1720,6 +1732,40 @@ def _sg_meta(card_id) -> dict:
     slot = int(c[3])
     return {"card_id": cid, "theme": int(c[1]), "name": str(c[2]), "slot": slot,
             "layer": slot // 1000}
+
+
+def _sg_reward_text(content: str) -> str:
+    """三国领奖 content（形如 ``48_1614_10`` 或 ``69_25097_1``）→ 可读文本。
+
+    类型 69＝真实层卡（查卡库名，如「黄巾力士」）；其余（类型 48＝三国币 /
+    探索点等通用物品）走 ``prop_dict.reward_name``。同款合并、查不到不编造名字
+    （回退「类型_编号」，绝不臆造），原始 content 始终在别处保留。
+
+    ⚠️ 类型 48 的中段**不是**卡 id（翻牌 ``48_1415`` 曾误译成卡「比利亚」，
+    实为气球），故类型 48 一律走 prop_dict，绝不用卡库反查 —— 只在类型 69 才查卡名。
+    """
+    from . import prop_dict as _pd
+    agg: dict = {}
+    for part in str(content or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        f = part.split("_")
+        if len(f) < 3:
+            return part  # 非标准三段格式，原样返回，不丢信息
+        try:
+            t, i, n = int(f[0]), int(f[1]), int(f[2])
+        except ValueError:
+            return part
+        if t == 69:
+            row = _sg_cards().get(i)
+            nm = str(row[2]) if row else ""
+        else:
+            nm = _pd.reward_name(t, i)
+        if not nm or (isinstance(nm, str) and nm.startswith("未知道具")):
+            nm = f"{t}_{i}"
+        agg[nm] = agg.get(nm, 0) + n
+    return "、".join(f"{nm}×{n}" for nm, n in agg.items())
 
 
 SG_BOX_EX = 0        # 关卡卡箱（ex_box_data，15 格）
@@ -2219,14 +2265,22 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
     pre_claim = await sanguo_claim(session, 0)
     pre_claimed = (pre_claim.get("claimed") or []) if isinstance(pre_claim, dict) else []
     if pre_claimed:
+        txt = f"预领已通关奖励 {len(pre_claimed)} 关"
+        if pre_claim.get("summary"):
+            txt += f"：{pre_claim['summary']}"
         yield {"act": "pre_claim", "ok": True, "claimed": pre_claimed,
-               "text": f"预领已通关奖励 {len(pre_claimed)} 关"}
+               "summary": pre_claim.get("summary", ""),
+               "text": txt}
     # 顺带领掉「开局就可领的每日任务」（act=7 查 + act=8 领），避免漏领（jiangli.har）。
     pre_tasks = await sanguo_claim_tasks(session)
     pre_task_claimed = (pre_tasks.get("claimed") or []) if isinstance(pre_tasks, dict) else []
     if pre_task_claimed:
+        txt = f"预领每日任务奖励 {len(pre_task_claimed)} 项"
+        if pre_tasks.get("summary"):
+            txt += f"：{pre_tasks['summary']}"
         yield {"act": "pre_task", "ok": True, "claimed": pre_task_claimed,
-               "text": f"预领每日任务奖励 {len(pre_task_claimed)} 项"}
+               "summary": pre_tasks.get("summary", ""),
+               "text": txt}
     used = int(st.get("freenum") or 0)
     cur_level = st.get("levelId")
     # 界面上选了「打第几大关」（大关可选）→ 在该大关内挑该打的小关，手动覆盖自动推荐。
@@ -2286,15 +2340,28 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
             # 打完立刻领奖（act=2），避免奖励卡在 levelData、后续关出不来。
             cr = await sanguo_claim(session, int(levelid))
             crd = cr.get("data") if isinstance(cr.get("data"), dict) else {}
-            row["claim"] = crd.get("content") if (cr.get("ok")
-                             and crd.get("code") in (0, None)) else \
-                (crd.get("desc") or cr.get("message") or f"code={crd.get('code')}")
+            if cr.get("ok") and crd.get("code") in (0, None):
+                c = crd.get("content")
+                row["claim"] = _sg_reward_text(c) or c or "已领"
+                # 把领到的卡名附到本场文案，日志里一眼可见（用户 2026-10-13 反馈：
+                # 领了卡但日志只显示「成功」、卡名被吞掉）
+                if row["claim"] and row["claim"] != "已领":
+                    row["text"] = (row["text"] or "") + f"；领奖：{row['claim']}"
+            else:
+                row["claim"] = crd.get("desc") or cr.get("message") or f"code={crd.get('code')}"
         yield {"act": "round", **row}
         if not ok:
             break
     # 战后补领每日任务奖励（act=7 查 + act=8 领）：打满 3 次的任务(id=1)此刻才达标。
     post_tasks = await sanguo_claim_tasks(session)
     post_task_claimed = (post_tasks.get("claimed") or []) if isinstance(post_tasks, dict) else []
+    if post_task_claimed:
+        txt = f"战后补领每日任务奖励 {len(post_task_claimed)} 项"
+        if post_tasks.get("summary"):
+            txt += f"：{post_tasks['summary']}"
+        yield {"act": "post_task", "ok": True, "claimed": post_task_claimed,
+               "summary": post_tasks.get("summary", ""),
+               "text": txt}
     out = {"ok": True, "levelid": int(levelid), "chapter": picked_chapter,
            "used_before": used,
            "used_after": (await sanguo_state(session)).get("freenum"),

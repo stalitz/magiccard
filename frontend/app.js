@@ -4534,7 +4534,7 @@ async function claimGroup(only) {
         mlog("[领奖] " + it.k + " → 无奖励或失败 " + (d.desc || d.code || r.message || ""), "");
       } else {
         okCount++;
-        mlog("[领奖] " + it.k + " → " + (d.content || "成功"), "ok");
+        mlog("[领奖] " + it.k + " → " + (r.summary || r.content || d.content || "成功"), "ok");
       }
     },
   });
@@ -5178,8 +5178,9 @@ async function claimOnly() {
     onStep: (it) => {
       if (!it || it.act === "__done__" || it.act === "__error__") return;
       const r = it.r || {};
+      const d = r.data || {};
       total++;
-      if (r.ok) { okCount++; mlog("[领奖] " + it.k + " → " + (r.content || "成功"), "ok"); }
+      if (r.ok) { okCount++; mlog("[领奖] " + it.k + " → " + (r.summary || r.content || d.content || "成功"), "ok"); }
       else mlog("[领奖] " + it.k + " 失败：" + (r.err || r.desc || "失败"), "warn");
     },
   });
