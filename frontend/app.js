@@ -5424,10 +5424,7 @@ async function lotDrawAll() {
       const s = await (await fetch("/api/state")).json();
       if (s.ok && s.user) { chance = s.user.randchance || 0; lotSetChance(chance); }
     } catch {}
-    if (chance !== null && chance <= 0) {
-      log("一键抽卡：当前没有随机抽卡机会（0 次），等待自动恢复后再抽", "err");
-      return;
-    }
+    // 即使机会为 0 也仍调用后端：后端会在不抽卡的前提下，先把卡箱里现有 10 面额卡卖光腾空间
     const final = await streamRun("/api/random/draw", {
       onStep: (stp) => {
         if (!stp || stp.act === "__done__" || stp.act === "__error__") return;

@@ -517,11 +517,14 @@ class LoginSession:
 
         message = "完成"
         if randchance_before <= 0:
-            message = "当前没有随机抽卡机会（randchance=0），请等待自动恢复后再抽"
+            message = ("没有随机抽卡机会（randchance=0），已卖出 %d 张 10 面额卡腾空间"
+                       % sold) if sold > 0 else \
+                      "当前没有随机抽卡机会（randchance=0），请等待自动恢复后再抽"
         elif total_draws == 0:
             message = "未进行抽卡，可能卡箱已满或机会已耗尽"
 
-        yield {"act": "__done__", "ok": errors == 0 and total_draws > 0,
+        # 没抽到卡但清掉了库存（如没次数时仍卖了 10 面额卡）也算成功
+        yield {"act": "__done__", "ok": errors == 0 and (total_draws > 0 or sold > 0),
                "draws": total_draws, "cards": total_cards, "sold": sold, "gold": gold,
                "remain": last_draw_remain, "randchance_before": randchance_before,
                "errors": errors, "message": message}
