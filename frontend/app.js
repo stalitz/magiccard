@@ -3700,7 +3700,10 @@ function renderHomeArena() {
   const rank = (matchPvp && matchPvp.ok !== false) ? matchPvp.my_rank : null;
   const x = matchPvpExtra || {};
   const es = ((x.state || {}).data || {}).enemy_list || [];
-  st.textContent = `剩余 ${pv.surplus ?? "-"} / 每日免费 ${pv.free_pvp_num ?? "-"}`
+  // 真实口径：surplus=剩余场次，free_pvp_num=今日已用场次，二者之和恒为每日免费总量(4)。
+  // 「每日免费」要显示总量，不能直接用 free_pvp_num（那是已用量，会随消耗增长）。
+  const dailyFree = (pv.surplus || 0) + (pv.free_pvp_num || 0);
+  st.textContent = `剩余 ${pv.surplus ?? "-"} / 每日免费 ${dailyFree || "-"}`
     + ` · 已刷对手 ${pv.flush_num ?? "-"} · 我的名次 `
     + (rank ? `第 ${rank} 名` : `未上榜（榜内最低 ${(matchPvp && matchPvp.min_score) || "-"}）`)
     + ` · 我的战力 ${pv.my_ce ?? "-"}`

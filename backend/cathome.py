@@ -14,14 +14,16 @@
 - 金币福利（act=20 读 gold_buy_id1..6）：商品表 = catHome_GoldShoplist，
   id=2 = 红宝石×8（10000 金币）。**购买动作的 act 尚未定位**（act=19/act=20 带 id 均
   只回 busy/状态，未实际扣金币）→ 这里只展示状态，按钮等抓包。
-- 竞技场次数口径（2026-09-27 全天实测，别再把四个字段混用）：
-  `surplus` = **当前还能打的免费场次**（动态的：打一场掉 1，打到 0 后 act=8 直接回
-  `system busy`(-3) —— 用两个不同对手连打都 busy，确认是真没次数，不是参数问题）；
-  `free_pvp_num` = 每日免费次数**总量 4**（不随消耗变化，全天恒为 4）；
+- 竞技场次数口径（2026-10-15 实测校正，别再把四个字段混用）：
+  `surplus` = **当前还能打的免费场次（剩余量）**：打一场掉 1，打到 0 后 act=8 直接回
+  `system busy`(-3) —— 用两个不同对手连打都 busy，确认是真没次数，不是参数问题；
+  `free_pvp_num` = **今日已用掉的免费场次（动态：打一场 +1，范围 0→4）**，**不是**每日总量！
+  与 surplus 互补，**二者之和恒为每日免费总量 4**（surplus + free_pvp_num = 4）。
+  前端「每日免费」显示要用这个和，绝不能直接把 free_pvp_num 当总量（它会随消耗增长）。
   `pvp_num` = 付费挑战次数（恒 0）；`flush_num` = 已用免费刷新（跑之前 0、跑完 1）；
   `battle_arr=[3,4,2]` 语义至今未定位 → **只记录不解读**，别拿它当剩余次数用。
-  教训：上一版把「开局 surplus=2」写成「每日上限就是 2」是错的 —— 那天是**开跑前就已经
-  用掉 2 次**，surplus 只是剩余量，不是日上限。
+  教训：曾把 `free_pvp_num` 误当成「每日总量恒为 4」、又把开局 `surplus=2` 写成「每日上限=2」——
+  二者都错：surplus 只是剩余量、free_pvp_num 只是已用量，日总量恒为二者之和。
   enemy_list 里带**自己**的条目（uin 相同），其 ce 就是自己当前战力；
   挑战 = act=8 {type:'fight', euin}；领奖 = act=15 {id:1..4}（daily_task 位）。
 """
@@ -401,11 +403,11 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
         steps.append(d)
         return d
 
-    # 连发冷却 / 限流重试（09-29 修复）：自动连发挑战会被服务端限流(system busy)，
-    # 导致第 2 场即中断、整轮只打 1 场。HAR 手动连点 4 场全成功，差异仅在间隔。
+    # 每场挑战前短冷却：连发会触发服务端限流(system busy)，09-29 实测 auto 跑第 2 场必 busy
+    # 而中断（HAR 手动连点 4 场全成功，差异仅在间隔）。3s 冷却已从源头避开限流。
+    # ⚠ 关键修复（2026-10-15）：busy 一律**跳过该对手**转打下一个，绝不在同一对手上反复重试
+    # （旧版对同一个对手重试 4 次×5s，遇到限流会把整轮拖成「卡住」假象，且会虚高战斗计数）。
     FIGHT_COOLDOWN = 3.0   # 每场挑战前冷却（秒），从源头避免触发限流
-    FIGHT_RETRY_WAIT = 5.0  # system busy 后重试等待（秒）
-    FIGHT_MAX_TRY = 4      # 单场最多尝试次数（含首试）
 
     if feed:
         f = await feed_smart(session)
@@ -435,12 +437,11 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
     yield emit({"act": "arena:dress", "ok": dres.get("ok", False),
                 "msg": dres.get("message") or "穿装"})
 
-    free_seen = int(dp0.get("free_pvp_num") or 0)
     flush_left = max_flush - int(dp0.get("flush_num") or 0)
     wins, fights = 0, 0
     busy_total = 0
     stop_all = False
-    BUSY_MAX = 3                    # 整轮最多容忍的 busy 次数：防 7 对手×4 重试刷一墙失败
+    BUSY_MAX = 20                   # 整轮最多容忍的 busy 次数（兜底收尾；正常靠 flush_left 与 surplus 自然结束）
     loop_guard, LOOP_MAX = 0, 40    # 总轮次硬上限：防「全员持续限流只跳过不扣次数」空转
     live = int(dp0.get("surplus") or 0)
     skip_uins = set()               # 本回合已打过（胜/负）或持续 busy 的对手 uin，绝不重复打同一个人
@@ -471,6 +472,7 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
         st = await _act(session, EP_TRAVEL_PVP, 1)
         dp = st.get("data") or {}
         live = int(dp.get("surplus") or 0)
+        free_seen = int(dp.get("free_pvp_num") or 0)   # 本场开局已用次数，用于判定 busy 是否真扣次数
         if live <= 0:
             yield emit({"act": "arena:end", "ok": True,
                         "msg": f"今日竞技次数已用完（已打 {fights} 场）"})
@@ -495,77 +497,59 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
                         "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(fd.get('enemy_list') or [])} 个"})
             continue
         # 竞技穿装已在开局做一次并持久保存，这里无需每场重穿（与每日比赛每场临时算不同）。
-        # 每场挑战前短冷却：连发会触发服务端限流（system busy），
-        # 09-29 实测 auto 跑第 2 场必 busy 而中断（HAR 手动连点 4 场全成功，差异是间隔）。
+        # 每场只挑战**一次**：3s 冷却已从源头避开限流。busy 一律**跳过该对手**转打下一个，
+        # 绝不在同一对手上反复重试（那只会持续触发限流、拖成「卡住」假象）。是否真扣次数
+        # 以回读 free_pvp_num 为准（本场开局值记在 free_seen）。
         await asyncio.sleep(FIGHT_COOLDOWN)
         foe_uin = str(foe["uin"])
-        fight_ok = False
-        for _try in range(1, FIGHT_MAX_TRY + 1):
-            r = await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=foe_uin)
-            d = r.get("data") or {}
-            if r.get("ok") and d.get("code") in (0, None):
-                fight_ok = True
-                break
-            desc = str(d.get("desc") or r.get("message") or "挑战失败")
-            if "system busy" not in desc.lower():
-                # 非 busy 失败（非法/状态不允许/战败返回错误码）：本场判失败，跳过该对手换人
-                skip_uins.add(foe_uin)
-                yield emit({"act": "fight", "ok": False, "foe": foe.get("name"), "msg": desc})
-                break
-            # busy ≠ 纯限流（铁律：system busy 常掩盖「次数/状态不允许」）。先回读
-            # 配额再决定下一步，绝不盲目重试：次数被扣=战斗可能已发生；次数归零=结束。
-            busy_total += 1
-            q = await _act(session, EP_TRAVEL_PVP, 1)
-            qd = q.get("data") or {}
-            live_surplus = int(qd.get("surplus") or 0)
-            free_now = int(qd.get("free_pvp_num") or 0)
-            if free_now > free_seen:
-                # busy 但次数被扣：战斗实际已发生（胜负未知，响应里没有战报）
-                fights += 1
-                free_seen = free_now
-                skip_uins.add(foe_uin)
-                yield emit({"act": "fight", "ok": True, "foe": foe.get("name"), "win": None,
-                            "msg": f"返回 busy 但次数已扣（已打 {free_now} 场），战斗实际已发生"
-                                   f"（胜负以游戏内战绩为准）"})
-                break
-            else:
-                yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
-                            "msg": f"system busy（未扣次数，服务端剩 {live_surplus} 次）"})
-            if live_surplus <= 0:
-                stop_all = True
-                yield emit({"act": "arena:limit", "ok": True,
-                            "msg": "服务端剩余次数 0，今日竞技结束（busy=次数不允许，非限流）"})
-                break
-            if busy_total >= BUSY_MAX:
-                stop_all = True
-                yield emit({"act": "arena:limit", "ok": True,
-                            "msg": f"busy 已 {busy_total} 次，停止挑战（服务端剩 {live_surplus} 次，"
-                                   f"稍后可再跑）"})
-                break
-            if _try < FIGHT_MAX_TRY:
-                await asyncio.sleep(FIGHT_RETRY_WAIT)
-                continue
-            yield emit({"act": "fight", "ok": False, "foe": foe.get("name"), "msg": desc})
-            break
-        if stop_all:
-            break
-        if not fight_ok:
-            # 该对手重试耗尽（未扣次数）→ 跳过它打其余对手，不因一个对手卡住就整轮停。
-            skip_uins.add(foe_uin)
-            yield emit({"act": "fight", "ok": False, "foe": foe.get("name"),
-                        "msg": f"对手「{foe.get('name')}」持续 busy，跳过，转打其余对手"})
+        r = await _act(session, EP_TRAVEL_PVP, 8, type="fight", euin=foe_uin)
+        d = r.get("data") or {}
+        if r.get("ok") and d.get("code") in (0, None):
+            fights += 1
+            ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
+            win = ba.get("iswin")
+            wins += 1 if win == 1 else 0
+            skip_uins.add(foe_uin)   # 无论输赢，本回合不再打这个人
+            yield emit({"act": "arena:fight", "ok": True, "foe": foe.get("name"),
+                        "ce": foe.get("ce"), "win": win,
+                        "score": ba.get("pvp_score"),
+                        "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）{'胜 ✓' if win == 1 else ('负 ✗' if win == 0 else '')}"})
             continue
-
-        fights += 1
-        ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
-        win = ba.get("iswin")
-        wins += 1 if win == 1 else 0
-        # 无论输赢，本回合不再打这个人（避免反复打同一人）
+        desc = str(d.get("desc") or r.get("message") or "挑战失败")
+        if "system busy" not in desc.lower():
+            # 非 busy 失败（非法/状态不允许/战败返回错误码）：跳过该对手换人
+            skip_uins.add(foe_uin)
+            yield emit({"act": "arena:fight", "ok": False, "foe": foe.get("name"), "msg": desc})
+            continue
+        # busy（限流 / 次数不允许，铁律：busy 常掩盖真实语义）：回读配额判定是否真扣次数，
+        # 然后跳过该对手转打下一个。绝不在同一对手上反复重试。
+        busy_total += 1
+        q = await _act(session, EP_TRAVEL_PVP, 1)
+        qd = q.get("data") or {}
+        live_surplus = int(qd.get("surplus") or 0)
+        free_now = int(qd.get("free_pvp_num") or 0)
+        if free_now > free_seen:
+            # 次数被扣：战斗实际已发生（胜负未知，响应里没有战报）
+            fights += 1
+            skip_uins.add(foe_uin)
+            yield emit({"act": "arena:fight", "ok": True, "foe": foe.get("name"), "win": None,
+                        "msg": f"返回 busy 但次数已扣（已打 {free_now} 场），战斗实际已发生"
+                               f"（胜负以游戏内战绩为准）"})
+            continue
         skip_uins.add(foe_uin)
-        yield emit({"act": "fight", "ok": True, "foe": foe.get("name"),
-                    "ce": foe.get("ce"), "win": win,
-                    "score": ba.get("pvp_score"),
-                    "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）{'胜 ✓' if win == 1 else ('负 ✗' if win == 0 else '')}"})
+        yield emit({"act": "arena:fight", "ok": False, "foe": foe.get("name"),
+                    "msg": f"system busy（未扣次数，服务端剩 {live_surplus} 次），转打下一个对手"})
+        if live_surplus <= 0:
+            stop_all = True
+            yield emit({"act": "arena:limit", "ok": True,
+                        "msg": "服务端剩余次数 0，今日竞技结束（busy=次数不允许，非限流）"})
+            break
+        if busy_total >= BUSY_MAX:
+            stop_all = True
+            yield emit({"act": "arena:limit", "ok": True,
+                        "msg": f"busy 已 {busy_total} 次，停止挑战（服务端剩 {live_surplus} 次，"
+                               f"稍后可再跑）"})
+            break
 
     # 只有真正打了才领任务奖励（HAR 实证：都是打完连着领 4 个）；一次没打就别空领
     claims = []
