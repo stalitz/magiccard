@@ -289,6 +289,29 @@ async def box_move(card_id: int, slot: int, from_box: int):
     return await _session.move_card(card_id, slot, from_box)
 
 
+@app.post("/api/box/tempmove")
+async def box_tempmove(card_id: int, slot: int, type: int):
+    """简易箱 ↔ 保险箱 移动（card_user_temp_slot，act=3）。
+
+    参数语义（对照 2026-10-17 用户 Charles 抓包）：
+      - type=1：把卡从**简易箱(slot=该卡在简易箱的序号)** 移到**保险箱**。
+      - type=0：把卡从**保险箱(slot=该卡在保险箱的序号)** 移到**简易箱**。
+      slot = 源箱里卡的序号，card_id = 卡 id。该接口对 appid 敏感，**必须不带 appid**，
+      故走 qzone_json（非 qzone）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        r = await _session.qzone_json("card_user_temp_slot", act=3, type=type,
+                                      slot=slot, card_id=card_id)
+        code = r.get("code")
+        ok = code == 0
+        return {"ok": ok, "code": code,
+                "message": r.get("message") or ("" if ok else f"错误码 {code}"),
+                "raw": (r.get("raw") or "")[:200]}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"简易箱移动异常：{e}"}
+
 
 # TODO: 开始炼卡端点需抓包确认（EP_REFINE="card_stove_refine"）
 @app.get("/api/refine/start")
@@ -545,6 +568,31 @@ async def state():
                 c["publish"] = (m or {}).get("publish", 0)
     except Exception:  # noqa: BLE001
         pass
+    # 简易箱（card_user_temp_slot）：不在 mainpage 内嵌，单独拉。失败不影响主箱渲染。
+    try:
+        sbx = await _session.get_simple_box()
+        if sbx.get("ok"):
+            scards = sbx.get("cards") or []
+            sids = [c["id"] for c in scards if c.get("id")]
+            smeta = card_plan.card_details(sids) if sids else {}
+            for c in scards:
+                m = smeta.get(c["id"]) if c.get("id") else None
+                c["name"] = (m or {}).get("name", "")
+                c["price"] = (m or {}).get("price", 0)
+                c["theme"] = (m or {}).get("theme", "")
+                c["star"] = (m or {}).get("star", 0)
+            d["simplebox"] = {
+                "cur": sbx.get("cur", 15), "max": sbx.get("max", 15),
+                "filled": sbx.get("filled", len(scards)),
+                "expire_time": sbx.get("expire_time", 0),
+                "cards": scards,
+            }
+        else:
+            d["simplebox"] = {"ok": False, "code": sbx.get("code"), "message": sbx.get("message", ""),
+                              "cards": [], "cur": 0, "max": 15, "filled": 0, "expire_time": 0}
+    except Exception:  # noqa: BLE001
+        d["simplebox"] = {"ok": False, "code": -1, "message": "简易箱读取异常",
+                          "cards": [], "cur": 0, "max": 15, "filled": 0, "expire_time": 0}
     # 腾讯会话失效（skey 过期）：清掉死的登录态，让前端自动回到扫码界面
     if _session_expired(d):
         _session.clear()

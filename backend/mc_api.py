@@ -202,6 +202,61 @@ class LoginSession:
                 resp = await self.client.post(url, data=data, cookies=ck)
             return parse_qzone(resp.text)
 
+    async def qzone_json(self, endpoint: str, **params) -> dict:
+        """发请求到 **card.qzone.qq.com** 域，但**不带 appid**（card_user_temp_slot 这类接口
+        一旦带上 appid=365 就回 0 字节空体；同一会话下 zcg 不带/带 appid 都能通，唯独 temp_slot
+        对 appid 敏感）。响应是标准 JSON（非 JSONP、非 <QQHOME> XML），用 parse_response 解析。
+
+        实测（2026-10-17）：用本会话 skey 直连 card_user_temp_slot?g_tk&act=1，去掉 appid 后
+        正常返回 {"code":0,"tmp_slot":[...]}；带 appid 则空体。连接自愈逻辑同 post()。
+        """
+        data = dict(params)
+        data.setdefault("g_tk", calc_gtk(self._session_key()))
+        if self.uin:
+            data.setdefault("uin", self.uin)
+        method = (data.pop("_method", "post")).lower()
+        url = QZONE_BASE_URL + endpoint
+        ck = self._inject_qq_cookies()
+        cli = self.client
+        try:
+            if method == "get":
+                resp = await cli.get(url, params=data, cookies=ck)
+            else:
+                resp = await cli.post(url, data=data, cookies=ck)
+            return parse_response(resp.text)
+        except RETRYABLE as e:
+            logger.warning("QZONE_JSON %s %s 连接失败，重建连接池重试：%r", method, endpoint, e)
+            await self._reset_client(cli)
+            if method == "get":
+                resp = await self.client.get(url, params=data, cookies=ck)
+            else:
+                resp = await self.client.post(url, data=data, cookies=ck)
+            return parse_response(resp.text)
+
+    async def get_simple_box(self) -> dict:
+        """读取简易箱（card_user_temp_slot）。
+
+        返回结构化：{cur, max, filled, expire_time, cards:[{slot,id,end_time}]}
+        cards 只含已占用格（card_id>0），空位不列。取数失败返回 {ok:False,...}。
+        """
+        r = await self.qzone_json("card_user_temp_slot", act=1)
+        if r.get("code") != 0:
+            return {"ok": False, "code": r.get("code"), "message": r.get("message", ""),
+                    "raw": (r.get("raw") or "")[:200]}
+        obj = r.get("data") or {}
+        slots = obj.get("tmp_slot") or []
+        cards = [{"slot": _i(s.get("id")), "id": _i(s.get("card_id")),
+                  "end_time": _i(s.get("end_time"))} for s in slots if _i(s.get("card_id")) > 0]
+        total = len(slots) or 15
+        return {
+            "ok": True,
+            "cur": total,
+            "max": total,
+            "filled": len(cards),
+            "expire_time": _i(obj.get("expire_time")),
+            "cards": cards,
+        }
+
     async def _reset_client(self, seen: Optional[httpx.AsyncClient] = None) -> None:
         """丢弃陈旧连接池并重建 client，cookie 原样迁移。
 

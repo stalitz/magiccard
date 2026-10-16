@@ -1368,6 +1368,13 @@ async function loadState() {
            cb.max > cb.cur ? `未开通 ${cb.max - cb.cur} 格` : "") +
       chip("保险箱", `${st.filled ?? 0} / ${st.cur || 0}`,
            st.max > st.cur ? `未开通 ${st.max - st.cur} 格` : "") +
+      (function () {
+        const sp = d.simplebox || {};
+        const exp = sp.expire_time ? new Date(sp.expire_time * 1000).toISOString().slice(0, 10) : "";
+        const lbl = sp.ok === false ? `读取失败` : `${sp.filled ?? 0} / ${sp.cur ?? 0}`;
+        const sub = sp.ok === false ? (sp.message || "") : (exp ? `${exp} 到期` : "");
+        return chip("简易箱", lbl, sub);
+      })() +
       chip("炼炉", busyN ? `${busyN} 个炼制中` : "全部空闲") +
       `<div class="stat-chip" style="grid-column:1/-1">
          <span class="k">炼卡位明细</span>
@@ -3119,6 +3126,7 @@ async function loadCardBox(withLog = false) {
     }
     cbState.change = d.changebox || null;
     cbState.store = d.storebox || null;
+    cbState.simple = d.simplebox || null;
     renderCardBox();
     if (withLog) log("卡箱已刷新", "ok");
   } catch (e) {
@@ -3134,24 +3142,27 @@ function themeHue(t) {
 }
 
 function cbCardHtml(c, boxType) {
-  // 保险箱（boxType=1）的卡不能直接卖，必须先移回换卡箱，所以不给「卖」按钮。
-  const inStore = boxType === 1;
-  const toName = inStore ? "移回换卡箱" : "存入保险箱";
-  const sellBtn = inStore
-    ? ""
-    : `<button class="btn sm ghost" data-act="sell" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}" data-price="${c.price ?? 0}">卖 ${c.price ?? 0}</button>`;
+  // boxType: 0=换卡箱 1=保险箱 2=简易箱
   const theme = c.theme || "";
   const style = theme
     ? ` style="border-left:4px solid hsl(${themeHue(theme)},55%,55%);background:hsl(${themeHue(theme)},72%,97%)"`
     : "";
+  // 各箱的按钮：卖 / 移动。简易箱(2)与保险箱(1)都不给「卖」（简易箱是临时卡、保险箱需先移回换卡箱）。
+  let acts = "";
+  if (boxType === 0) {
+    acts = `<button class="btn sm ghost" data-act="sell" data-box="0" data-slot="${c.slot}" data-id="${c.id}" data-price="${c.price ?? 0}">卖 ${c.price ?? 0}</button>`
+         + `<button class="btn sm ghost" data-act="move" data-box="0" data-slot="${c.slot}" data-id="${c.id}">存入保险箱</button>`;
+  } else if (boxType === 1) {
+    acts = `<button class="btn sm ghost" data-act="move" data-box="1" data-slot="${c.slot}" data-id="${c.id}">移回换卡箱</button>`
+         + `<button class="btn sm ghost" data-act="tempmove" data-tmtype="0" data-slot="${c.slot}" data-id="${c.id}">移入简易箱</button>`;
+  } else { // 简易箱(2)：只能移到保险箱（与抓包一致 type=1）
+    acts = `<button class="btn sm ghost" data-act="tempmove" data-tmtype="1" data-slot="${c.slot}" data-id="${c.id}">移入保险箱</button>`;
+  }
   return `<div class="cb-card" data-cid="${c.id}"${style}>
     <div class="cbn" title="${esc(c.name || "")}">${esc(c.name || ("卡#" + c.id))}</div>
     <div class="cbm"><span>面值 ${c.price ?? 0}</span>${theme ? `<span>${esc(theme)}</span>` : ""}${c.star ? `<span>${c.star}★</span>` : ""}</div>
     <div class="cb-route">点击查看合成路径 ▸</div>
-    <div class="cbacts">
-      ${sellBtn}
-      <button class="btn sm ghost" data-act="move" data-box="${boxType}" data-slot="${c.slot}" data-id="${c.id}">${toName}</button>
-    </div>
+    <div class="cbacts">${acts}</div>
   </div>`;
 }
 
@@ -3164,19 +3175,27 @@ function cbSortCards(cards) {
 }
 
 function renderCardBox() {
-  const ch = cbState.change || {}, st = cbState.store || {};
+  const ch = cbState.change || {}, st = cbState.store || {}, sp = cbState.simple || {};
   $("cb-change-cap").textContent = `${ch.filled ?? 0} / ${ch.cur ?? 0} 格` +
     (ch.max > ch.cur ? `（未开通 ${ch.max - ch.cur}）` : "");
   $("cb-store-cap").textContent = `${st.filled ?? 0} / ${st.cur ?? 0} 格` +
     (st.max > st.cur ? `（未开通 ${st.max - st.cur}）` : "");
+  const spExp = sp.expire_time ? new Date(sp.expire_time * 1000).toISOString().slice(0, 10) : "";
+  $("cb-simple-cap").textContent = `${sp.filled ?? 0} / ${sp.cur ?? 0} 格` +
+    (spExp ? `　${spExp} 到期` : "") + (sp.ok === false ? `（读取失败：${sp.message || sp.code || ""}）` : "");
   $("cb-change").innerHTML = (ch.cards || []).length
     ? cbSortCards(ch.cards).map((c) => cbCardHtml(c, 0)).join("")
     : `<div class="cb-empty">换卡箱没有卡</div>`;
   $("cb-store").innerHTML = (st.cards || []).length
     ? cbSortCards(st.cards).map((c) => cbCardHtml(c, 1)).join("")
     : `<div class="cb-empty">保险箱没有卡</div>`;
-  $("cb-hint").textContent = `换卡箱 ${ch.filled ?? 0} 张 / 保险箱 ${st.filled ?? 0} 张`
-    + (st.filled ? `　│　保险箱的卡不能直接卖，需先「移回换卡箱」` : "");
+  $("cb-simple").innerHTML = (sp.cards || []).length
+    ? cbSortCards(sp.cards).map((c) => cbCardHtml(c, 2)).join("")
+    : `<div class="cb-empty">简易箱没有卡</div>`;
+  $("cb-hint").textContent = `换卡箱 ${ch.filled ?? 0} 张 / 保险箱 ${st.filled ?? 0} 张` +
+    (sp.cards ? ` / 简易箱 ${sp.filled ?? 0} 张` : "") +
+    (st.filled ? `　│　保险箱的卡不能直接卖，需先「移回换卡箱」` : "") +
+    (sp.cards ? `　│　简易箱是临时卡（到期消失），可「移入保险箱」保住` : "");
   document.querySelectorAll("#pane-cardbox .cbacts button").forEach((b) => b.onclick = onCbAction);
 }
 
@@ -3197,6 +3216,11 @@ async function onCbAction(e) {
       const d = await (await fetch(`/api/box/sell?card_id=${id}&slot=${slot}&box_type=${bt}`, { method: "POST" })).json();
       log(`卖卡 slot ${slot}（${box === 0 ? "换卡箱" : "保险箱"}）：${d.ok ? `成功 +${price} 金` : "失败 " + (d.message || d.code)}`,
           d.ok ? "ok" : "err");
+    } else if (act === "tempmove") {
+      const tmtype = Number(b.dataset.tmtype);
+      const toName = tmtype === 1 ? "保险箱" : "简易箱";
+      const d = await (await fetch(`/api/box/tempmove?card_id=${id}&slot=${slot}&type=${tmtype}`, { method: "POST" })).json();
+      log(`简易箱移动 slot ${slot} → ${toName}：${d.ok ? (d.message || "成功") : "失败 " + (d.message || d.code)}`, d.ok ? "ok" : "err");
     } else {
       const toName = box === 0 ? "保险箱" : "换卡箱";
       const d = await (await fetch(`/api/box/move?card_id=${id}&slot=${slot}&from_box=${box}`, { method: "POST" })).json();
