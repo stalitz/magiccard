@@ -4842,11 +4842,26 @@ function homeLogStep(stp) {
   // __done__ 由 homeRunAll 统一收尾，这里不单独打
 }
 
+let homeAllRunning = false;
 async function homeRunAll(btn) {
+  if (homeAllRunning) { mlog("[一键全部] 已有任务在进行中，忽略重复点击", "warn"); return; }
   const done = busyBtn(btn, "运行中…", "一键全部（自动跑完）");
   const note = $("home-all-st");
   if (note) note.textContent = "运行中，实时日志滚动中…";
   let finished = false, failed = false;
+  homeAllRunning = true;
+  let lastData = Date.now();
+  // 看门狗：长时间无新数据（疑似后端卡住/流未关闭）时强制复原按钮并提示，
+  // 避免「一直显示 运行中…、不知道跑完没」。后端并发锁会拦下重复点击。
+  const watchdog = setInterval(() => {
+    if (finished || failed) return;
+    const quiet = Date.now() - lastData;
+    if (quiet > 120000) {
+      if (note) note.textContent = "已超过 2 分钟无新日志：可能已完成或后端卡住 —— 按钮已恢复，刷新页面查看真实进度（重跑会被并发保护拦下）";
+      homeAllRunning = false;
+      done();
+    }
+  }, 5000);
   try {
     // SSE：后端每完成一步推一行，前端边收边显示（不再等整段跑完）
     const resp = await fetch("/api/home/all", { method: "POST",
@@ -4858,6 +4873,7 @@ async function homeRunAll(btn) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      lastData = Date.now();
       buf += decoder.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf("\n\n")) >= 0) {
@@ -4867,15 +4883,18 @@ async function homeRunAll(btn) {
         const payload = line.slice(5).trim();
         if (!payload) continue;
         let stp; try { stp = JSON.parse(payload); } catch { continue; }
-        if (stp.act === "__done__") finished = true;
-        if (stp.act === "__error__") failed = true;
+        if (stp.act === "__done__") { finished = true; break; }
+        if (stp.act === "__error__") { failed = true; break; }
         homeLogStep(stp);
       }
+      if (finished || failed) break;   // 收到收尾步立即结束，不依赖流的 TCP 关闭
     }
   } catch (e) {
     mlog(`[一键全部] 流读取失败：${e}`, "err");
     failed = true;
   } finally {
+    clearInterval(watchdog);
+    homeAllRunning = false;
     if (note) note.textContent = failed ? "中断（看日志）" : (finished ? "" : "中断（看日志）");
     await loadHomeState();
     done();
@@ -4903,6 +4922,7 @@ async function streamRun(url, opts = {}) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    let term = false;   // 收到终步即退出外层读取循环，不依赖流的 TCP 关闭
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -4915,10 +4935,12 @@ async function streamRun(url, opts = {}) {
         const payload = line.slice(5).trim();
         if (!payload) continue;
         let stp; try { stp = JSON.parse(payload); } catch { continue; }
-        if (stp.act === "__done__") { final = stp; continue; }
-        if (stp.act === "__error__") { final = stp; if (onStep) onStep(stp); continue; }
+        // 后端 __done__ 总是最后一步，之后无数据，提前退出安全。
+        if (stp.act === "__done__") { final = stp; term = true; break; }
+        if (stp.act === "__error__") { final = stp; if (onStep) onStep(stp); term = true; break; }
         if (onStep) onStep(stp);
       }
+      if (term) break;
     }
   } catch (e) {
     const err = { act: "__error__", ok: false, message: `流读取失败：${e}` };

@@ -70,6 +70,10 @@ QR_TTL = 100.0
 # 单飞锁：避免并发 login_qr 同时调 get_qr 产生两个不同 qrsig，导致前端显示的码与 poll 用的码错位
 _qr_gen_lock = asyncio.Lock()
 
+# 「一键全部」并发保护：run_all 串发复用全局登录 session，重复点击同时跑会互相串响应、
+# 把某个 _act 卡死（前端 reader.read 永远等不到 done → 一直显示「运行中…」）。已在跑则拦下。
+_home_all_running = False
+
 
 @app.get("/api/login/qr")
 async def login_qr(force: int = 0):
@@ -2877,11 +2881,23 @@ async def home_all():
         return err
 
     async def gen():
+        global _home_all_running
+        # 并发保护：run_all 会复用全局登录 session 串发请求，重复点击同时跑会互相串响应、
+        # 把某个 _act 卡死（前端 reader.read 永远等不到 done → 一直显示「运行中…」）。
+        # 用布尔标志做「检查即设置」（check 与 set 之间无 await，asyncio 单线程下天然原子），
+        # 已在跑则直接返回错误步、绝不排队等释放后再跑第二遍。
+        if _home_all_running:
+            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': '已有「一键全部」任务在进行中，请稍后再试（或刷新页面确认是否已完成）'}, ensure_ascii=False)}\n\n"
+            return
+        _home_all_running = True
         try:
-            async for step in ch.run_all(_session):
-                yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
-        except Exception as e:  # noqa: BLE001
-            yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+            try:
+                async for step in ch.run_all(_session):
+                    yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
+            except Exception as e:  # noqa: BLE001
+                yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
+        finally:
+            _home_all_running = False
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
