@@ -96,10 +96,11 @@ function setsBadge(o) {
     ? `<span class="own-badge sets zero">未炼</span>`
     : `<span class="own-badge sets zero mod">非集卡册套</span>`;
 }
-// 「主题秀 N/M」徽章：show = 已收集立绘数（card_collection_get 的 cnt），
-// show_total = 该套立绘总数（套卡静态数据 t[9] 项数：非1星全4，1星多4/少数为1）。
-// cnt 可能含重复选同立绘(延长QQ秀有效期)而大于总数，显示封顶到总数；n<total 即「未集满」标红。
-// 1 星套不再排除——只有 show_total=0(道具卡等)或无收藏数据的模块套才显示「主题秀 —」。
+// 「主题秀 N/M」徽章：show = 已收集立绘数（来自 card_collection_get 的 qqshow_str，
+//   经 gift_list 翻实例 id 比对得出，后端 _ob_of 计算）——这是「主题秀是否集满」的唯一真源。
+//   注意：后端返回的 show 绝不用 cnt（cnt=持有整套数/升级徽章，会随升级消耗而下降）
+//   也不用 num（集齐次数）。show_total = 该套立绘总数（套卡静态数据 t[9] 项数）。
+//   show < total 即「未集满」标红。1 星套：只有 show_total=0(道具卡等)或无数据才显示「主题秀 —」。
 function showBadge(o) {
   const n = o.show == null ? null : (o.show | 0);
   const total = o.show_total | 0;
@@ -2361,6 +2362,9 @@ async function doSwap(friend, dstId, dstSlot, srcId, srcSlot) {
 // 卡库查询
 // ============================================================
 let priceChipsLoaded = false;
+let allPrices = [];          // [{price, n}]  全量面额
+let afFiltered = [];         // 过滤后的面额
+const AF_ITEM_H = 30;        // 每行高度(px)，需与 CSS 一致
 
 async function initLibOnce() {
   if (priceChipsLoaded) return;
@@ -2368,17 +2372,8 @@ async function initLibOnce() {
   try {
     const d = await (await fetch("/api/cards/prices")).json();
     if (d.ok && d.prices && d.prices.length) {
-      const box = $("lib-pricechips");
-      box.innerHTML = d.prices.map((p) =>
-        `<span class="chip" data-price="${p.price}" title="共 ${p.n} 张">面值 ${p.price}</span>`).join("");
-      box.querySelectorAll(".chip").forEach((c) => {
-        c.onclick = () => {
-          box.querySelectorAll(".chip").forEach((x) => x.classList.remove("active"));
-          c.classList.add("active");
-          $("lib-price").value = c.dataset.price;
-          runCardQuery();
-        };
-      });
+      allPrices = d.prices;
+      buildAllFaces();
     }
   } catch { /* 非关键 */ }
   // 模式切换默认动作
@@ -2386,13 +2381,136 @@ async function initLibOnce() {
   runCardQuery();
 }
 
+function buildAllFaces() {
+  const toggle = $("lib-allfaces-toggle");
+  const panel = $("lib-allfaces-panel");
+  const backdrop = $("lib-af-backdrop");
+  const commonEl = $("lib-af-common");
+  const rangesEl = $("lib-af-ranges");
+  const amountsEl = $("lib-af-amounts");
+  const search = $("lib-af-search");
+
+  // 一级：金额范围
+  const RANGES = [
+    { key: "0-100",    label: "0–100",    lo: 0,    hi: 100 },
+    { key: "100-300",  label: "100–300",  lo: 100,  hi: 300 },
+    { key: "300-600",  label: "300–600",  lo: 300,  hi: 600 },
+    { key: "600-1000", label: "600–1000", lo: 600,  hi: 1000 },
+    { key: "1000+",    label: "1000+",    lo: 1000, hi: Infinity },
+  ];
+
+  // 常用面额：被套卡使用数(themes)最高的前 N 个 → 可直接点
+  const COMMON_N = 16;
+  const common = [...allPrices]
+    .sort((a, b) => (b.themes - a.themes) || (b.n - a.n))
+    .slice(0, COMMON_N);
+
+  let curRange = "0-100";
+
+  function openPanel() {
+    panel.classList.remove("hidden");
+    backdrop.classList.remove("hidden");
+    toggle.textContent = "所有面额 ▴";
+  }
+  function closePanel() {
+    panel.classList.add("hidden");
+    backdrop.classList.add("hidden");
+    toggle.textContent = "所有面额 ▾";
+  }
+  function pickPrice(price) {
+    $("lib-kw").value = price;
+    closePanel();
+    runCardQuery();
+  }
+
+  // 常用金额 chips
+  function renderCommon() {
+    commonEl.innerHTML =
+      '<span class="af-title">常用面额（可直接点）</span>' +
+      common.map((p) =>
+        `<span class="pill" data-price="${p.price}">${p.price}` +
+        `<span class="t">${p.themes}套</span></span>`).join("");
+  }
+
+  // 一级：范围 tab
+  function renderRanges() {
+    rangesEl.innerHTML = RANGES.map((r) => {
+      const c = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi).length;
+      return `<span class="rtab ${r.key === curRange ? "active" : ""}" data-key="${r.key}">` +
+             `${r.label}<span class="rc">${c}</span></span>`;
+    }).join("");
+  }
+
+  // 二级：选中范围内金额，按 100 宽分成多组
+  function renderAmounts() {
+    const r = RANGES.find((x) => x.key === curRange);
+    let list = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi);
+    const f = search.value.trim();
+    if (f) list = list.filter((p) => String(p.price).includes(f));
+    const groups = [];
+    let gLo = r.lo;
+    while (gLo < r.hi) {
+      const gHi = Math.min(gLo + 100, r.hi);
+      const items = list.filter((p) => p.price >= gLo && p.price < gHi);
+      if (items.length) groups.push({ lo: gLo, hi: gHi, items });
+      gLo = gHi;
+    }
+    if (!groups.length) {
+      amountsEl.innerHTML = '<div class="af-empty">该范围内无面值</div>';
+      return;
+    }
+    amountsEl.innerHTML = groups.map((g) => {
+      const head = g.hi === Infinity ? `${g.lo}+` : `${g.lo}–${g.hi}`;
+      const pills = g.items.map((p) =>
+        `<span class="apill" data-price="${p.price}">${p.price}` +
+        `<span class="ac">${p.n}</span></span>`).join("");
+      return `<div class="af-group"><div class="gh">${head}（${g.items.length}）</div>` +
+             `<div class="gw">${pills}</div></div>`;
+    }).join("");
+  }
+
+  toggle.onclick = () => {
+    if (panel.classList.contains("hidden")) {
+      search.value = "";
+      renderAmounts();
+      openPanel();
+    } else {
+      closePanel();
+    }
+  };
+  backdrop.onclick = closePanel;
+  rangesEl.onclick = (e) => {
+    const t = e.target.closest(".rtab");
+    if (!t) return;
+    curRange = t.dataset.key;
+    search.value = "";
+    renderRanges();
+    renderAmounts();
+  };
+  amountsEl.onclick = (e) => {
+    const t = e.target.closest(".apill");
+    if (t) pickPrice(t.dataset.price);
+  };
+  commonEl.onclick = (e) => {
+    const t = e.target.closest(".pill");
+    if (t) pickPrice(t.dataset.price);
+  };
+  search.oninput = renderAmounts;
+
+  renderCommon();
+  renderRanges();
+}
+
 function setLibMode(mode) {
   libState.mode = mode;
   document.querySelectorAll("#lib-mode button").forEach((b) =>
     b.classList.toggle("active", b.dataset.mode === mode));
   const isPrice = mode === "price";
-  $("lib-price").classList.toggle("hidden", !isPrice);
-  $("lib-pricechips").classList.toggle("hidden", !isPrice);
+  $("lib-allfaces-toggle").classList.toggle("hidden", !isPrice);
+  if (!isPrice) {
+    $("lib-allfaces-panel").classList.add("hidden");
+    $("lib-af-backdrop").classList.add("hidden");
+  }
   $("lib-own-wrap").classList.toggle("hidden", !isPrice);
   $("lib-sep1").classList.toggle("hidden", !isPrice);
   $("lib-themefilter").classList.toggle("hidden", isPrice);
@@ -2418,8 +2536,12 @@ $("lib-go").onclick = () => {
 $("lib-kw").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("lib-go").click();
 });
-$("lib-price").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("lib-go").click();
+// 面值查卡：输入即搜（即时，debounce），纯数字→按面额，文字→按卡名/套名
+let libKwTimer;
+$("lib-kw").addEventListener("input", () => {
+  if (libState.mode !== "price") return;
+  clearTimeout(libKwTimer);
+  libKwTimer = setTimeout(runCardQuery, 250);
 });
 $("lib-own").onchange = (e) => {
   libState.ownOnly = e.target.checked;
@@ -2475,10 +2597,11 @@ document.querySelectorAll("#lib-sourcefilter .chip").forEach((c) => {
 });
 
 async function runCardQuery() {
-  const price = ($("lib-price").value || "").trim();
-  const kw = ($("lib-kw").value || "").trim();
+  const raw = ($("lib-kw").value || "").trim();
+  const price = /^\d+$/.test(raw) ? raw : "";
+  const kw = price ? "" : raw;
   if (!price && !kw) {
-    $("lib-list").innerHTML = '<div class="empty-tip">输入面值（如 40）或卡名关键词后点「查」。</div>';
+    $("lib-list").innerHTML = '<div class="empty-tip">在上方搜索框输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>点「所有面额 ▾」可展开全量面额列表。</div>';
     $("lst-cnt").textContent = ""; $("lst-foot").textContent = "";
     return;
   }

@@ -766,31 +766,32 @@ async def _mini_sets_map() -> dict[int, tuple[int, int]]:
 
 
 # ---- 主题秀（QQ秀立绘）收集状态：card_collection_get 才是真源 ----
-# 每套 <Node theme_id ... cnt 已收集立绘数 total_cnt 该套立绘总数 qqshow_str 已收集立绘id>。
-# 早期卡 QQ秀分男女，用户常只选男立绘，所以「集齐多次(num 大)」≠「立绘集满(cnt=total)」。
-# 不能用 card_mini_get 的 num 估算主题秀，必须读这里。变化频率低，短时缓存。
+# 每套 <Node theme_id ... cnt(持有整套数/升级用) total_cnt(集齐次数=num) qqshow_str(已收集立绘实例) ...>。
+# ⚠️ 字段语义实锤（2026-10-17 三轮纠错·真机对照闹元宵 tid=317）：
+#   · cnt = **当前持有的整套装数**（界面左上角徽章数字，用于收集等级 铜晋→银晋→金晋 升级：
+#          每次升级花 3 套、最少留 1 套，故需 ≥4 套才能升一级）；它**不是**「已获得立绘数」。
+#   · qqshow_str = **已收集的主题秀立绘实例 id 列表**（`&#x2C;` 分隔）——这才是「主题秀是否集满」的
+#          唯一真源。把套卡 t[9] 的 giftid 经 gift_list 翻成实例 id 比对即可得「已获得立绘数 ob」。
+#   · total_cnt ≡ 集齐次数（与 card_mini_get 的 num 全量相等，会随上交增长），非立绘总数。
+#   · 早期 QQ 秀分男女、重复选同立绘只延长有效期不计数 → 老套 cnt/num 都 ≠ 立绘集满。
+# 故 list_themes / theme_detail 的 `show` 一律用 ob（qqshow 已获得数），绝不用 cnt/num。
 _collection_cache: dict = {"ts": 0.0, "data": None}
 COLL_TTL = 120.0
 
 
-async def _collection_map() -> dict[int, tuple[int, int, int, int]]:
-    """{theme_id: (cnt, total_cnt, latest_ts, early_ts)}，来自 card_collection_get 的 <Node ...>。
+async def _collection_map() -> dict[int, tuple[int, int, int, int, str]]:
+    """{theme_id: (cnt, total_cnt, latest_ts, early_ts, qqshow_str)}，来自 card_collection_get 的 <Node ...>。
 
-    实测语义（2026-10-08 jikace.har + 真机对照；2026-10-09 修正 show_total 来源；
-    2026-10-13 增补 latest_ts/early_ts）：
-    - cnt = 已收集（已获得）的主题秀立绘数——游戏集卡册 UI 的「已获得」章数量，
-      是「主题秀是否集满」的判定依据（与 num 无关）；cnt 可因重复选同立绘而 > 立绘总数。
-    - total_cnt ≡ 集齐次数（与 card_mini_get 的 num 全量相等，会随收集增长），
-      不是立绘总数，本服务不再用它作 show_total。
-    - latest_ts / early_ts = 该套最后/最早收集主题秀的时间戳（Unix 秒），用于「最后收集时间」展示；
-      一套都未集（不在响应里）的套这两个值记 0。
-    - 该套【立绘总数】取自套卡静态数据 theme_card_list 的 t[9] 项数（card_query.indexes
-      的 show_total 字段）：非 1 星全 4；1 星多数 4、仅时尚男/女·经典男/女 4 套为 1；
-      道具卡=0。list_themes / theme_detail 的 show_total 即此值。
-    - 早期 QQ 秀时代重复选同一立绘只延长有效期不计数 → 老套 cnt<num（真实口径）。
-    - 不在响应里的套（旅行/挖地/三国/西游等模块套，以及**一套都没收集过**的套）无主题秀数据；
-      后者 cnt=0 也算「未集齐」，theme_show=1 筛选时一并纳入（2026-10-13 修正：旧逻辑因
-      `tid not in collection` 把一套都未集的套漏掉）。
+    实测语义（2026-10-17 实锤，推翻 10-09/10-13 旧注）：
+    - cnt = 持有整套数（界面左上角徽章，收集等级升级用），**不是**立绘获得数，会随升级消耗而下降
+      （闹元宵 升级金晋后 cnt 3→1）。
+    - total_cnt ≡ 集齐次数 num（累加不消耗），非立绘总数。
+    - qqshow_str = 已收集立绘实例 id（`&#x2C;` 分隔）；ob = 其中匹配该套 t[9] 立绘模板的个数 =
+      「主题秀是否已集满」的唯一真源，由 card_query._ob_of 计算。
+    - latest_ts / early_ts = 最后/最早收集主题秀时间戳（Unix 秒），用于「最后收集时间」展示；
+      一套都未集（不在响应里）的套 cnt/ts 记 0、qqshow_str 空。
+    - 立绘总数取自套卡静态数据 theme_card_list 的 t[9] 项数（card_query.indexes 的 show_total）：
+      非 1 星全 4；1 星多数 4、仅时尚男/女·经典男/女 4 套为 1；道具卡=0。
     """
     now = _tmod.time()
     if _collection_cache["data"] is not None and now - _collection_cache["ts"] < COLL_TTL:
@@ -798,7 +799,7 @@ async def _collection_map() -> dict[int, tuple[int, int, int, int]]:
     try:
         r = await _session.post(EP_COLLECTION_GET)
         raw = r.get("raw", "") or ""
-        mp: dict[int, tuple[int, int, int, int]] = {}
+        mp: dict[int, tuple[int, int, int, int, str]] = {}
         for spec in re.findall(r"<Node\s+([^>]*?)/?>", raw):
             th = re.search(r'theme_id="(\d+)"', spec)
             cnt = re.search(r'\bcnt="(\d+)"', spec)
@@ -807,9 +808,11 @@ async def _collection_map() -> dict[int, tuple[int, int, int, int]]:
                 continue
             lt = re.search(r'\blatest_ts="(\d+)"', spec)
             et = re.search(r'\bearly_ts="(\d+)"', spec)
+            qs = re.search(r'qqshow_str="([^"]*)"', spec)
             mp[int(th.group(1))] = (int(cnt.group(1)), int(tc.group(1)),
                                     int(lt.group(1)) if lt else 0,
-                                    int(et.group(1)) if et else 0)
+                                    int(et.group(1)) if et else 0,
+                                    qs.group(1) if qs else "")
         _collection_cache["data"] = mp
         _collection_cache["ts"] = now
         return mp

@@ -252,6 +252,43 @@
   .lib-toolbar .sep{width:1px;height:22px;background:var(--line)}
   .lib-toolbar label.check{display:flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);cursor:pointer}
   .chiprow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  /* 面值全量面板：浮层（不撑开下方），两级结构 = 范围(一级) → 金额分组(二级) + 常用金额直点 */
+  .lib-toolbar{position:relative}              /* 作为浮层定位上下文 */
+  .af-backdrop{position:fixed;inset:0;z-index:40}  /* 透明捕获层，点外部关闭 */
+  .allfaces{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:400px;max-width:92vw;
+    border:1px solid var(--line);border-radius:12px;background:#fff;
+    box-shadow:0 10px 30px rgba(0,0,0,.16);padding:12px;box-sizing:border-box}
+  .allfaces .af-title{font-size:12px;color:var(--muted);margin:0 0 6px}
+  /* 常用金额：可直接点 */
+  .af-common{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;
+    padding-bottom:10px;border-bottom:1px dashed var(--line)}
+  .af-common .pill{padding:4px 11px;border-radius:14px;border:1px solid var(--line);
+    background:#f5f7fa;font-size:12.5px;color:#333;cursor:pointer;font-variant-numeric:tabular-nums}
+  .af-common .pill:hover{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
+  .af-common .pill .t{color:var(--muted);font-size:10.5px;margin-left:3px}
+  .af-common .pill:hover .t{color:rgba(255,255,255,.85)}
+  /* 一级：范围 tab */
+  .af-ranges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  .af-ranges .rtab{padding:4px 12px;border-radius:8px;border:1px solid var(--line);
+    background:#fff;font-size:13px;color:var(--muted);cursor:pointer}
+  .af-ranges .rtab:hover{border-color:var(--qq-blue);color:var(--qq-blue-d)}
+  .af-ranges .rtab.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
+  .af-ranges .rtab .rc{font-size:10.5px;opacity:.7;margin-left:4px}
+  /* 二级：金额按 100 宽分组的网格 */
+  .af-amounts{max-height:260px;overflow-y:auto;overflow-x:hidden;padding-right:2px}
+  .af-group{margin-bottom:8px}
+  .af-group .gh{font-size:11px;color:var(--muted);margin:2px 0 4px;position:sticky;top:0;
+    background:#fff;padding:2px 0}
+  .af-group .gw{display:flex;flex-wrap:wrap;gap:5px}
+  .af-group .apill{padding:3px 9px;border-radius:7px;border:1px solid var(--line);
+    background:#fff;font-size:12px;color:#333;cursor:pointer;font-variant-numeric:tabular-nums}
+  .af-group .apill:hover{background:#eaf6fd;border-color:var(--qq-blue);color:var(--qq-blue-d)}
+  .af-group .apill .ac{color:var(--muted);font-size:10px;margin-left:3px}
+  .af-empty{padding:14px 4px;color:var(--muted);font-size:12px}
+  .af-search{width:100%;box-sizing:border-box;height:30px;line-height:30px;margin-top:8px;
+    padding:0 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
+    background:#fafbfc;outline:none}
+  .af-search:focus{border-color:var(--qq-blue);background:#fff}
   .chip{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:#fff;
     font-size:12.5px;color:var(--muted);cursor:pointer}
   .chip.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
@@ -866,12 +903,18 @@
               <button data-mode="price" class="active">面值查卡</button>
               <button data-mode="theme">浏览套卡</button>
             </div>
-            <input type="text" id="lib-kw" placeholder="关键词（卡名 / 套名）">
-            <input type="text" id="lib-price" class="num hidden" placeholder="面值，如 40">
+            <input type="text" id="lib-kw" placeholder="搜面额（如 40）/ 卡名 / 套名…" autocomplete="off">
             <button id="lib-go" class="btn sm primary">查</button>
             <label class="check hidden" id="lib-own-wrap"><input type="checkbox" id="lib-own"> 只看我持有的</label>
             <div class="sep hidden" id="lib-sep1"></div>
-            <div class="chiprow" id="lib-pricechips"></div>
+            <button class="btn sm ghost" id="lib-allfaces-toggle" type="button">所有面额 ▾</button>
+            <div class="af-backdrop hidden" id="lib-af-backdrop"></div>
+            <div class="allfaces hidden" id="lib-allfaces-panel">
+              <div class="af-common" id="lib-af-common"></div>
+              <div class="af-ranges" id="lib-af-ranges"></div>
+              <div class="af-amounts" id="lib-af-amounts"></div>
+              <input type="text" id="lib-af-search" class="af-search" placeholder="在此范围内搜面额…" autocomplete="off">
+            </div>
             <div class="chiprow hidden" id="lib-modfilter">
               <span class="chip active" data-m="main">普通卡</span>
               <span class="chip" data-m="挖地">挖地</span>
@@ -918,7 +961,7 @@
                 <span class="cnt" id="lst-cnt"></span>
                 <div class="spacer"></div>
               </div>
-              <div class="lst" id="lib-list"><div class="empty-tip">输入面值（如 40）点「查」，或点右侧常用面值。<br>支持关键词模糊匹配卡名 / 套名。</div></div>
+              <div class="lst" id="lib-list"><div class="empty-tip">在上方搜索框直接输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>点「所有面额 ▾」可展开全量面额列表（可滚动 + 过滤）。</div></div>
               <div class="lib-foot" id="lst-foot"></div>
             </div>
             <!-- 右：套卡 / 路径明细 -->
@@ -1675,7 +1718,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261017a"></script>
+<script src="/app.js?v=20261018b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
