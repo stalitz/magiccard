@@ -2385,12 +2385,14 @@ function buildAllFaces() {
   const toggle = $("lib-allfaces-toggle");
   const panel = $("lib-allfaces-panel");
   const backdrop = $("lib-af-backdrop");
-  const commonEl = $("lib-af-common");
-  const rangesEl = $("lib-af-ranges");
-  const amountsEl = $("lib-af-amounts");
-  const search = $("lib-af-search");
+  const search = $("lib-af-search");        // 浮层：找具体面额
+  const afAmounts = $("lib-af-amounts");     // 浮层结果
+  // 内联（直接在页面上点）
+  const fCommon = $("lib-faces-common");
+  const fRanges = $("lib-faces-ranges");
+  const fAmounts = $("lib-faces-amounts");
 
-  // 一级：金额范围
+  // 一级：金额范围（hi=Infinity 仅用于过滤；分组用 Map 分桶，绝不用它做循环上界）
   const RANGES = [
     { key: "0-100",    label: "0–100",    lo: 0,    hi: 100 },
     { key: "100-300",  label: "100–300",  lo: 100,  hi: 300 },
@@ -2407,98 +2409,112 @@ function buildAllFaces() {
 
   let curRange = "0-100";
 
-  function openPanel() {
-    panel.classList.remove("hidden");
-    backdrop.classList.remove("hidden");
-    toggle.textContent = "所有面额 ▴";
-  }
-  function closePanel() {
-    panel.classList.add("hidden");
-    backdrop.classList.add("hidden");
-    toggle.textContent = "所有面额 ▾";
-  }
   function pickPrice(price) {
     $("lib-kw").value = price;
     closePanel();
     runCardQuery();
   }
 
-  // 常用金额 chips
+  // ---- 浮层：找具体面额（只有这里进浮层） ----
+  function renderSearch() {
+    const f = search.value.trim();
+    let list = allPrices;
+    if (f) list = allPrices.filter((p) => String(p.price).includes(f));
+    list = list.slice(0, 300);          // 上限防卡
+    if (!list.length) {
+      afAmounts.innerHTML = '<div class="af-empty">无匹配面额</div>';
+      return;
+    }
+    afAmounts.innerHTML = list.map((p) =>
+      `<span class="apill" data-price="${p.price}">${p.price}` +
+      `<span class="ac">${p.n}</span></span>`).join("");
+  }
+  function openPanel() {
+    panel.classList.remove("hidden");
+    backdrop.classList.remove("hidden");
+    toggle.textContent = "找面额 ▴";
+    search.value = "";
+    renderSearch();
+    search.focus();
+  }
+  function closePanel() {
+    panel.classList.add("hidden");
+    backdrop.classList.add("hidden");
+    toggle.textContent = "找面额 ▾";
+  }
+
+  // ---- 内联：常用 + 范围 + 分组金额（全部直接点） ----
   function renderCommon() {
-    commonEl.innerHTML =
+    fCommon.innerHTML =
       '<span class="af-title">常用面额（可直接点）</span>' +
       common.map((p) =>
         `<span class="pill" data-price="${p.price}">${p.price}` +
         `<span class="t">${p.themes}套</span></span>`).join("");
   }
-
-  // 一级：范围 tab
   function renderRanges() {
-    rangesEl.innerHTML = RANGES.map((r) => {
+    fRanges.innerHTML = RANGES.map((r) => {
       const c = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi).length;
       return `<span class="rtab ${r.key === curRange ? "active" : ""}" data-key="${r.key}">` +
              `${r.label}<span class="rc">${c}</span></span>`;
     }).join("");
   }
-
-  // 二级：选中范围内金额，按 100 宽分成多组
+  // 二级：按 100 宽分桶（Map 而非 while(hi) 循环 → 避开 1000+ 的 Infinity 死循环）
   function renderAmounts() {
     const r = RANGES.find((x) => x.key === curRange);
-    let list = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi);
-    const f = search.value.trim();
-    if (f) list = list.filter((p) => String(p.price).includes(f));
-    const groups = [];
-    let gLo = r.lo;
-    while (gLo < r.hi) {
-      const gHi = Math.min(gLo + 100, r.hi);
-      const items = list.filter((p) => p.price >= gLo && p.price < gHi);
-      if (items.length) groups.push({ lo: gLo, hi: gHi, items });
-      gLo = gHi;
+    const list = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi);
+    const buckets = new Map();
+    for (const p of list) {
+      const b = Math.floor(p.price / 100) * 100;
+      if (!buckets.has(b)) buckets.set(b, []);
+      buckets.get(b).push(p);
     }
-    if (!groups.length) {
-      amountsEl.innerHTML = '<div class="af-empty">该范围内无面值</div>';
+    const keys = [...buckets.keys()].sort((a, b) => a - b);
+    if (!keys.length) {
+      fAmounts.innerHTML = '<div class="af-empty">该范围内无面值</div>';
       return;
     }
-    amountsEl.innerHTML = groups.map((g) => {
-      const head = g.hi === Infinity ? `${g.lo}+` : `${g.lo}–${g.hi}`;
-      const pills = g.items.map((p) =>
+    const lastKey = keys[keys.length - 1];
+    fAmounts.innerHTML = keys.map((b) => {
+      const head = (r.hi === Infinity && b === lastKey) ? `${b}+` : `${b}–${b + 100}`;
+      const items = buckets.get(b);
+      const pills = items.map((p) =>
         `<span class="apill" data-price="${p.price}">${p.price}` +
         `<span class="ac">${p.n}</span></span>`).join("");
-      return `<div class="af-group"><div class="gh">${head}（${g.items.length}）</div>` +
+      return `<div class="af-group"><div class="gh">${head}（${items.length}）</div>` +
              `<div class="gw">${pills}</div></div>`;
     }).join("");
   }
 
+  // 事件
   toggle.onclick = () => {
-    if (panel.classList.contains("hidden")) {
-      search.value = "";
-      renderAmounts();
-      openPanel();
-    } else {
-      closePanel();
-    }
+    if (panel.classList.contains("hidden")) openPanel();
+    else closePanel();
   };
   backdrop.onclick = closePanel;
-  rangesEl.onclick = (e) => {
-    const t = e.target.closest(".rtab");
-    if (!t) return;
-    curRange = t.dataset.key;
-    search.value = "";
-    renderRanges();
-    renderAmounts();
-  };
-  amountsEl.onclick = (e) => {
+  search.oninput = renderSearch;
+  afAmounts.onclick = (e) => {
     const t = e.target.closest(".apill");
     if (t) pickPrice(t.dataset.price);
   };
-  commonEl.onclick = (e) => {
+  fCommon.onclick = (e) => {
     const t = e.target.closest(".pill");
     if (t) pickPrice(t.dataset.price);
   };
-  search.oninput = renderAmounts;
+  fRanges.onclick = (e) => {
+    const t = e.target.closest(".rtab");
+    if (!t) return;
+    curRange = t.dataset.key;
+    renderRanges();
+    renderAmounts();
+  };
+  fAmounts.onclick = (e) => {
+    const t = e.target.closest(".apill");
+    if (t) pickPrice(t.dataset.price);
+  };
 
   renderCommon();
   renderRanges();
+  renderAmounts();
 }
 
 function setLibMode(mode) {
@@ -2511,6 +2527,7 @@ function setLibMode(mode) {
     $("lib-allfaces-panel").classList.add("hidden");
     $("lib-af-backdrop").classList.add("hidden");
   }
+  $("lib-faces").classList.toggle("hidden", !isPrice);
   $("lib-own-wrap").classList.toggle("hidden", !isPrice);
   $("lib-sep1").classList.toggle("hidden", !isPrice);
   $("lib-themefilter").classList.toggle("hidden", isPrice);
