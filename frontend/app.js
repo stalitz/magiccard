@@ -2382,12 +2382,12 @@ async function initLibOnce() {
 }
 
 function buildAllFaces() {
-  const toggle = $("lib-allfaces-toggle");
-  const panel = $("lib-allfaces-panel");
   const backdrop = $("lib-af-backdrop");
-  const commonEl = $("lib-af-common");   // 常用面额（浮层内，可直接点）
-  const rangesEl = $("lib-af-ranges");   // 一级：范围 tab
-  const amountsEl = $("lib-af-amounts"); // 二级：分组金额
+  const panel = $("lib-allfaces-panel");
+  const ptitle = $("lib-af-ptitle");
+  const amountsEl = $("lib-af-amounts");   // 浮层：点分组后列出的面额
+  const rangeBtns = $("lib-range-btns");   // 一级：范围按钮（内联）
+  const commonEl = $("lib-common");        // 常用面额（内联，不在浮层）
 
   // 一级：金额范围（hi=Infinity 仅用于过滤；分组用 Map 分桶，绝不用它做循环上界）
   const RANGES = [
@@ -2398,32 +2398,32 @@ function buildAllFaces() {
     { key: "1000+",    label: "1000+",    lo: 1000, hi: Infinity },
   ];
 
-  // 常用面额：被套卡使用数(themes)最高的前 N 个 → 可直接点
+  // 常用面额：被套卡使用数(themes)最高的前 N 个 → 另起一行全列出，直接点
   const COMMON_N = 16;
   const common = [...allPrices]
     .sort((a, b) => (b.themes - a.themes) || (b.n - a.n))
     .slice(0, COMMON_N);
-
-  let curRange = "0-100";
 
   function pickPrice(price) {
     $("lib-kw").value = price;
     closePanel();
     runCardQuery();
   }
-  function openPanel() {
+  function openPanel(rangeKey) {
+    const r = RANGES.find((x) => x.key === rangeKey);
+    ptitle.textContent = r.label + " 面额";
+    renderAmounts(r);
     panel.classList.remove("hidden");
     backdrop.classList.remove("hidden");
-    toggle.textContent = "查面额 ▴";
-    renderAmounts();   // 渲染当前范围的分组金额
+    rangeBtns.querySelectorAll(".rbtn").forEach((b) =>
+      b.classList.toggle("active", b.dataset.key === rangeKey));
   }
   function closePanel() {
     panel.classList.add("hidden");
     backdrop.classList.add("hidden");
-    toggle.textContent = "查面额 ▾";
+    rangeBtns.querySelectorAll(".rbtn").forEach((b) => b.classList.remove("active"));
   }
-
-  // 常用面额 chips
+  // 常用面额 chips（内联）
   function renderCommon() {
     commonEl.innerHTML =
       '<span class="af-title">常用面额（可直接点）</span>' +
@@ -2431,17 +2431,16 @@ function buildAllFaces() {
         `<span class="pill" data-price="${p.price}">${p.price}` +
         `<span class="t">${p.themes}套</span></span>`).join("");
   }
-  // 一级：范围 tab（每个带该区间面值数）
-  function renderRanges() {
-    rangesEl.innerHTML = RANGES.map((r) => {
+  // 一级：范围按钮（内联）
+  function renderRangeBtns() {
+    rangeBtns.innerHTML = RANGES.map((r) => {
       const c = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi).length;
-      return `<span class="rtab ${r.key === curRange ? "active" : ""}" data-key="${r.key}">` +
-             `${r.label}<span class="rc">${c}</span></span>`;
+      return `<span class="rbtn" data-key="${r.key}">${r.label}` +
+             `<span class="rc">${c}</span></span>`;
     }).join("");
   }
-  // 二级：按 100 宽分桶（Map 而非 while(hi) 循环 → 避开 1000+ 的 Infinity 死循环）；组内按金额升序
-  function renderAmounts() {
-    const r = RANGES.find((x) => x.key === curRange);
+  // 浮层：点分组后列出该范围面额，按 100 宽分桶 + 组内按金额升序
+  function renderAmounts(r) {
     const list = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi);
     const buckets = new Map();
     for (const p of list) {
@@ -2467,21 +2466,17 @@ function buildAllFaces() {
   }
 
   // 事件
-  toggle.onclick = () => {
-    if (panel.classList.contains("hidden")) openPanel();
-    else closePanel();
-  };
   backdrop.onclick = closePanel;
+  rangeBtns.onclick = (e) => {
+    const t = e.target.closest(".rbtn");
+    if (!t) return;
+    const key = t.dataset.key;
+    if (panel.dataset.range === key && !panel.classList.contains("hidden")) closePanel();
+    else { panel.dataset.range = key; openPanel(key); }
+  };
   commonEl.onclick = (e) => {
     const t = e.target.closest(".pill");
     if (t) pickPrice(t.dataset.price);
-  };
-  rangesEl.onclick = (e) => {
-    const t = e.target.closest(".rtab");
-    if (!t) return;
-    curRange = t.dataset.key;
-    renderRanges();
-    renderAmounts();
   };
   amountsEl.onclick = (e) => {
     const t = e.target.closest(".apill");
@@ -2489,7 +2484,7 @@ function buildAllFaces() {
   };
 
   renderCommon();
-  renderRanges();
+  renderRangeBtns();
 }
 
 function setLibMode(mode) {
@@ -2497,7 +2492,8 @@ function setLibMode(mode) {
   document.querySelectorAll("#lib-mode button").forEach((b) =>
     b.classList.toggle("active", b.dataset.mode === mode));
   const isPrice = mode === "price";
-  $("lib-allfaces-toggle").classList.toggle("hidden", !isPrice);
+  $("lib-range-btns").classList.toggle("hidden", !isPrice);
+  $("lib-common").classList.toggle("hidden", !isPrice);
   if (!isPrice) {
     $("lib-allfaces-panel").classList.add("hidden");
     $("lib-af-backdrop").classList.add("hidden");
@@ -2592,7 +2588,7 @@ async function runCardQuery() {
   const price = /^\d+$/.test(raw) ? raw : "";
   const kw = price ? "" : raw;
   if (!price && !kw) {
-    $("lib-list").innerHTML = '<div class="empty-tip">在上方搜索框输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>点「所有面额 ▾」可展开全量面额列表。</div>';
+    $("lib-list").innerHTML = '<div class="empty-tip">在上方搜索框输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>常用面额可直接点；点范围按钮（0–100 等）弹出该范围面额列表。</div>';
     $("lst-cnt").textContent = ""; $("lst-foot").textContent = "";
     return;
   }
