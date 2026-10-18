@@ -252,15 +252,30 @@
   .lib-toolbar .sep{width:1px;height:22px;background:var(--line)}
   .lib-toolbar label.check{display:flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);cursor:pointer}
   .chiprow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-  /* 面值快捷：常用面额 + 范围 + 分组金额，全部直接内联在页面上（不进浮层） */
-  .lib-toolbar{position:relative}              /* 作为浮层定位上下文 */
+  /* 面值快捷浮层：常用面额(直点) + 范围(一级) + 金额分组(二级)；浮在工具栏上，不撑开页面 */
+  .lib-toolbar{position:relative}              /* 浮层定位上下文 */
   .af-backdrop{position:fixed;inset:0;z-index:40}  /* 透明捕获层，点外部关闭 */
-  .allfaces{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:380px;max-width:92vw;
+  .allfaces{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:400px;max-width:92vw;
     border:1px solid var(--line);border-radius:12px;background:#fff;
     box-shadow:0 10px 30px rgba(0,0,0,.16);padding:12px;box-sizing:border-box}
-  .allfaces .af-title{font-size:12px;color:var(--muted);margin:0 0 6px}
+  /* 常用面额：可直接点 */
+  .af-common{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px;
+    padding-bottom:10px;border-bottom:1px dashed var(--line)}
+  .af-common .af-title{width:100%;font-size:12px;color:var(--muted);margin:0 0 2px}
+  .af-common .pill{padding:4px 11px;border-radius:14px;border:1px solid var(--line);
+    background:#f5f7fa;font-size:12.5px;color:#333;cursor:pointer;font-variant-numeric:tabular-nums}
+  .af-common .pill:hover{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
+  .af-common .pill .t{color:var(--muted);font-size:10.5px;margin-left:3px}
+  .af-common .pill:hover .t{color:rgba(255,255,255,.85)}
+  /* 一级：范围 tab */
+  .af-ranges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+  .af-ranges .rtab{padding:4px 12px;border-radius:8px;border:1px solid var(--line);
+    background:#fff;font-size:13px;color:var(--muted);cursor:pointer}
+  .af-ranges .rtab:hover{border-color:var(--qq-blue);color:var(--qq-blue-d)}
+  .af-ranges .rtab.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
+  .af-ranges .rtab .rc{font-size:10.5px;opacity:.7;margin-left:4px}
+  /* 二级：金额按 100 宽分组（浮层内滚动，不撑开页面） */
   .af-amounts{max-height:240px;overflow-y:auto;overflow-x:hidden;padding-right:2px}
-  .af-amounts.scroll{max-height:168px}         /* 内联版固定高度，不撑爆页面 */
   .af-group{margin-bottom:8px}
   .af-group .gh{font-size:11px;color:var(--muted);margin:2px 0 4px;position:sticky;top:0;
     background:#fff;padding:2px 0}
@@ -270,26 +285,6 @@
   .af-group .apill:hover{background:#eaf6fd;border-color:var(--qq-blue);color:var(--qq-blue-d)}
   .af-group .apill .ac{color:var(--muted);font-size:10px;margin-left:3px}
   .af-empty{padding:14px 4px;color:var(--muted);font-size:12px}
-  .af-search{width:100%;box-sizing:border-box;height:30px;line-height:30px;margin-top:8px;
-    padding:0 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;
-    background:#fafbfc;outline:none}
-  .af-search:focus{border-color:var(--qq-blue);background:#fff}
-  /* 内联面值快捷区 */
-  .lib-faces{margin-top:10px;border:1px solid var(--line);border-radius:10px;background:#fafbfc;padding:10px}
-  .lib-faces .af-common{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;
-    padding-bottom:8px;border-bottom:1px dashed var(--line)}
-  .lib-faces .af-common .pill{padding:4px 11px;border-radius:14px;border:1px solid var(--line);
-    background:#fff;font-size:12.5px;color:#333;cursor:pointer;font-variant-numeric:tabular-nums}
-  .lib-faces .af-common .pill:hover{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
-  .lib-faces .af-common .pill .t{color:var(--muted);font-size:10.5px;margin-left:3px}
-  .lib-faces .af-common .pill:hover .t{color:rgba(255,255,255,.85)}
-  .lib-faces .af-common .af-title{width:100%;font-size:12px;color:var(--muted);margin:0 0 2px}
-  .lib-faces .af-ranges{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-  .lib-faces .af-ranges .rtab{padding:4px 12px;border-radius:8px;border:1px solid var(--line);
-    background:#fff;font-size:13px;color:var(--muted);cursor:pointer}
-  .lib-faces .af-ranges .rtab:hover{border-color:var(--qq-blue);color:var(--qq-blue-d)}
-  .lib-faces .af-ranges .rtab.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
-  .lib-faces .af-ranges .rtab .rc{font-size:10.5px;opacity:.7;margin-left:4px}
   .chip{padding:4px 12px;border-radius:14px;border:1px solid var(--line);background:#fff;
     font-size:12.5px;color:var(--muted);cursor:pointer}
   .chip.active{background:var(--qq-blue);border-color:var(--qq-blue);color:#fff}
@@ -908,11 +903,11 @@
             <button id="lib-go" class="btn sm primary">查</button>
             <label class="check hidden" id="lib-own-wrap"><input type="checkbox" id="lib-own"> 只看我持有的</label>
             <div class="sep hidden" id="lib-sep1"></div>
-            <button class="btn sm ghost" id="lib-allfaces-toggle" type="button">找面额 ▾</button>
+            <button class="btn sm ghost" id="lib-allfaces-toggle" type="button">查面额 ▾</button>
             <div class="af-backdrop hidden" id="lib-af-backdrop"></div>
             <div class="allfaces hidden" id="lib-allfaces-panel">
-              <div class="af-title">找具体面额</div>
-              <input type="text" id="lib-af-search" class="af-search" placeholder="输入面额，如 40 / 305…" autocomplete="off">
+              <div class="af-common" id="lib-af-common"></div>
+              <div class="af-ranges" id="lib-af-ranges"></div>
               <div class="af-amounts" id="lib-af-amounts"></div>
             </div>
             <div class="chiprow hidden" id="lib-modfilter">
@@ -953,13 +948,6 @@
             </div>
           </div>
 
-          <!-- 面值快捷：常用面额 + 范围 + 分组金额，全部直接点（不进浮层） -->
-          <div class="lib-faces" id="lib-faces">
-            <div class="af-common" id="lib-faces-common"></div>
-            <div class="af-ranges" id="lib-faces-ranges"></div>
-            <div class="af-amounts scroll" id="lib-faces-amounts"></div>
-          </div>
-
           <div class="lib-body">
             <!-- 左：结果列表 -->
             <div class="lpanel">
@@ -968,7 +956,7 @@
                 <span class="cnt" id="lst-cnt"></span>
                 <div class="spacer"></div>
               </div>
-              <div class="lst" id="lib-list"><div class="empty-tip">在上方搜索框直接输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>下方「常用面额 / 范围 / 分组金额」可直接点；找不到具体面额点「找面额 ▾」搜索。</div></div>
+              <div class="lst" id="lib-list"><div class="empty-tip">在上方搜索框直接输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>点「查面额 ▾」可展开常用面额 / 范围 / 分组金额，直接点选。</div></div>
               <div class="lib-foot" id="lst-foot"></div>
             </div>
             <!-- 右：套卡 / 路径明细 -->
@@ -1725,7 +1713,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261018c"></script>
+<script src="/app.js?v=20261018d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

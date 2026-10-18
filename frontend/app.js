@@ -2385,12 +2385,9 @@ function buildAllFaces() {
   const toggle = $("lib-allfaces-toggle");
   const panel = $("lib-allfaces-panel");
   const backdrop = $("lib-af-backdrop");
-  const search = $("lib-af-search");        // 浮层：找具体面额
-  const afAmounts = $("lib-af-amounts");     // 浮层结果
-  // 内联（直接在页面上点）
-  const fCommon = $("lib-faces-common");
-  const fRanges = $("lib-faces-ranges");
-  const fAmounts = $("lib-faces-amounts");
+  const commonEl = $("lib-af-common");   // 常用面额（浮层内，可直接点）
+  const rangesEl = $("lib-af-ranges");   // 一级：范围 tab
+  const amountsEl = $("lib-af-amounts"); // 二级：分组金额
 
   // 一级：金额范围（hi=Infinity 仅用于过滤；分组用 Map 分桶，绝不用它做循环上界）
   const RANGES = [
@@ -2414,51 +2411,35 @@ function buildAllFaces() {
     closePanel();
     runCardQuery();
   }
-
-  // ---- 浮层：找具体面额（只有这里进浮层） ----
-  function renderSearch() {
-    const f = search.value.trim();
-    let list = allPrices;
-    if (f) list = allPrices.filter((p) => String(p.price).includes(f));
-    list = list.slice(0, 300);          // 上限防卡
-    if (!list.length) {
-      afAmounts.innerHTML = '<div class="af-empty">无匹配面额</div>';
-      return;
-    }
-    afAmounts.innerHTML = list.map((p) =>
-      `<span class="apill" data-price="${p.price}">${p.price}` +
-      `<span class="ac">${p.n}</span></span>`).join("");
-  }
   function openPanel() {
     panel.classList.remove("hidden");
     backdrop.classList.remove("hidden");
-    toggle.textContent = "找面额 ▴";
-    search.value = "";
-    renderSearch();
-    search.focus();
+    toggle.textContent = "查面额 ▴";
+    renderAmounts();   // 渲染当前范围的分组金额
   }
   function closePanel() {
     panel.classList.add("hidden");
     backdrop.classList.add("hidden");
-    toggle.textContent = "找面额 ▾";
+    toggle.textContent = "查面额 ▾";
   }
 
-  // ---- 内联：常用 + 范围 + 分组金额（全部直接点） ----
+  // 常用面额 chips
   function renderCommon() {
-    fCommon.innerHTML =
+    commonEl.innerHTML =
       '<span class="af-title">常用面额（可直接点）</span>' +
       common.map((p) =>
         `<span class="pill" data-price="${p.price}">${p.price}` +
         `<span class="t">${p.themes}套</span></span>`).join("");
   }
+  // 一级：范围 tab（每个带该区间面值数）
   function renderRanges() {
-    fRanges.innerHTML = RANGES.map((r) => {
+    rangesEl.innerHTML = RANGES.map((r) => {
       const c = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi).length;
       return `<span class="rtab ${r.key === curRange ? "active" : ""}" data-key="${r.key}">` +
              `${r.label}<span class="rc">${c}</span></span>`;
     }).join("");
   }
-  // 二级：按 100 宽分桶（Map 而非 while(hi) 循环 → 避开 1000+ 的 Infinity 死循环）
+  // 二级：按 100 宽分桶（Map 而非 while(hi) 循环 → 避开 1000+ 的 Infinity 死循环）；组内按金额升序
   function renderAmounts() {
     const r = RANGES.find((x) => x.key === curRange);
     const list = allPrices.filter((p) => p.price >= r.lo && p.price < r.hi);
@@ -2470,13 +2451,13 @@ function buildAllFaces() {
     }
     const keys = [...buckets.keys()].sort((a, b) => a - b);
     if (!keys.length) {
-      fAmounts.innerHTML = '<div class="af-empty">该范围内无面值</div>';
+      amountsEl.innerHTML = '<div class="af-empty">该范围内无面值</div>';
       return;
     }
     const lastKey = keys[keys.length - 1];
-    fAmounts.innerHTML = keys.map((b) => {
+    amountsEl.innerHTML = keys.map((b) => {
       const head = (r.hi === Infinity && b === lastKey) ? `${b}+` : `${b}–${b + 100}`;
-      const items = buckets.get(b);
+      const items = buckets.get(b).sort((a, c) => a.price - c.price);  // 组内按金额升序
       const pills = items.map((p) =>
         `<span class="apill" data-price="${p.price}">${p.price}` +
         `<span class="ac">${p.n}</span></span>`).join("");
@@ -2491,30 +2472,24 @@ function buildAllFaces() {
     else closePanel();
   };
   backdrop.onclick = closePanel;
-  search.oninput = renderSearch;
-  afAmounts.onclick = (e) => {
-    const t = e.target.closest(".apill");
-    if (t) pickPrice(t.dataset.price);
-  };
-  fCommon.onclick = (e) => {
+  commonEl.onclick = (e) => {
     const t = e.target.closest(".pill");
     if (t) pickPrice(t.dataset.price);
   };
-  fRanges.onclick = (e) => {
+  rangesEl.onclick = (e) => {
     const t = e.target.closest(".rtab");
     if (!t) return;
     curRange = t.dataset.key;
     renderRanges();
     renderAmounts();
   };
-  fAmounts.onclick = (e) => {
+  amountsEl.onclick = (e) => {
     const t = e.target.closest(".apill");
     if (t) pickPrice(t.dataset.price);
   };
 
   renderCommon();
   renderRanges();
-  renderAmounts();
 }
 
 function setLibMode(mode) {
@@ -2527,7 +2502,6 @@ function setLibMode(mode) {
     $("lib-allfaces-panel").classList.add("hidden");
     $("lib-af-backdrop").classList.add("hidden");
   }
-  $("lib-faces").classList.toggle("hidden", !isPrice);
   $("lib-own-wrap").classList.toggle("hidden", !isPrice);
   $("lib-sep1").classList.toggle("hidden", !isPrice);
   $("lib-themefilter").classList.toggle("hidden", isPrice);
