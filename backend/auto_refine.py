@@ -474,7 +474,8 @@ def face40_gap(plan: "ThemePlan", stock: Counter | None = None,
 
 def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
                        pending: Counter | None = None,
-                       keep: set | None = None) -> dict | None:
+                       keep: set | None = None,
+                       rot: dict | None = None) -> dict | None:
     """（纯计算）按「在炼队列 + 实时库存」挑下一步该变哪张卡 —— 变卡目标**不许写死**。
 
     用户 2026-09-26 两条定调：
@@ -509,17 +510,21 @@ def pick_change_target(plans: dict, queue: list, stock: Counter | None = None,
                 continue
             need_c = int(plans[tid].f40.get(cid, 0) or 0)
             held_c = int(stock.get(cid, 0) + pending.get(cid, 0))
-            # ★ 2026-10-03 用户定调「成功后再次变卡要找少的变」：主排序改成
-            # **持有张数少的优先**（held_c 升序）。此前按「缺口最大」挑，会死盯
-            # 同一张变（实测七夕情人节求姻缘 23926 已有 9 张还继续变，全占卡箱、
-            # 变3张不同的才能炼更高面额）。现在改成：只要该 40 面卡还有缺口，
-            # 就优先补**手上最少的那张**，让多张不同的 40 面卡轮流被变出来。
-            cands.append((held_c, -int(n), -int(g["need_total"]), -need_c,
+            # ★ 2026-10-03 用户定调「成功后再次变卡要找少的变」：主排序 **持有张数少的
+            #   优先**（held_c 升序）。此前按「缺口最大」挑会死盯同一张变。
+            # ★ 2026-10-18 修：held_c 每 tick 会被炼卡吃掉而归 0（40 面素材卡刚变出就
+            #   被拿去炼更高面额），于是主排序永远打平、二级仍落到「缺口最大」→ 还是只盯
+            #   缺口最大的那一张（实锤：七雄Q传 孙膑被连续变 7 张堆在箱里）。
+            #   修法：二级排序加 **轮转**——held_c 相同（都缺）时，优先选「本会话被变次数
+            #   最少」的卡（rot 升序），让多张不同的 40 面卡轮流被变出来，不再死盯一张。
+            #   rot=None（手动变卡等一次性调用）时该键恒为 0，退化为原缺口优先，不影响。
+            rot_count = int((rot or {}).get(cid, 0))
+            cands.append((held_c, rot_count, -int(n), -int(g["need_total"]), -need_c,
                           order, int(cid), tid))
     if not cands:
         return None
-    cands.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5]))
-    held_c, _neg_n, _neg_need_total, neg_need_c, order, cid, tid = cands[0]
+    cands.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5], x[6]))
+    held_c, _rot, _neg_n, _neg_need_total, neg_need_c, order, cid, tid = cands[0]
     n = -_neg_n
     plan = plans[tid]
     c = plan.cards.get(cid)
@@ -570,6 +575,7 @@ class AutoRefine:
         self.live_plans: list[dict] = []     # 队列里每套的实时净需求
         self._stock: Counter = Counter()     # 最近一次读到库存（status 里算实时净需求用）
         self._pending: Counter = Counter()
+        self._change_rot: Counter = Counter()  # 每张 40 面卡本会话被变出的累计次数（轮转防死盯一张）
         self.state_delta: list[dict] = []    # 最近一次跨 tick 状态字段差分
         self.last_pai_raw = ""               # 最近一次翻牌的原始响应（溯源用）
         self.last_collect: dict | None = None  # 最近一次上交的奖励解析
@@ -791,7 +797,8 @@ class AutoRefine:
         """自动挑「变卡目标」= `pick_change_target`（本引擎的队列 + 最近库存）。"""
         return pick_change_target(self.plans, self.queue,
                                   self._stock if stock is None else stock,
-                                  self._pending, set(self._keep))
+                                  self._pending, set(self._keep),
+                                  self._change_rot)
 
     # ---------- 日志 ----------
     def _log_change_attempts(self, attempts: list[dict] | None, label: str) -> None:
@@ -1428,6 +1435,8 @@ class AutoRefine:
             if rd_new:
                 rd = rd_new
                 self._stock, self._pending = rd[1], rd[3]
+        if changed:                              # 轮转计数：本会话累计变出几张，防死盯一张
+            self._change_rot[dst] += changed
         self._log("礼物卡变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物卡变卡", "ok": ok, "detail": r.get("message") or ""})
         # 逐张明细单独成行（成功/失败都记，显示消耗的源卡名与变出的目标卡名）
@@ -1470,6 +1479,8 @@ class AutoRefine:
             # 没到阈值：不写日志（每 tick 都写会刷屏），只在 status 里留个快照
             return
         ok = (r.get("changed") or 0) > 0
+        if ok:                              # 轮转计数：本会话累计变出几张，防死盯一张
+            self._change_rot[int(r.get("dst") or pick["dst"])] += int(r.get("changed") or 0)
         self._log("礼物变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物变卡", "ok": ok,
                       "detail": r.get("message") or ""})
