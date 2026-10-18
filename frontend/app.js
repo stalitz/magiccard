@@ -2382,7 +2382,6 @@ async function initLibOnce() {
 }
 
 function buildAllFaces() {
-  const backdrop = $("lib-af-backdrop");
   const panel = $("lib-allfaces-panel");
   const ptitle = $("lib-af-ptitle");
   const amountsEl = $("lib-af-amounts");   // 浮层：点分组后列出的面额
@@ -2415,13 +2414,11 @@ function buildAllFaces() {
     ptitle.textContent = r.label + " 面额";
     renderAmounts(r);
     panel.classList.remove("hidden");
-    backdrop.classList.remove("hidden");
     rangeBtns.querySelectorAll(".rbtn").forEach((b) =>
       b.classList.toggle("active", b.dataset.key === rangeKey));
   }
   function closePanel() {
     panel.classList.add("hidden");
-    backdrop.classList.add("hidden");
     rangeBtns.querySelectorAll(".rbtn").forEach((b) => b.classList.remove("active"));
   }
   // 常用面额 chips（内联）
@@ -2467,7 +2464,13 @@ function buildAllFaces() {
   }
 
   // 事件
-  backdrop.onclick = closePanel;
+  // 点面板以外的任意处关闭（空白/输入框/其它按钮都能正常响应，不再被 backdrop 吞掉第一次点击）
+  // 范围按钮自己处理切换，故排除；面板内点击由各 onClick 处理
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#lib-allfaces-panel")) return;
+    if (e.target.closest("#lib-range-btns")) return;
+    if (!panel.classList.contains("hidden")) closePanel();
+  });
   rangeBtns.onclick = (e) => {
     const t = e.target.closest(".rbtn");
     if (!t) return;
@@ -2498,7 +2501,6 @@ function setLibMode(mode) {
   if (!isPrice) hideKwSuggest();   // 切到套卡模式关闭面值建议
   if (!isPrice) {
     $("lib-allfaces-panel").classList.add("hidden");
-    $("lib-af-backdrop").classList.add("hidden");
   }
   $("lib-own-wrap").classList.toggle("hidden", !isPrice);
   $("lib-sep1").classList.toggle("hidden", !isPrice);

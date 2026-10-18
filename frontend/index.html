@@ -268,7 +268,6 @@
   .chiprow{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
   /* 面值快捷：范围按钮(内联，点开浮层) + 常用面额(内联直点，不在浮层) + 浮层只列分组面额 */
   .lib-toolbar{position:relative}              /* 浮层定位上下文 */
-  .af-backdrop{position:fixed;inset:0;z-index:40}  /* 透明捕获层，点外部关闭 */
   .allfaces{position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:400px;max-width:92vw;
     border:1px solid var(--line);border-radius:12px;background:#fff;
     box-shadow:0 10px 30px rgba(0,0,0,.16);padding:12px;box-sizing:border-box}
@@ -922,7 +921,6 @@
             <label class="check hidden" id="lib-own-wrap"><input type="checkbox" id="lib-own"> 只看我持有的</label>
             <div class="sep hidden" id="lib-sep1"></div>
             <div class="af-rangebtns" id="lib-range-btns"></div>
-            <div class="af-backdrop hidden" id="lib-af-backdrop"></div>
             <div class="allfaces hidden" id="lib-allfaces-panel">
               <div class="af-ptitle" id="lib-af-ptitle"></div>
               <div class="af-amounts" id="lib-af-amounts"></div>
@@ -1733,7 +1731,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261018f"></script>
+<script src="/app.js?v=20261018g"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
