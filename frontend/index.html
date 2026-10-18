@@ -913,9 +913,12 @@
               <button data-mode="price" class="active">面值查卡</button>
               <button data-mode="theme">浏览套卡</button>
             </div>
-            <span class="kw-wrap">
-              <input type="text" id="lib-kw" placeholder="搜面额（如 40）/ 卡名 / 套名…" autocomplete="off">
+            <span class="kw-wrap" id="lib-kw-wrap">
+              <input type="text" id="lib-kw" placeholder="输入面额查询（如 40）…" autocomplete="off" inputmode="numeric">
               <div class="kw-suggest hidden" id="lib-kw-suggest"></div>
+            </span>
+            <span class="kw-wrap hidden" id="lib-kw-theme-wrap">
+              <input type="text" id="lib-kw-theme" placeholder="搜套卡 id 或名称（如 花 / 317）…" autocomplete="off">
             </span>
             <button id="lib-go" class="btn sm primary">查</button>
             <label class="check hidden" id="lib-own-wrap"><input type="checkbox" id="lib-own"> 只看我持有的</label>
@@ -974,7 +977,7 @@
                 <span class="cnt" id="lst-cnt"></span>
                 <div class="spacer"></div>
               </div>
-              <div class="lst" id="lib-list"><div class="empty-tip">在上方搜索框直接输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>常用面额可直接点；点范围按钮（0–100 等）弹出该范围面额列表。</div></div>
+              <div class="lst" id="lib-list"><div class="empty-tip"><b>面值查卡</b>：在上方输入面额（如 <b>40</b>）查该面值的所有卡，输入数字实时弹候选。<br><b>浏览套卡</b>：切到「浏览套卡」后用右侧搜索框按 id / 名称搜（如 <b>花</b> / <b>317</b>）。<br>常用面额可直接点；点范围按钮（0–100 等）弹出该范围面额列表。</div></div>
               <div class="lib-foot" id="lst-foot"></div>
             </div>
             <!-- 右：套卡 / 路径明细 -->
@@ -1731,7 +1734,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261018g"></script>
+<script src="/app.js?v=20261018h"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

@@ -2498,6 +2498,8 @@ function setLibMode(mode) {
   const isPrice = mode === "price";
   $("lib-range-btns").classList.toggle("hidden", !isPrice);
   $("lib-common").classList.toggle("hidden", !isPrice);
+  $("lib-kw-wrap").classList.toggle("hidden", !isPrice);       // 面额输入框仅面值模式
+  $("lib-kw-theme-wrap").classList.toggle("hidden", isPrice);  // 套卡搜索框仅套卡模式
   if (!isPrice) hideKwSuggest();   // 切到套卡模式关闭面值建议
   if (!isPrice) {
     $("lib-allfaces-panel").classList.add("hidden");
@@ -2604,6 +2606,10 @@ kwInput.addEventListener("input", () => {
   clearTimeout(libKwTimer);
   libKwTimer = setTimeout(runCardQuery, 250);   // 同时跑实际查卡（debounce）
 });
+// 套卡搜索框：仅按 id / 名称搜，回车即查（无 typeahead）
+$("lib-kw-theme").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("lib-go").click(); }
+});
 $("lib-own").onchange = (e) => {
   libState.ownOnly = e.target.checked;
   runCardQuery();
@@ -2660,18 +2666,16 @@ document.querySelectorAll("#lib-sourcefilter .chip").forEach((c) => {
 async function runCardQuery() {
   const raw = ($("lib-kw").value || "").trim();
   const price = /^\d+$/.test(raw) ? raw : "";
-  const kw = price ? "" : raw;
-  if (!price && !kw) {
-    $("lib-list").innerHTML = '<div class="empty-tip">在上方搜索框输入：<br>• 纯数字（如 <b>40</b>）→ 查该面值的所有卡<br>• 文字（如 <b>花</b>）→ 模糊搜卡名 / 套名<br>常用面额可直接点；点范围按钮（0–100 等）弹出该范围面额列表。</div>';
+  if (!price) {
+    $("lib-list").innerHTML = '<div class="empty-tip">在上方输入面额（如 <b>40</b>）查询该面值的所有卡。<br>常用面额可直接点；点范围按钮（0–100 等）弹出该范围面额列表。</div>';
     $("lst-cnt").textContent = ""; $("lst-foot").textContent = "";
     return;
   }
-  libState.price = price; libState.kw = kw;
+  libState.price = price; libState.kw = "";
   $("lib-list").innerHTML = '<div class="empty-tip"><span class="spinner"></span>查询中…</div>';
   try {
     const params = new URLSearchParams();
     if (price) params.set("price", price);
-    if (kw) params.set("kw", kw);
     params.set("owned_only", libState.ownOnly ? 1 : 0);
     params.set("limit", 400);
     const d = await (await fetch(`/api/cards/q?${params}`)).json();
@@ -2720,7 +2724,7 @@ async function runCardQuery() {
 }
 
 async function runThemeQuery() {
-  const kw = ($("lib-kw").value || "").trim();
+  const kw = ($("lib-kw-theme").value || "").trim();
   $("lib-list").innerHTML = '<div class="empty-tip"><span class="spinner"></span>加载套卡…</div>';
   try {
     const params = new URLSearchParams();
