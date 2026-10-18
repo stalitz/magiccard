@@ -328,8 +328,13 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
     q = (q or "").strip().lower()
     matches = []
     for th in idx["themes"]:
-        if q and q not in th["name"].lower():
-            continue
+        if q:
+            # 文本 → 名称模糊匹配；纯数字 → 同时匹配主题 id（tid），便于按 id 定位套卡
+            if q.isdigit():
+                if str(th["tid"]) != q and q not in th["name"].lower():
+                    continue
+            elif q not in th["name"].lower():
+                continue
         if star and th["star"] != star:
             continue
         if module:
