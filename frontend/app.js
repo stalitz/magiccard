@@ -2406,6 +2406,7 @@ function buildAllFaces() {
 
   function pickPrice(price) {
     $("lib-kw").value = price;
+    hideKwSuggest();
     closePanel();
     runCardQuery();
   }
@@ -2494,6 +2495,7 @@ function setLibMode(mode) {
   const isPrice = mode === "price";
   $("lib-range-btns").classList.toggle("hidden", !isPrice);
   $("lib-common").classList.toggle("hidden", !isPrice);
+  if (!isPrice) hideKwSuggest();   // 切到套卡模式关闭面值建议
   if (!isPrice) {
     $("lib-allfaces-panel").classList.add("hidden");
     $("lib-af-backdrop").classList.add("hidden");
@@ -2520,15 +2522,85 @@ $("lib-go").onclick = () => {
   if (libState.mode === "price") runCardQuery();
   else runThemeQuery();
 };
-$("lib-kw").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("lib-go").click();
-});
-// 面值查卡：输入即搜（即时，debounce），纯数字→按面额，文字→按卡名/套名
+// 面值 typeahead：输入数字实时弹匹配面额候选（↓↑ 选择 / 回车确认 / Esc 关闭）
+const kwInput = $("lib-kw");
+const kwSuggest = $("lib-kw-suggest");
+let kwActive = -1;
 let libKwTimer;
-$("lib-kw").addEventListener("input", () => {
+
+function hideKwSuggest() {
+  kwSuggest.classList.add("hidden");
+  kwSuggest.innerHTML = "";
+  kwActive = -1;
+}
+function renderKwSuggest() {
+  if (libState.mode !== "price") { hideKwSuggest(); return; }
+  const raw = kwInput.value.trim();
+  if (!/^\d+$/.test(raw)) { hideKwSuggest(); return; }   // 仅数字面额场景给建议（文字走卡名/套名模糊搜）
+  const matches = allPrices.filter((p) => String(p.price).includes(raw))
+    .sort((a, b) => a.price - b.price).slice(0, 12);       // 按金额升序，最多 12 条
+  if (!matches.length) {
+    kwSuggest.innerHTML = '<div class="sg-empty">无含「' + raw + '」的面额</div>';
+    kwSuggest.classList.remove("hidden");
+    kwActive = -1;
+    return;
+  }
+  let html = '<div class="sg-hint">↓↑ 选择 · 回车查该面值</div>';
+  html += matches.map((p, i) =>
+    `<div class="sg ${i === kwActive ? "active" : ""}" data-i="${i}" data-price="${p.price}">` +
+    `<span>面值 ${p.price}</span><span class="sc">${p.n} 张</span></div>`).join("");
+  kwSuggest.innerHTML = html;
+  kwSuggest.classList.remove("hidden");
+  const act = kwSuggest.querySelector(".sg.active");
+  if (act) act.scrollIntoView({ block: "nearest" });
+}
+function kwChoose(price) {
+  kwInput.value = price;
+  hideKwSuggest();
+  runCardQuery();
+}
+kwSuggest.addEventListener("mousedown", (e) => {     // mousedown 抢在 blur 前，避免误关
+  const sg = e.target.closest(".sg");
+  if (sg && sg.dataset.price !== undefined) {
+    e.preventDefault();
+    kwChoose(sg.dataset.price);
+  }
+});
+document.addEventListener("click", (e) => {           // 外部点击关闭
+  if (!e.target.closest(".kw-wrap")) hideKwSuggest();
+});
+
+kwInput.addEventListener("keydown", (e) => {
+  const open = !kwSuggest.classList.contains("hidden");
+  if (e.key === "ArrowDown" && open) {
+    e.preventDefault();
+    const items = kwSuggest.querySelectorAll(".sg[data-i]");
+    kwActive = (kwActive + 1) % items.length;
+    renderKwSuggest();
+    return;
+  }
+  if (e.key === "ArrowUp" && open) {
+    e.preventDefault();
+    const items = kwSuggest.querySelectorAll(".sg[data-i]");
+    kwActive = (kwActive - 1 + items.length) % items.length;
+    renderKwSuggest();
+    return;
+  }
+  if (e.key === "Enter") {
+    if (open && kwActive >= 0) {
+      const sg = kwSuggest.querySelector(".sg.active");
+      if (sg) { e.preventDefault(); kwChoose(sg.dataset.price); return; }
+    }
+    $("lib-go").click();
+    return;
+  }
+  if (e.key === "Escape" && open) { e.preventDefault(); hideKwSuggest(); return; }
+});
+kwInput.addEventListener("input", () => {
   if (libState.mode !== "price") return;
+  renderKwSuggest();                 // 立即可见候选（1022 项过滤很快）
   clearTimeout(libKwTimer);
-  libKwTimer = setTimeout(runCardQuery, 250);
+  libKwTimer = setTimeout(runCardQuery, 250);   // 同时跑实际查卡（debounce）
 });
 $("lib-own").onchange = (e) => {
   libState.ownOnly = e.target.checked;
