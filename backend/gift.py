@@ -531,79 +531,134 @@ async def find_box_gift_cards(session: LoginSession) -> list[dict]:
     return out
 
 
+def _pick_dst(dst_ids: list[int], remain: dict[int, int], cursor: int) -> int | None:
+    """在 dst_ids 里挑下一个「还有剩余需求」的目标（从 cursor 起循环），保证不同种类
+    都覆盖到；全部需求已填满返回 None（停手，不浪费礼物卡）。"""
+    n = len(dst_ids)
+    if n == 0:
+        return None
+    for i in range(n):
+        d = dst_ids[(cursor + i) % n]
+        if remain.get(d, 0) > 0:
+            return d
+    return None
+
+
 async def drain_box_gift_cards(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
-                               max_try: int = 0) -> dict:
+                               dst_specs: Optional[list] = None, max_try: int = 0) -> dict:
     """卡箱里已有的同礼物套 48 面卡 → 就地变卡，**不走收礼**。
 
     变出的 dstid 卡直接进卡箱，自动炼卡引擎下一 tick 就当素材用
     （等价于「少买一张底卡、少炼一次」）。
 
+    ★ 分布变卡（2026-10-18 修，呼应「轮转不是好算法」）：
+      旧版单次只把全部礼物卡变进**同一张** 40 面卡（dstid 单值），导致一套需要多种
+      40 面卡的套卡，礼物卡全堆成一种、其余种类仍得从底卡炼 —— 礼物卡白变、卡炉还在
+      炼 40 面。现支持 `dst_specs=[(dstid, need), ...]`：把礼物卡**按需求量轮流分散**
+      到各缺失的 40 面种类上，把「本该从底卡炼的 40 面」先变齐，卡炉就能直接炼更高面额。
+      `dst_specs=None`（手动单目标）保留旧行为：变出一张即停。
+
     ★ 2026-09-26 用户定调「变卡失败要一直变，直到成功或者礼物卡没了」：
       变卡成功率约 50%、**失败同样消耗源卡**（真机实测：箱里 8 张，尝试 3 次只成 1
-      张，箱里当场剩 5 张），所以失败后**换下一张继续**，不停下来。
+      张，箱里当场剩 5 张），所以失败后**换下一张/下一个目标继续**，不停下来。
       循环靠「重扫卡箱」实现：每次尝试前重新读一次卡箱拿到最新槽位（失败那张已被
       服务端烧掉、必须从池里消失），变成「直到成功或箱里礼物卡没了」为止。
-      `max_try=0`（默认）= 不限次数，上限自然由源卡张数收敛；>0 则最多试这么多次。
-      变出一张立即停 —— dstid 是单张目标，连变没有意义。
     """
-    # 目标面额硬校验：礼物卡只有 48 面一种形态，变卡只产出 40 面。
-    # 传别的面额进去变，即使服务端收了也只是白烧一张源卡（变卡成功率约 50%）。
-    v = change_dst_is_face40(dstid)
-    if v is False:
-        return {"ok": False, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
-                "burned": 0, "dst": dstid,
-                "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动卡"}
+    # 解析目标：dst_specs（分布）优先，否则单 dst（保留手动/旧行为）。
+    if dst_specs:
+        try:
+            specs = [(int(d), int(n)) for d, n in dst_specs]
+        except (TypeError, ValueError):
+            specs = []
+        bad = [d for d, _ in specs if change_dst_is_face40(d) is False]
+        if bad:
+            return {"ok": False, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
+                    "burned": 0, "dst": bad[0],
+                    "message": f"变卡目标 #{bad[0]} 不是 40 面卡，礼物卡变不了其他面额，本轮不动卡"}
+        distribute = True
+    else:
+        # 目标面额硬校验：礼物卡只有 48 面一种形态，变卡只产出 40 面。
+        v = change_dst_is_face40(dstid)
+        if v is False:
+            return {"ok": False, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
+                    "burned": 0, "dst": dstid,
+                    "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动卡"}
+        specs = [(int(dstid), 10 ** 9)]   # 单目标、无上限（保留旧行为：变出一张即停）
+        distribute = False
+
     pool = await find_box_gift_cards(session)
     inbox = len(pool)
     if not inbox:
         return {"ok": True, "skipped": True, "inbox": 0, "tried": 0, "changed": 0,
-                "burned": 0, "dst": dstid,
+                "burned": 0, "dstid": (specs[0][0] if specs else dstid),
                 "message": "卡箱里没有礼物套的 48 面卡"}
+    remain = {d: n for d, n in specs}
+    dst_ids = [d for d, _ in specs]
     budget = inbox if max_try <= 0 else min(max_try, inbox)   # 硬上限：源卡有限
     tried = changed = burned = 0
     last = ""
     attempts: list[dict] = []   # 逐张明细：消耗的源卡 → 变出的目标卡 + 成败
+    per_dst: dict[int, int] = {}
+    cursor = 0
     for _ in range(budget):
         pool = await find_box_gift_cards(session)      # 重扫：失败那张已被烧掉
         if not pool:
             break
+        if distribute:
+            d = _pick_dst(dst_ids, remain, cursor)      # 选下一个还有缺口的种类
+            if d is None:                              # 所有需求已填满，停手不浪费
+                break
+            cursor = (dst_ids.index(d) + 1) % len(dst_ids)
+        else:
+            d = dst_ids[0]
         p = pool[0]
-        r = await change_card(session, p["id"], dstid, slotid=p["slot"],
+        r = await change_card(session, p["id"], d, slotid=p["slot"],
                               slottype=p["slottype"])
         tried += 1
         # 源卡名（礼物卡 48 面，多为道具卡 id，卡库里查不到就显示「礼物卡」）
         src_name = _face48_name(p["id"])
         if r.get("ok"):
             changed += 1
-            last = f"#{p['id']} → {dstid} 成功"
+            per_dst[d] = per_dst.get(d, 0) + 1
+            remain[d] = max(0, remain.get(d, 0) - 1)
+            last = f"#{p['id']} → {d} 成功"
             attempts.append({"src_id": p["id"], "src_name": src_name,
-                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "dst_id": d, "dst_name": _card_name_cached(d),
                              "ok": True, "code": r.get("code")})
-            break
-        burned += 1                                    # 失败也烧掉一张源卡
-        last = f"#{p['id']} → {dstid} 失败 code={r.get('code')}"
-        attempts.append({"src_id": p["id"], "src_name": src_name,
-                         "dst_id": dstid, "dst_name": _card_name_cached(dstid),
-                         "ok": False, "code": r.get("code"),
-                         "msg": r.get("message") or ""})
+            if not distribute:
+                break                                  # 单目标：变出一张即停（旧行为）
+            # 分布模式不 break：继续把缺口一次填满（其它缺失种类也变）
+        else:
+            burned += 1                                    # 失败也烧掉一张源卡
+            last = f"#{p['id']} → {d} 失败 code={r.get('code')}"
+            attempts.append({"src_id": p["id"], "src_name": src_name,
+                             "dst_id": d, "dst_name": _card_name_cached(d),
+                             "ok": False, "code": r.get("code"),
+                             "msg": r.get("message") or ""})
         await asyncio.sleep(0.3)
     tail = (f"；{last}" if last else "")
     if not changed and burned:
-        tail += "（失败也烧源卡，已换下一张继续，直到成功或箱里礼物卡没了）"
+        tail += "（失败也烧源卡，已换下一张继续，直到需求填满或箱里礼物卡没了）"
+    dist = "、".join(f"{_card_name_cached(d)}×{per_dst[d]}" for d in dst_ids if per_dst.get(d))
     return {"ok": changed > 0, "skipped": False, "inbox": inbox, "tried": tried,
-            "changed": changed, "burned": burned, "dstid": dstid, "last": last,
-            "attempts": attempts,
+            "changed": changed, "burned": burned, "dstid": dst_ids, "per_dst": per_dst,
+            "last": last, "attempts": attempts,
             "message": f"卡箱礼物卡 {inbox} 张：变成功 {changed} 张"
+                       + (f"（{dist}）" if dist else "")
                        + (f"；{last}" if last else "")}
 
 
 async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
+                         dst_specs: Optional[list] = None,
                          upper: int = DEFAULT_UPPER, lower: int = DEFAULT_LOWER,
                          action: int = 2, max_take: int = 30) -> dict:
     """礼物箱件数 ≥ upper 时，从最老的开始「收礼 + 变卡」，降到 ≤ lower 停手。
 
     设计成自动炼卡的一个前置环节：由调用方在「缺素材、准备买卡」之前调用。
     变卡约 50% 成功 → 失败的记下来继续，不阻塞；收礼失败（多半该条已失效）同样跳过。
+
+    ★ 分布变卡（2026-10-18 修）：`dst_specs` 给出时，把收来的礼物卡**轮流分散**到各
+      缺失的 40 面种类（见 drain_box_gift_cards）；`dst_specs=None` 保留单 dst 旧行为。
 
     ★ 2026-09-26 用户定调「卡箱里有礼物送的 48 面卡时，可以优先变卡，不用先从礼物里
       取了变，卡箱没有再取」：所以本函数在动礼物箱**之前**，先检查卡箱里是否已经有
@@ -613,12 +668,25 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
     目标必须面额 40（礼物卡只有 48 面一种形态，变卡只产出 40 面），否则直接拒绝，
     不收礼也不变卡 —— 收了也是白烧礼物卡。
     """
-    v = change_dst_is_face40(dstid)
-    if v is False:
-        return {"ok": False, "skipped": True, "took": 0, "changed": 0, "dst": dstid,
-                "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动手"}
-    # ① 卡箱优先：不收礼，直接用箱里已有的同套 48 面卡变
-    box = await drain_box_gift_cards(session, dstid)
+    if dst_specs:
+        try:
+            specs = [(int(d), int(n)) for d, n in dst_specs]
+        except (TypeError, ValueError):
+            specs = []
+        bad = [d for d, _ in specs if change_dst_is_face40(d) is False]
+        if bad:
+            return {"ok": False, "skipped": True, "took": 0, "changed": 0, "dst": bad[0],
+                    "message": f"变卡目标 #{bad[0]} 不是 40 面卡，礼物卡变不了其他面额，本轮不动手"}
+        distribute = True
+    else:
+        v = change_dst_is_face40(dstid)
+        if v is False:
+            return {"ok": False, "skipped": True, "took": 0, "changed": 0, "dst": dstid,
+                    "message": f"变卡目标 #{dstid} 不是 40 面卡，礼物卡变不了其他面额，本轮不动手"}
+        specs = [(int(dstid), 10 ** 9)]
+        distribute = False
+    # ① 卡箱优先：不收礼，直接用箱里已有的同套 48 面卡变（也走分布逻辑）
+    box = await drain_box_gift_cards(session, dst_specs=specs)
     if box.get("inbox") and box.get("changed"):
         return {"ok": True, "skipped": False, "box": box["inbox"], "upper": upper,
                 "took": 0, "changed": box["changed"], "from_box": True,
@@ -636,15 +704,26 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
     took = changed = failed = 0
     last = ""
     attempts: list[dict] = []   # 逐张明细：收的礼物 → 变出的目标卡 + 成败
+    per_dst: dict[int, int] = {}
+    remain = {d: n for d, n in specs}
+    dst_ids = [d for d, _ in specs]
+    cursor = 0
     for g in gifts[:max_take]:
         if count - took <= lower:
             break
-        r = await take_and_change(session, g["index_id"], dstid, action)
+        if distribute:
+            d = _pick_dst(dst_ids, remain, cursor)
+            if d is None:
+                break
+            cursor = (dst_ids.index(d) + 1) % len(dst_ids)
+        else:
+            d = dst_ids[0]
+        r = await take_and_change(session, g["index_id"], d, action)
         if r.get("stage") == "take" and not r.get("ok"):
             failed += 1
             last = f"收礼 #{g['index_id']} 失败 code={r.get('code')}"
             attempts.append({"src_id": g["index_id"], "src_name": "礼物",
-                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "dst_id": d, "dst_name": _card_name_cached(d),
                              "ok": False, "stage": "take", "code": r.get("code"),
                              "msg": r.get("message") or ""})
             await asyncio.sleep(0.3)
@@ -653,19 +732,25 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
         src_id = r.get("itemid")
         if r.get("ok"):
             changed += 1
+            per_dst[d] = per_dst.get(d, 0) + 1
+            remain[d] = max(0, remain.get(d, 0) - 1)
             attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
-                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "dst_id": d, "dst_name": _card_name_cached(d),
                              "ok": True, "code": r.get("code")})
+            if not distribute:
+                break                                  # 单目标：一件即停（旧行为）
         else:
             failed += 1
             last = f"变卡失败（约 50% 概率）code={r.get('code')}"
             attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
-                             "dst_id": dstid, "dst_name": _card_name_cached(dstid),
+                             "dst_id": d, "dst_name": _card_name_cached(d),
                              "ok": False, "stage": "change", "code": r.get("code"),
                              "msg": r.get("message") or ""})
         await asyncio.sleep(0.4)
+    dist = "、".join(f"{_card_name_cached(d)}×{per_dst[d]}" for d in dst_ids if per_dst.get(d))
     return {"ok": True, "skipped": False, "box_before": count, "box_after": count - took,
-            "took": took, "changed": changed, "failed": failed, "dstid": dstid,
-            "last": last, "attempts": attempts,
+            "took": took, "changed": changed, "failed": failed, "dstid": dst_ids,
+            "per_dst": per_dst, "last": last, "attempts": attempts,
             "message": f"礼物箱 {count}→{count - took}：收 {took} 件、变成功 {changed} 张"
-                       f"（dst={dstid}）" + (f"；{last}" if last else "")}
+                       + (f"（{dist}）" if dist else "")
+                       + (f"；{last}" if last else "")}

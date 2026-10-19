@@ -66,7 +66,8 @@ from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_COLLECTION_GET, EP_MAINPAG
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
-MAX_BUY_PER_TICK = 6   # 每 tick 最多买几张底卡，防请求过频（就地买后天然远小于此值）
+MAX_BUY_PER_TICK = 12  # 每 tick 最多买几张底卡，防请求过频。12 = 4 主炉×3 底卡，
+                        # 保证 4 个主炉同时空出时能一口气各开一张 40 面（不再被预算卡成 2 张）。
 # 变卡目标的面额：变出一张 40 面卡，引擎就能直接拿它炼更大面额（用户 2026-09-26 定调
 # 「就变自动炼卡队列里的套卡中 40 面额的卡，缺哪个变哪个」）。
 # ⚠️ 目标**绝不能写死**：写死的 26117 属于 theme 1810「研精覃思」，炼的却是别的套 ——
@@ -582,6 +583,7 @@ class AutoRefine:
         self._prev_fields: dict = {}         # 上一 tick 的状态字段快照
         self._pai_happened = False           # 上一 tick 是否翻过牌（决定是否记差分）
         self._rr = 0                         # 轮转起点
+        self._made: Counter = Counter()       # 每类卡本会话累计「开炉生产」次数（40 面防饿死用）
         self._task: asyncio.Task | None = None
         # 偷炉（借好友空炉炼自己的卡）：用好友账号(opuin)发起 card_stove_steal。
         # ★ 端点必须是 steal（refine+opuin 会被当成「在自己炉上炼」→ 误报 -33003）。
@@ -614,6 +616,9 @@ class AutoRefine:
         # 这一项**不受 gift_drain 开关限制**——没勾收礼变卡，也该把箱里的卡用掉。
         self.box_gift_change = True
         self.box_gift_last: dict | None = None   # 最近一次结果（status 透传）
+        # 变卡这 tick 是否会供应 40 面卡：会 → 炼卡环节不许现造 40 面（靠变卡），
+        # 保持卡箱空位最大化、不囤卡（用户 2026-10-18 定调）。每 tick 重算。
+        self._gift_will_supply: bool = False
         # 最近一次算出的「变卡还没交、但马上会交」的 40 面卡（{套id: Counter}），
         # 供面板说明「为什么这轮不再炼 40 面卡了」
         self.face40_credit: dict[int, Counter] = {}
@@ -704,22 +709,58 @@ class AutoRefine:
         return True
 
     def _sort_time_aware(self, plan: "ThemePlan", runs: dict, stock: Counter) -> list:
-        """把一套的候选炉次按「时间感知」排序（★ 2026-10-03 用户定调，要考虑炼卡时间）。
+        """把一套的候选炉次按「时间感知 + 落后度优先」排序。
 
-        纯深度降序的毛病：150 面(4h) 素材没凑齐时仍排在 40 面(1h) 前面，引擎每 tick
-        都先试投 150 → 被 `_prepare_turn` 挡掉（素材是「还得炼出来的成品卡」）→ 白跑；
-        真正该做的是**素材一齐就立刻投 150**（它占炉 4h，越早投越早腾炉），其余炉位
-        用 1h 的 40 面补料喂下一轮 150，形成长短交织的流水线。
+        时间感知（★ 2026-10-03 用户定调，要考虑炼卡时间）：
+          ① 就绪优先（ready）② 占炉时长降序（secs）③ 深度降序（depth）。
 
-        排序键（从高到低）：
-          ① **就绪优先**（ready desc）：素材此刻齐的排前，不齐的排后（投了也会被挡）；
-          ② **占炉时长降序**（secs desc）：同样就绪时，4h 的 150 先投（长任务早占炉），
-             1h 的 40 排后 —— 正好让长短任务在多个炉位上交织满载；
-          ③ **深度降序**（depth desc）：同就绪、同耗时再按面额高的优先（旧口径兜底）。
+        ★ 新增「落后度优先」（2026-10-19 修）：同级内优先排「离顶层卡还差得最远」的
+          组件及其瓶颈材料。否则末位用 **cid 升序**兜底，会系统性偏袒低 cid 的
+          信陵君(4256)/白起(4257)、饿死高 cid 的管仲(4258) 及其独门料 蒙恬(4255)
+          —— 表现出来就是「白起炼了一堆、管仲始终排不到、540 面西施永远炼不上」
+          （用户原话：「白起都炼了 4 个了，就是不炼管仲，有这时间西施早炼上了」）。
+
+          落后度 = runs[c] - stock[c]（净需求 − 箱存；pending 不传但量级足够排序）。
+          40 面材料卡的紧急度 = 用它、**且仍在需求中(runs)的**最高层成品组件的落后度
+          （蒙恬只喂管仲 → 紧急度=管仲落后度；李牧只喂白起 → =白起落后度）。
+          这样每次 tick 重排都会自动先产蒙恬、先追平管仲，把炉位让给关键路径。
         """
+        # 预计算：每张 40 面材料被哪些「成品卡(>40 面)」用到（缓存在 plan 上，只算一次）
+        up = getattr(plan, "_upstream", None)
+        if up is None:
+            up = {}
+            for cid in plan.ids:
+                comp = plan.comp.get(cid)
+                if not comp or int(plan.cards[cid][3]) <= CHANGE_FACE:
+                    continue                    # 只从成品卡往下挂材料
+                for m in (comp[3], comp[4], comp[5]):
+                    if m:
+                        up.setdefault(int(m), []).append(cid)
+            plan._upstream = up
+
+        def deficit(c):
+            return runs.get(c, 0) - stock.get(c, 0)
+
+        def urgency_pair(c):
+            """返回 (瓶颈落后度, 被共用家数)。成品卡=自身落后度、被共用数 0；
+            40 面材料=上游最高层组件落后度、以及被几家上游共用。"""
+            if int(plan.cards[c][3]) > CHANGE_FACE:
+                return (deficit(c), 0)
+            us = [u for u in up.get(c, []) if u in runs]
+            m = max(deficit(u) for u in us) if us else 0
+            return (m, len(us))
+
         def key(c):
             ready = 0 if self._target_ready(plan, c, stock) else 1   # 0=就绪在前
-            return (ready, -self._card_secs(plan, c), -plan.depth.get(c, 0), c)
+            u1, ncons = urgency_pair(c)
+            # 同瓶颈落后度内：被共用家数「越多」越优先（孙膑喂3家 > 王/吕喂2家 >
+            # 蒙/李喂1家）。共用越多的 40 面材料卡住的上层越多、越该先造；否则会像
+            # 七雄Q传那样把孙膑（3家共用）排到最后，信陵君一开炼吃掉孙/王/吕后孙膑
+            # 迟迟不补，白起/管仲各晚1h、540面西施从理论H7拖到H9。
+            # 独门料（蒙恬只喂管仲）不会被饿死：阶段二的「覆盖优先」保证同套5种40面
+            # 在 H0~H1 全部开过炉，不受此处排序影响。
+            return (ready, -self._card_secs(plan, c), -plan.depth.get(c, 0),
+                    -u1, -ncons, c)
         return sorted(runs, key=key)
 
     def _calc_sets(self, plan: "ThemePlan", stock: Counter, pending: Counter,
@@ -888,6 +929,27 @@ class AutoRefine:
         rd_now = None
         if self.box_gift_change or self.gift_drain:
             rd_now = await self._read_state()
+
+        # 1.42) 预测「变卡这 tick 是否会供应 40 面卡」：会 → _refine_all 不许现造 40 面
+        #       （靠变卡），保持卡箱空位最大化、不囤卡（用户 2026-10-18 定调）。
+        #       箱里已有礼物套 48 面卡（box_gift_change 会就地变）→ 会变出 40 面；
+        #       礼物箱件数 ≥ upper（gift_drain 会收+变）→ 也会变出 40 面。
+        #       用 tick 开头的 st（变卡之前）判断，即「本 tick 会变出多少」的预测。
+        if self.box_gift_change or self.gift_drain:
+            box_gift_n = self._gift_cards_left(st)        # 箱里已有的礼物套 48 面卡
+            gift_box_n = 0
+            if self.gift_drain:
+                try:
+                    gi = await gf.gift_inbox(self.s)
+                    gift_box_n = int((gi or {}).get("count", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    gift_box_n = 0
+            self._gift_will_supply = (
+                (self.box_gift_change and box_gift_n > 0)
+                or (self.gift_drain and gift_box_n >= int(self.gift_upper))
+            )
+        else:
+            self._gift_will_supply = False
 
         # 1.45) 卡箱里已有的礼物套 48 面卡 → 就地变卡（不收礼，见 _drain_box_gift）。
         #      变卡动过卡箱状态，_drain_box_gift 会重读并回传最新 rd，下面第 2 步直接用。
@@ -1139,44 +1201,79 @@ class AutoRefine:
             for tid in order:
                 if buckets[tid]:
                     seq.append((tid, buckets[tid].pop(0)))
+        # ★ 产线平衡用：每套「还需要产的 40 面类型」集合（phase2 让位判断）
+        needed_40: dict[int, set] = {}
+        for tid in order:
+            runs_t = plans_net.get(tid, ({}, {}))[0]
+            needed_40[tid] = {c for c in runs_t
+                              if int(self.plans[tid].cards[c][3]) == CHANGE_FACE}
         taken: set = set()                    # 本 tick 已被主炉/偷炉占用的目标，防重复提交
+        # ★ 两阶段调度（2026-10-18 用户定调「即时拉动 / 不囤卡」）：
+        #   变卡本 tick 会供 40 面 → manu_allowed=False → 阶段二（现造 40）整体关闭，
+        #   卡炉只做「箱里已有 40 面 → 合成 150」这种消耗库存的动作，把箱位腾出来；
+        #   变卡不供 40 面（没勾变卡 / 礼物卡耗尽）时才现造缺的 40 面，保进度不卡死。
+        #   ★ 防过量制造已由 net_plan 的 runs 保证（runs 已扣减 pending，在炉的 40 面不计入
+        #     缺口），无需额外的「在途 40 即将合成」判定 —— 该判定曾用 stock+pending>=1 误判
+        #     需求量>1 的 40 面「即将合成」而跳过整套现造，导致死锁（2026-10-19 仿真实证）。
+        manu_allowed = not self._gift_will_supply
+        # ---- 阶段一：仅从箱存「合成」上层卡（allow_buy=False，绝不现买现造） ----
+        # 优先把箱里已有的 40 面等素材合成更高面额（150/80…），直接吃掉库存、释放箱位。
         for tid, target in seq:
             if free_stove <= 0:
                 break
-            # 素材必须此刻在箱里（炉内在炼的不能当素材），套内卡不能被动到清空，
-            # 缺的 10 面值底卡就地买 —— 与偷炉共用 _prepare_turn，判定只有一份。
-            prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
-                                            planned, bought, steps, tag="炼卡")
-            if prep is None:
+            out = await self._submit_one(tid, target, st, stock, slots, pending,
+                                        planned, bought, steps,
+                                        tag="合成", allow_buy=False)
+            if out is None:
                 continue
-            st, stock, slots, pending, need_cnt, nb = prep
-            bought += nb
-            plan = self.plans[tid]
-            res = self._payload(plan, target, need_cnt, slots)
-            if res is None:
-                continue
-            payload, picked = res
-            r = await self.s.post(EP_REFINE, **payload)
-            ok = r.get("code") == 0
-            nm = plan.cname(target)
-            if ok:
-                self.stats["refined"] += 1
+            st, stock, slots, pending, bought, took = out
+            if took:
                 free_stove -= 1
-                for m, n in need_cnt.items():
-                    stock[m] -= n
-                    for _ in range(n):
-                        if slots.get(m):
-                            slots[m].pop(0)
-                # 素材里来自换卡箱的那几张已经烧掉了 → 同步占用数，
-                # 否则本 tick 后面几炉会误判「换卡箱 0 格」而白白空转一轮。
-                used = st["cap"].get("change", {}).get("used", 0)
-                st["cap"]["change"]["used"] = max(
-                    0, used - sum(1 for _sl, _st in picked if _st == 0))
-                pending[target] += 1
                 taken.add(target)
-            self._log("炼卡", ok, f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}")
-            steps.append({"action": "炼卡", "ok": ok,
-                          "detail": f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}"})
+        # ---- 阶段二：只在「变卡不供 40 面」时，才现造缺的 40 面（allow_buy=True） ----
+        # 防过量制造已由 net_plan 的 runs 保证（runs 已扣减 pending，在炉的 40 面不计入缺口），
+        # 无需额外的「在途 40 即将合成」判定（该判定曾误判需求量>1 的 40 面导致死锁，已删）。
+        if manu_allowed:
+            started_40: Counter = Counter()   # 本 tick 已开炉的 40 面类型（保持产线平衡）
+
+            def tier_40(target):
+                """40 面开炉优先级（越低越先开）：
+                0 = 本会话从未生产过（蒙恬这类独门料，饿死风险最高，强制先开）；
+                1 = 当前未覆盖（库存/在炉/本tick已开 全 0，需补第 1 张）；
+                2 = 其余（补第 2 张及以上）。"""
+                if int(self.plans[tid].cards[target][3]) != CHANGE_FACE:
+                    return 9
+                if self._made.get(target, 0) == 0 \
+                        and plans_net.get(tid, ({}, {}))[0].get(target, 0) > 0:
+                    return 0
+                if stock.get(target, 0) == 0 and pending.get(target, 0) == 0 \
+                        and started_40.get(target, 0) == 0:
+                    return 1
+                return 2
+
+            # ★ 三档扫描，保证覆盖 + 防饿死（2026-10-19 修，根除材料饿死）：
+            #   单 tick 炉位有限（4 炉 < 一套需要的 5 种 40 面），单遍扫描会在冷启动时
+            #   把排序末位的「独门料」（蒙恬只喂管仲）挤掉、永不轮到 → 管仲合不出、西施卡死。
+            #   先开「从未生产」(tier0) → 再开「未覆盖」(tier1) → 其余(tier2)。
+            for tier in (0, 1, 2):
+                for tid, target in seq:
+                    if free_stove <= 0:
+                        break
+                    if target in taken:
+                        continue
+                    if tier_40(target) != tier:
+                        continue
+                    out = await self._submit_one(tid, target, st, stock, slots, pending,
+                                                planned, bought, steps,
+                                                tag="炼卡", allow_buy=True)
+                    if out is None:
+                        continue
+                    st, stock, slots, pending, bought, took = out
+                    if took:
+                        free_stove -= 1
+                        taken.add(target)
+                        if int(self.plans[tid].cards[target][3]) == CHANGE_FACE:
+                            started_40[target] += 1
 
         # ---------- 偷炉：用好友空炉再并行 1 张 ----------
         # 条件：开启偷炉、偷炉槽空闲、未被全局冷却、尚有未提交的炉次。
@@ -1187,29 +1284,43 @@ class AutoRefine:
             # （主炉路径就地为每炉补买、用完即烧）→ 候选永远被否 → 「指定了好友也从没偷过」
             # （2026-09-18 定位：live 库存下 1652 的三个候选被同一理由全部跳过）。
             stole = False
-            for tid, target in seq:
-                if target in taken:
-                    continue                        # 主炉已占，别在好友炉上重复炼同一张
-                prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
-                                                planned, bought, steps, tag="偷炉")
-                if prep is None:
-                    continue
-                st, stock, slots, pending, need_cnt, nb = prep
-                bought += nb
-                # 买卡 + 重读之后世界可能变了：偷炉槽被别人占了 / 我这轮进了全局冷却
-                if st["cap"].get("stove", {}).get("free_steal", 0) <= 0:
-                    self.steal_blocked = "偷炉位已被占用"
+            # ★ 偷炉也走「三档」同主炉（2026-10-19 修）：从未生产(tier0) > 未覆盖(tier1) > 其余，
+            #   否则裸 seq 会因 cid 兜底把排序末位的蒙恬（管仲独门料）挤出、永不轮到。
+            for tier in (0, 1, 2):
+                for tid, target in seq:
+                    if target in taken:
+                        continue                    # 主炉已占，别在好友炉上重复炼同一张
+                    if int(self.plans[tid].cards[target][3]) != CHANGE_FACE:
+                        continue
+                    made0 = (self._made.get(target, 0) == 0
+                             and plans_net.get(tid, ({}, {}))[0].get(target, 0) > 0)
+                    unc = (stock.get(target, 0) == 0 and pending.get(target, 0) == 0)
+                    tgt_tier = 0 if made0 else (1 if unc else 2)
+                    if tgt_tier != tier:
+                        continue
+                    prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
+                                                    planned, bought, steps, tag="偷炉",
+                                                    allow_buy=manu_allowed)
+                    if prep is None:
+                        continue
+                    st, stock, slots, pending, need_cnt, nb = prep
+                    bought += nb
+                    # 买卡 + 重读之后世界可能变了：偷炉槽被别人占了 / 我这轮进了全局冷却
+                    if st["cap"].get("stove", {}).get("free_steal", 0) <= 0:
+                        self.steal_blocked = "偷炉位已被占用"
+                        break
+                    friend = await self._pick_steal_friend(st)
+                    if not friend:
+                        self.steal_blocked = "没找到可用好友（炉满或挂着我没取的卡）"
+                        break
+                    plan = self.plans[tid]
+                    await self._refine_steal(st, tid, target, need_cnt, plan, slots, friend,
+                                             stock, pending, steps)
+                    taken.add(target)                   # 防重复提交
+                    stole = True
                     break
-                friend = await self._pick_steal_friend(st)
-                if not friend:
-                    self.steal_blocked = "没找到可用好友（炉满或挂着我没取的卡）"
+                if stole:
                     break
-                plan = self.plans[tid]
-                await self._refine_steal(st, tid, target, need_cnt, plan, slots, friend,
-                                         stock, pending, steps)
-                taken.add(target)                   # 防重复提交
-                stole = True
-                break
             if not stole and not self.steal_blocked:
                 rest = [t for _tid, t in seq if t not in taken]
                 self.steal_blocked = ("没有待提交的炉次（都已在炉上）" if not rest
@@ -1326,7 +1437,7 @@ class AutoRefine:
 
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
                             planned: set, bought: int, steps: list[dict],
-                            tag: str = "炼卡"):
+                            tag: str = "炼卡", allow_buy: bool = True):
         """备齐一个炉次的素材（缺的 10 面值底卡**就地买**），返回
         `(st, stock, slots, pending, need_cnt, n_bought)`；不可提交返回 None。
 
@@ -1344,6 +1455,14 @@ class AutoRefine:
         if any(m in plan.comp for m in short):
             return None                        # 缺的是「还得炼出来」的成品卡 → 等主炉先炼它
         need_buy = sum(short.values())
+        if not allow_buy and need_buy > 0:
+            # 合成阶段：素材不在箱里（需现买）就不当炉次 —— 优先消耗箱存、不囤新料。
+            # 变卡本 tick 会供 40 面时走这里，把炉位留给「箱里已有 40 面 → 合成 150」，
+            # 而不是现买底卡现造 40 面（用户 2026-10-18 定调「不要现去炼缺的卡」）。
+            self._log("合成跳过", True,
+                      f"{tag}·{plan.cname(target)}（{plan.name}）：素材不足且不允许现买，"
+                      f"等箱内存货/变卡")
+            return None
         if need_buy:
             free_box = self._free_change(st)
             # ★ 2026-10-03 死锁修复：换卡箱满 → 先腾位（优先移保险箱）再买。
@@ -1377,6 +1496,73 @@ class AutoRefine:
             return None
         return st, stock, slots, pending, need_cnt, need_buy
 
+    async def _submit_one(self, tid: int, target: int, st, stock, slots, pending,
+                          planned: set, bought: int, steps: list[dict],
+                          tag: str, allow_buy: bool) -> tuple | None:
+        """备料 + 投炉 + 同步世界状态，返回 (st, stock, slots, pending, bought, took)。
+
+        抽出主炉/偷炉共用的「投一炉」动作，_refine_all 的两阶段调度都调它。
+        `allow_buy=False` 时只接受「素材全在箱里」的炉次（合成，不现买）。
+        """
+        prep = await self._prepare_turn(tid, target, st, stock, slots, pending,
+                                        planned, bought, steps, tag=tag,
+                                        allow_buy=allow_buy)
+        if prep is None:
+            return None
+        st, stock, slots, pending, need_cnt, nb = prep
+        bought += nb
+        plan = self.plans[tid]
+        res = self._payload(plan, target, need_cnt, slots)
+        if res is None:
+            return (st, stock, slots, pending, bought, False)
+        payload, picked = res
+        r = await self.s.post(EP_REFINE, **payload)
+        ok = r.get("code") == 0
+        nm = plan.cname(target)
+        took = False
+        if ok:
+            self.stats["refined"] += 1
+            for m, n in need_cnt.items():
+                stock[m] -= n
+                for _ in range(n):
+                    if slots.get(m):
+                        slots[m].pop(0)
+            # 素材里来自换卡箱的那几张已经烧掉 → 同步占用数，否则本 tick 后面几炉
+            # 会误判「换卡箱 0 格」而白白空转一轮。
+            used = st["cap"].get("change", {}).get("used", 0)
+            st["cap"]["change"]["used"] = max(
+                0, used - sum(1 for _sl, _st in picked if _st == 0))
+            pending[target] += 1
+            took = True
+            self._made[target] += 1        # 累计开炉生产次数（40 面防饿死用）
+        self._log(tag, ok, f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}")
+        steps.append({"action": tag, "ok": ok,
+                      "detail": f"{nm}（{plan.name}） {r.get('message') or err_msg(r.get('code'))}"})
+        return (st, stock, slots, pending, bought, took)
+
+    def _change_specs(self, stock: Counter, pending: Counter) -> list[tuple[int, int, int]]:
+        """变卡分布目标（纯计算）：把各套「本该从底卡炼出来的 40 面卡」列出来，按需求量
+        降序 → 交给礼物卡变卡环节**分散**变出，直接替代炼卡环节「买 10 面卡 + 炼 40 面」
+        这一步，让卡炉空出来炼更高面额（用户 2026-10-18 定调「轮转不是好算法」）。
+
+        语义：`net_plan(credit=空)` 算出的 40 面卡 runs，正是「若不靠变卡、需从底卡新炼」
+        的 40 面张数；把它们变齐，net_plan（带库存）就不会再排这些 40 面的炼次，卡炉
+        转而炼 150 等高面额。这比「轮转只换单张目标」直接：多头缺口一次按量填满，且
+        不同种类都覆盖到，不会把礼物卡全堆成同一种、其余仍从底卡炼。
+        """
+        specs: list[tuple[int, int, int]] = []
+        for tid in self.queue:
+            plan = self.plans[tid]
+            # 这套本 tick 打算排几套（与 _refine_all 同口径；free_stove 仅影响封顶，给粗值）
+            sets = self._calc_sets(plan, stock, pending, 4)
+            runs, _buy = plan.net_plan(stock, pending, Counter(), sets=sets)
+            for cid, n in runs.items():
+                if n > 0 and int(cards_price(cid)) == CHANGE_FACE:
+                    specs.append((int(cid), int(n), tid))
+        # 需求量最大的 40 面卡优先补（先填满瓶颈），同量按卡 id 稳定
+        specs.sort(key=lambda x: (-x[1], x[0]))
+        return specs
+
     async def _drain_box_gift(self, steps: list[dict], stock: Counter | None = None,
                               rd=None) -> tuple | None:
         """卡箱里已有的礼物套 48 面卡 → 就地变卡，**不收礼**。
@@ -1392,7 +1578,9 @@ class AutoRefine:
 
         目标来源（2026-09-26 用户定调）：**不再写死** `gift_dst`。变卡的意义是「省掉炼
         40 面额这一步」，目标必须是**当前在炼的那套里的 40 面卡、且引擎正缺的那张**
-        —— 所以这里交给 `_pick_change_dst()` 按实时缺口挑（缺哪个变哪个、优先补最缺的）。
+        —— 所以这里交给 `_change_specs()` 把「本该从底卡炼的 40 面」按需求量列出，
+        再交 `drain_box_gift_cards(dst_specs=...)` 轮流分散到各缺失种类（缺哪个变哪个、
+        且不同种类都覆盖到，不会全堆成同一种）。
 
         ★ 2026-09-26 用户定调「变卡失败要一直变，直到成功或者礼物卡没了」：失败不再
           静默 30 分钟，而是换下一张继续（失败也烧源卡，所以箱里的卡烧完必然收手）。
@@ -1405,27 +1593,37 @@ class AutoRefine:
         """
         if stock is None:
             stock = self._stock
-        pick = self._pick_change_dst(stock)
-        if not pick:
+        pending = rd[3] if rd else self._pending
+        # ★ 2026-10-18 修：分布变卡。旧版 `_pick_change_dst` 只挑**一张**单目标，礼物卡
+        #   全堆成同一种 40 面卡，其余种类仍得从底卡炼 —— 礼物卡白变、卡炉还在炼 40 面。
+        #   现改由 `_change_specs()` 把「本该从底卡炼的 40 面」按需求量列出，交
+        #   `drain_box_gift_cards(dst_specs=...)` 轮流分散到各缺失种类，一次把缺口填满。
+        specs = self._change_specs(stock, pending)
+        if not specs:
             self.box_gift_last = {"ok": True, "skipped": True, "inbox": 0, "tried": 0,
                                   "changed": 0, "burned": 0, "dst": None,
                                   "message": "这一套的 40 面卡已够（或没有 40 面候选），"
                                              "本轮不消耗卡箱里的礼物卡"}
             return rd
-        dst = int(pick["dst"])
+        dst_ids = [cid for cid, _need, _tid in specs]
+        dst_need = {cid: need for cid, need, _tid in specs}
         try:
-            r = await gf.drain_box_gift_cards(self.s, dstid=dst)
+            r = await gf.drain_box_gift_cards(
+                self.s, dst_specs=[(d, dst_need[d]) for d in dst_ids])
         except Exception as e:  # noqa: BLE001
             self._log("礼物卡变卡", False, f"异常：{e}")
             steps.append({"action": "礼物卡变卡", "ok": False, "detail": str(e)})
             return rd
-        r["dst"] = dst
-        r["target"] = pick.get("target")
+        r["target"] = "分布变卡：" + "、".join(
+            f"{card_name(d)}×{dst_need[d]}" for d in dst_ids)
         self.box_gift_last = r
         if r.get("skipped") and not int(r.get("tried") or 0):
             return rd
         changed = int(r.get("changed") or 0)
         ok = changed > 0
+        # 轮转计数：本会话累计各 40 面卡被变出的张数（仍是兜底，防死盯一张）
+        for d, c in (r.get("per_dst") or {}).items():
+            self._change_rot[int(d)] += int(c)
         # 变卡动过卡箱 → 立刻重读，把「源卡没了 / 变出 dst 了」同步给引擎与调用方
         if changed or r.get("burned") or r.get("tried"):
             try:
@@ -1435,8 +1633,6 @@ class AutoRefine:
             if rd_new:
                 rd = rd_new
                 self._stock, self._pending = rd[1], rd[3]
-        if changed:                              # 轮转计数：本会话累计变出几张，防死盯一张
-            self._change_rot[dst] += changed
         self._log("礼物卡变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物卡变卡", "ok": ok, "detail": r.get("message") or ""})
         # 逐张明细单独成行（成功/失败都记，显示消耗的源卡名与变出的目标卡名）
@@ -1449,26 +1645,27 @@ class AutoRefine:
         只在「箱件数 ≥ upper」时才动，变卡约 50% 成功、失败不阻塞 —— 所以这里
         除了写日志不改变 tick 的成败，绝不让炼卡主流程因为变卡失败而中断。
 
-        变卡目标同样不写死：走 `_pick_change_dst()`（缺哪个套内 40 面卡变哪个），
-        和上面「卡箱礼物卡变卡」保持同一口径 —— 否则收礼变出的卡不属于在炼的那套，
-        等于白烧礼物卡。一条都挑不出来时本环节直接跳过。
+        ★ 2026-10-18 修：分布变卡（同 _drain_box_gift），把礼物卡按缺失种类分散变出，
+          不再只变同一张。
         """
-        pick = self._pick_change_dst(self._stock)
-        if not pick:
+        specs = self._change_specs(self._stock, self._pending)
+        if not specs:
             self.gift_last = {"ok": True, "skipped": True, "took": 0, "changed": 0,
                               "dst": None,
                               "message": "这一套的 40 面卡已够（或没有 40 面候选），收礼变卡跳过"}
             return
+        dst_ids = [cid for cid, _need, _tid in specs]
+        dst_need = {cid: need for cid, need, _tid in specs}
         try:
-            r = await gf.drain_gift_box(self.s, dstid=int(pick["dst"]),
-                                        upper=int(self.gift_upper),
-                                        lower=int(self.gift_lower))
+            r = await gf.drain_gift_box(
+                self.s, dst_specs=[(d, dst_need[d]) for d in dst_ids],
+                upper=int(self.gift_upper), lower=int(self.gift_lower))
         except Exception as e:  # noqa: BLE001
             self._log("礼物变卡", False, f"异常：{e}")
             steps.append({"action": "礼物变卡", "ok": False, "detail": str(e)})
             return
-        r["dst"] = int(pick["dst"])
-        r["target"] = pick.get("target")
+        r["target"] = "分布变卡：" + "、".join(
+            f"{card_name(d)}×{dst_need[d]}" for d in dst_ids)
         self.gift_last = r
         if not r.get("ok"):
             self._log("礼物变卡", False, r.get("message") or "失败")
@@ -1480,7 +1677,8 @@ class AutoRefine:
             return
         ok = (r.get("changed") or 0) > 0
         if ok:                              # 轮转计数：本会话累计变出几张，防死盯一张
-            self._change_rot[int(r.get("dst") or pick["dst"])] += int(r.get("changed") or 0)
+            for d, c in (r.get("per_dst") or {}).items():
+                self._change_rot[int(d)] += int(c)
         self._log("礼物变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物变卡", "ok": ok,
                       "detail": r.get("message") or ""})
