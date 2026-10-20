@@ -26,6 +26,7 @@ act=25 候选对手列表（读）/ act=27 对手名单（读）/ act=30 商店�
 游戏里**没有「出兵」「全员点赞」这两个独立接口**（用户 09-29 明确纠正，此前误标已全部撤）。
 """
 import json
+from collections import Counter
 from typing import Optional
 
 from .cat_dress import (  # 装扮名 / 属性名（官方 catHome_Info 配置实证，见 cat_dress 模块 doc）
@@ -1855,10 +1856,27 @@ def plan_box(state: dict, box: str = "ex") -> dict:
     留下新卡」指的正是重复卡，不是同层旧卡。
 
     ⚠ 保险箱里所有卡的 `ts` 都是 0（2026-09-28 实测），重复时只能留**第一个**。
+
+    ★ **跨箱重复也算重复**（2026-10-20 实锤修）：
+      原实现只在**本箱内**按 card_id 找重复 → 同一张卡分处两箱时（本箱 1 张、
+      另一箱 2 张）判不出 spare → 腾箱不触发 → 关卡卡箱永远满 → 服务端
+      「您的卡箱已经满啦！」拒绝发奖 → 「请先领取通关奖励」→ 出战死循环。
+      正确判据：**两箱合并后**同一 card_id 出现 ≥2 次 ⇒ 多余的可卖。
+      且**只卖本箱的**（要腾的是发奖要用的关卡箱；卖另一箱的腾不到它的位）。
+
+    ★ **卖出顺序：面额小者优先**（用户 2026-10-20 定调）：
+      同样都是重复卡，面额小的先卖 —— 保留高面额的层卡更划算。
+      面额 = card_lib 的位置值 slot（1502/2502/3502/4502/5502）。
     """
     dkey, ckey = _SG_BOX_KEY[box]
     arr = state.get(dkey) or []
     cap = int(state.get(ckey) or len(arr) or 0)
+    other_key = _SG_BOX_KEY["safe" if box == "ex" else "ex"][0]
+    other_ids: Counter = Counter()
+    for x in (state.get(other_key) or []):
+        cid = int(x.get("card_id") or 0)
+        if cid:
+            other_ids[cid] += 1
     slots: dict = {}          # slot(位置值=层) -> [卡信息]
     for i, x in enumerate(arr):
         cid = int(x.get("card_id") or 0)
@@ -1887,18 +1905,23 @@ def plan_box(state: dict, box: str = "ex") -> dict:
                                  "keep": m, "cards": [], "count": 0})
             g["cards"].append(m)
             g["count"] += 1
-            if len(g["cards"]) > 1:
+            # ★ 本箱内重复（第 2+ 张）→ 本箱多余的直接可卖。
+            # ★ 跨箱重复（本箱仅 1 张、另一箱也有）→ 本箱这张也可卖，
+            #   因为另一箱仍留着一张，收集进度不受影响。
+            if len(g["cards"]) > 1 or other_ids.get(m["card_id"], 0) >= 1:
                 spare.append(m)
         by_slot.extend(sorted(seen.values(),
                               key=lambda g: -g["keep"]["ts"]))
     cards = [m for g in slots.values() for m in g]
+    # ★ 卖出顺序：面额小者优先（slot=位置值=面额），同面额再按卡位先后
+    spare.sort(key=lambda m: (m.get("slot") or 0, m.get("index") or 0))
     return {
         "box": box,
         "capacity": cap,
         "filled": len(cards),
         "free": max(0, cap - len(cards)),
         "slots": by_slot,               # 按「层」再按卡分组，每张不同的卡一个组
-        "spare": spare,                 # 同一张卡的第 2+ 张（可卖，换三国币）
+        "spare": spare,                 # 重复卡（本箱内第2+张，或跨箱重复的本箱那张）
         "themes": sorted({m["theme"] for m in cards if m["theme"]}),
     }
 
@@ -2131,24 +2154,26 @@ async def sanguo_sell_ex(session, index: int, card_id: int) -> dict:
 
 async def auto_sell_spare(session, state: dict, box: str = "ex",
                           keep_free: int = 1) -> dict:
-    """腾位：把某一箱里同层的多余卡卖掉，至少留 `keep_free` 格。
+    """腾位：把某一箱里重复的卡卖掉，至少留 `keep_free` 格。
 
     只在「卡箱将满」时才动手（free <= keep_free），绝不在还有空位时主动卖卡。
     默认只动关卡卡箱 —— 保险箱里可能压着还缺的层卡（实测：第 4 层三张全在保险箱），
-    而「保险箱 → 关卡卡箱」的搬运接口没有实证，自动卖保险箱的卡很容易把需要的卡卖掉。
+    而「保险箱 → 关卡卡箱」的搬运接口**没有实证**（三国只有 act=2/5/8/11 四个写
+    接口，无挪卡），自动卖保险箱的卡很容易把需要的卡卖掉。
+    ★ 跨箱重复也算重复（2026-10-20 修）：判据见 plan_box。
+    ★ 卖出顺序：面额小者优先（用户 2026-10-20 定调），见 plan_box 的 spare 排序。
     返回 {ok, box, sold:[…], failed, free_after, skipped}。
     """
     plan = plan_box(state, box)
     if plan["free"] > keep_free or not plan["spare"]:
         return {"ok": True, "box": box, "skipped": True, "sold": [],
                 "free_after": plan["free"]}
-    # 卡位 index 要回查该箱 real 下标（card_list 里没有 index 字段）
-    real = state.get(_SG_BOX_KEY[box][0]) or []
-    idx = {int(x.get("card_id") or 0): i for i, x in enumerate(real)}
     bno = SG_BOX_EX if box == "ex" else SG_BOX_SAFE
     sold, failed = [], None
     for m in plan["spare"]:
-        i = idx.get(m["card_id"], -1)
+        # 用 plan_box 记下的**真实卡位下标**（同箱内同 id 多张时，card_id→index
+        # 的字典映射只会保留最后一个，会卖错格子）。
+        i = int(m.get("index") if m.get("index") is not None else -1)
         if i < 0:
             continue
         r = await sanguo_sell(session, bno, i, m["card_id"])
