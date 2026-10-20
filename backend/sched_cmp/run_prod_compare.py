@@ -127,6 +127,17 @@ def main():
         lines.append(f"| {sets} | **{sim['t_last_h']:.2f}h**（利用率{sim['util']:.3f}） "
                      f"| {cell('贪心基线')} | {cell('DP')} | {cell('A*')} | {cell('ILP')} |")
     lines.append("")
+    # 耗时 / 搜索量（执行效率）
+    lines.append("耗时 / 搜索量（纯算法求解用时，不含仿真）：")
+    lines.append("")
+    lines.append("| sets | 生产引擎仿真墙钟 | 贪心 | DP | A* | ILP(时间索引B&B) |")
+    lines.append("|---|---|---|---|---|---|")
+    for sets in (1, 2, 4):
+        sim = results[sets]["sim"]
+        ref = results[sets]["ref"]
+        lines.append(f"| {sets} | {sim.get('wall_s', 0):.1f}s（含 subprocess/网络模拟） "
+                     f"| {ref['贪心基线'][3]} | {ref['DP'][3]} | {ref['A*'][3]} | {ref['ILP'][3]} |")
+    lines.append("")
     lines.append("生产引擎明细（t_last=最后作业精确完工时刻，含 45s tick 决策粒度）：")
     lines.append("")
     lines.append("| sets | 末次完工 | 各次上交 | 顶层卡(西施)完工 | 作业数 | 总炉时 | 利用率 |")
