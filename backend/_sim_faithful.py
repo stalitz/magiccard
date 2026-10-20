@@ -392,7 +392,7 @@ async def main():
 
     INTERVAL = 45.0
     done_hh = None
-    max_ticks = 15000
+    max_ticks = 300000                       # 深度主题(如3星)长工期也可能数万 tick
     for tick_n in range(max_ticks):
         vs.now += int(INTERVAL)
         _VT["now"] = vs.now            # 让 time.time 走虚拟时钟（刷新 _collected_shows 缓存）

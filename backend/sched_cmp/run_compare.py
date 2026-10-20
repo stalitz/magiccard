@@ -13,20 +13,29 @@ import sched_greedy
 import sched_dp
 import sched_astar
 import sched_ilp
+import recipes
 
 MACHINES = 4
 args = [a for a in sys.argv[1:]]
 TIME_BUDGET = 60.0
+TID = 290
 if "-t" in args:
     i = args.index("-t")
     TIME_BUDGET = float(args[i + 1])
     del args[i:i + 2]
+if "--tid" in args:
+    i = args.index("--tid")
+    TID = int(args[i + 1])
+    del args[i:i + 2]
 SETS_LIST = [int(x) for x in args if x.isdigit()] or [1, 2, 4]
+
+RECIPE = recipes.build_recipe_set(TID) if TID != 290 else recipes
 
 
 def run_one(sets):
-    inst = instance.build_instance(sets, MACHINES)
-    print(f"\n=== sets={sets} | {instance.summary(inst)} ===")
+    inst = instance.build_instance(sets, MACHINES, recipe=RECIPE)
+    print(f"\n=== sets={sets} | {RECIPE.name}(tid={TID}, {RECIPE.star}星) | "
+          f"{instance.summary(inst)} ===")
     rows = []
 
     # 贪心基线
@@ -63,7 +72,8 @@ def run_one(sets):
 
 
 if __name__ == "__main__":
-    print(f"时间预算 {TIME_BUDGET:.0f}s/法；机器={MACHINES}；实例=七雄Q传(tid=290) 2星4层配方")
+    print(f"时间预算 {TIME_BUDGET:.0f}s/法；机器={MACHINES}；"
+          f"实例={RECIPE.name}(tid={TID}) {RECIPE.star}星配方")
     for s in SETS_LIST:
         run_one(s)
     print("\n完成。")

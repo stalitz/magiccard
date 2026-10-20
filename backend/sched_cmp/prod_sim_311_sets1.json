@@ -1,0 +1,29 @@
+{
+ "tid": 311,
+ "sets": 0,
+ "uncollected": 1,
+ "rounds": 1,
+ "gift": 0,
+ "steal": true,
+ "machines": 4,
+ "top_cid": 4711,
+ "ticks": 300000,
+ "t_last": 50490,
+ "t_last_h": 14.025,
+ "t_all_h": 14.025,
+ "top_times_h": [],
+ "submit_times_h": [],
+ "done": {
+  "4693": 2,
+  "4694": 3,
+  "4695": 3,
+  "4696": 5,
+  "4697": 6,
+  "4698": 8
+ },
+ "n_done": 27,
+ "leftover": [],
+ "work_h": 54.0,
+ "util": 0.9626,
+ "wall_s": 65.9
+}

@@ -89,3 +89,118 @@ def recipe_meta():
         "dur": DUR,
         "face_dur": FACE_DUR,
     }
+
+
+# ---------------------------------------------------------------------------
+# 泛化：从 data/card_lib.json 读取任意主题的配方树
+# ---------------------------------------------------------------------------
+import json as _json                       # noqa: E402
+from pathlib import Path as _Path         # noqa: E402
+
+_LIB_DEFAULT = (_Path(__file__).resolve().parent.parent.parent
+                / "data" / "card_lib.json")
+
+
+def _load_lib(lib_path=None):
+    p = _Path(lib_path) if lib_path else _LIB_DEFAULT
+    return _json.loads(p.read_text(encoding="utf-8"))
+
+
+class RecipeSet:
+    """任意 tid 的配方集，接口与模块级常量（CARDS/DUR/compute_runs/...）一致，
+    供 instance.build_instance 与 run_compare / run_prod_compare 直接替换使用。
+
+    底卡 cut 规则（与七雄Q传硬编码版同语义）：一张卡的素材若**有任何一个不在
+    本主题的可炼卡集合里**（即买即来的底卡），则该卡整体当作底卡（mats=[]），
+    其炉时仍照常计入——等价于「素材无限供应、0 约束」。
+    """
+
+    def __init__(self, tid, lib_path=None):
+        lib = _load_lib(lib_path)
+        tcl = lib["theme_card_list"]
+        tco = lib["theme_compose_list"]
+        cl = lib["card_list"]
+        face_map = {int(c[0]): int(c[3]) for c in cl}
+        name_map = {int(c[0]): str(c[2]) for c in cl}
+
+        th = next((t for t in tcl if int(t[0]) == int(tid)), None)
+        self.tid = int(tid)
+        self.name = str(th[1]).strip() if th else f"tid{tid}"
+        self.star = int(th[2] or 0) if th else 0
+        self.theme_ids = ([int(x) for x in (th[11] or []) if x] if th else [])
+
+        comp = {}
+        for c in tco:
+            if int(c[0]) == int(tid):
+                cid = int(c[2])
+                comp[cid] = {"mats": [int(x) for x in c[3:6] if x],
+                             "dur": int(c[6])}
+        card_ids = set(comp)
+        cards = {}
+        for cid, info in comp.items():
+            used = [m for m in info["mats"] if m in card_ids]
+            cards[cid] = (name_map.get(cid, f"card{cid}"),
+                          face_map.get(cid, 0), used)
+        # 顶层 = 深度最大的卡（可能多张并列，取其一作代表）
+        self.CARDS = cards
+        self.DUR = {cid: info["dur"] for cid, info in comp.items()}
+        faces = sorted({f for _, f, _ in cards.values()})
+        self.FACE_DUR = {f: min(self.DUR[c] for c in cards if cards[c][1] == f)
+                         for f in faces}
+        # 深度缓存
+        self._depth = {}
+        self._ess = {}
+
+    # --- 与模块级同名的接口 ---
+    def depth_of(self, cid, _seen=None):
+        if cid in self._depth:
+            return self._depth[cid]
+        mats = self.CARDS.get(cid, (None, None, []))[2]
+        if not mats:
+            self._depth[cid] = 0
+            return 0
+        d = 1 + max(self.depth_of(m) for m in mats)
+        self._depth[cid] = d
+        return d
+
+    def mats_count(self, cid):
+        out = {}
+        for m in self.CARDS.get(cid, (None, None, []))[2]:
+            out[m] = out.get(m, 0) + 1
+        return out
+
+    def ess_work(self, cid):
+        if cid in self._ess:
+            return self._ess[cid]
+        v = self.DUR[cid] + sum(k * self.ess_work(m)
+                                for m, k in self.mats_count(cid).items())
+        self._ess[cid] = v
+        return v
+
+    def compute_runs(self, sets):
+        ids = list(self.CARDS.keys())
+        depths = {c: self.depth_of(c) for c in ids}
+        need = {cid: max(1, sets) for cid in ids}
+        runs = {}
+        for cid in sorted(ids, key=lambda c: -depths[c]):
+            n = need.pop(cid, 0)
+            if n <= 0:
+                continue
+            mats = self.CARDS[cid][2]
+            runs[cid] = runs.get(cid, 0) + n
+            for m in mats:
+                need[m] = need.get(m, 0) + n
+        return runs
+
+    def top_cid(self):
+        return max(self.CARDS, key=lambda c: (self.depth_of(c), c))
+
+    def recipe_meta(self):
+        return {
+            "name": self.name, "top": self.top_cid(), "star": self.star,
+            "cards": self.CARDS, "dur": self.DUR, "face_dur": self.FACE_DUR,
+        }
+
+
+def build_recipe_set(tid, lib_path=None):
+    return RecipeSet(tid, lib_path)

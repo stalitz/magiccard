@@ -9,21 +9,22 @@
 
 compute_runs 口径与 auto_refine.net_plan 一致（每张套内卡按 sets 算 1 份收藏需求）。
 """
-import recipes
+import recipes as _recipes_mod
 
 
-def build_instance(sets, machines=4):
-    runs = recipes.compute_runs(sets)
-    types = [c for c in recipes.CARDS if runs.get(c, 0) > 0]
+def build_instance(sets, machines=4, recipe=None):
+    recipe = recipe or _recipes_mod
+    runs = recipe.compute_runs(sets)
+    types = [c for c in recipe.CARDS if runs.get(c, 0) > 0]
     idx = {c: i for i, c in enumerate(types)}
     n = len(types)
-    dur = [recipes.DUR[c] for c in types]
+    dur = [recipe.DUR[c] for c in types]
     mats = []
     for c in types:
-        mc = recipes.mats_count(c)
+        mc = recipe.mats_count(c)
         mats.append(tuple((idx[m], k) for m, k in sorted(mc.items())))
     need0 = [runs[c] for c in types]
-    depth = [recipes.depth_of(c) for c in types]
+    depth = [recipe.depth_of(c) for c in types]
 
     # 每张卡的关键路径（链式下界）
     cp = [0] * n
@@ -38,7 +39,7 @@ def build_instance(sets, machines=4):
         cpf(i)
 
     # 最后一张 i 卡开工前必须完成的炉时 = Σ k*ess(素材)（不含收藏副本）
-    ess_before = [sum(k * recipes.ess_work(types[j]) for j, k in mats[i])
+    ess_before = [sum(k * recipe.ess_work(types[j]) for j, k in mats[i])
                   for i in range(n)]
 
     total_dur = sum(need0[i] * dur[i] for i in range(n))
@@ -53,6 +54,7 @@ def build_instance(sets, machines=4):
         "n": n,
         "idx": idx,
         "dur": dur,
+        "face": [recipe.CARDS[c][1] for c in types],
         "mats": mats,
         "need0": need0,
         "depth": depth,
@@ -66,7 +68,7 @@ def build_instance(sets, machines=4):
 def summary(inst):
     by_face = {}
     for i, c in enumerate(inst["types"]):
-        f = recipes.CARDS[c][1]
+        f = inst["face"][i]
         by_face[f] = by_face.get(f, 0) + inst["need0"][i]
     return (f"sets={inst['sets']} 机器={inst['machines']} 类型数={inst['n']} "
             f"总卡数={sum(inst['need0'])} 总炉时={inst['total_dur']//3600}h "
