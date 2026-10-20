@@ -1455,13 +1455,16 @@ class AutoRefine:
         if any(m in plan.comp for m in short):
             return None                        # 缺的是「还得炼出来」的成品卡 → 等主炉先炼它
         need_buy = sum(short.values())
-        if not allow_buy and need_buy > 0:
-            # 合成阶段：素材不在箱里（需现买）就不当炉次 —— 优先消耗箱存、不囤新料。
-            # 变卡本 tick 会供 40 面时走这里，把炉位留给「箱里已有 40 面 → 合成 150」，
-            # 而不是现买底卡现造 40 面（用户 2026-10-18 定调「不要现去炼缺的卡」）。
+        target_is_40 = int(plan.cards[target][3]) == CHANGE_FACE
+        if not allow_buy and need_buy > 0 and target_is_40:
+            # 合成阶段(allow_buy=False)只禁止「现买现造 40 面卡本身」——
+            #   depth≥3 主题的上层卡会**直接吃箱外底卡**（如 4699=4693+4690+4691），
+            #   缺的底卡就地买属于「即时拉动合成上层卡」、并非现造 40 面，必须放行，
+            #   否则上层卡永缺底卡 → 整套餐卡死锁（金陵十二钗 3 星实锤 2026-10-20）。
+            #   40 面卡本身仍由变卡/阶段二负责，这里素材不齐（含 40 面成分）就等。
             self._log("合成跳过", True,
-                      f"{tag}·{plan.cname(target)}（{plan.name}）：素材不足且不允许现买，"
-                      f"等箱内存货/变卡")
+                      f"{tag}·{plan.cname(target)}（{plan.name}）：40面卡素材不足且不允许现造，"
+                      f"等变卡/阶段二")
             return None
         if need_buy:
             free_box = self._free_change(st)
