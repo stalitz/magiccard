@@ -51,7 +51,9 @@ def run_one(sets):
             t0 = _t.time()
             if name == "DP":
                 # 机器受限实例（如 1星 sets=2：54/4=13.5h，最优 14.0h 仅高 0.5h）需大搜索量
-                # 才能证完；给足节点/时限预算（相对状态记忆化已能合并重复态）。
+                # 才能证完；给足节点/时限预算。
+                # ⚠️ 归因订正：同预算对照下旧版 DP 也能证完该实例，故「证完」是预算所致，
+                # 非相对状态规范化所致（后者真实收益在 2/3 星）。
                 ms, a, st = mod.solve(inst, time_budget=max(TIME_BUDGET, 240.0),
                                      node_budget=80_000_000)
             elif name == "A*":
