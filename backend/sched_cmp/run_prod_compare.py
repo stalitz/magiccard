@@ -76,7 +76,16 @@ def check_work(sim, sets):
 
 
 def solve_ref(sets, budget):
-    """四法解同一实例，返回 {名字: (makespan_h, util, ok, 说明)}。"""
+    """四法解同一实例，返回 {名字: (makespan_h, util, ok, 说明)}。
+
+    预算说明：1星 sets=2 是「机器产能受限」硬核实例（总炉时/4 仅比最优低 0.5h），
+    纯结构下界填不满缝隙，需较大搜索量才能证完最优性。
+    - DP：相对状态记忆化（合并所有 t 平移重复态）+ 累资源下界，节点预算给足 80M、
+      时限 240s → 可证完 1星 sets=2（约 34M 节点/167s）。
+    - A*：best-first 在本类机器受限实例节点速率远低于 DP（24k/s vs 200k/s），
+      即便 120s 仍难证完 1星 sets=2；但其返回的 14.0h 即真实最优（与其它法+贪心一致）。
+    - ILP：时间索引 B&B（无 LP 松弛求解器），成败看结构，1星 sets=2 仍不证完（已知）。
+    """
     inst = instance.build_instance(sets, 4, recipe=RECIPE)
     out = {}
 
@@ -84,17 +93,19 @@ def solve_ref(sets, budget):
     ok, m = executor.evaluate(inst, sc)
     out["贪心基线"] = (m["makespan_h"], m["utilization"], ok, "list scheduling")
 
-    ms, sc2, st = sched_dp.solve(inst, time_budget=budget)
+    ms, sc2, st = sched_dp.solve(inst, time_budget=max(budget, 240.0),
+                                node_budget=80_000_000)
     ok2, m2 = executor.evaluate(inst, sc2)
     out["DP"] = (m2["makespan_h"], m2["utilization"], ok2,
                  f"{st['nodes']}节点/{st['time']:.2f}s" + ("" if not st["bounded"] else " 未证完"))
 
-    ms, sc3, st = sched_astar.solve(inst, time_budget=budget)
+    ms, sc3, st = sched_astar.solve(inst, time_budget=min(budget, 120.0) if budget < 240 else 120.0,
+                                   max_queue=12_000_000)
     ok3, m3 = executor.evaluate(inst, sc3)
     out["A*"] = (m3["makespan_h"], m3["utilization"], ok3,
                  f"{st['expanded']}展开/{st['time']:.2f}s" + ("" if not st["bounded"] else " 未证完"))
 
-    ms, sc4, st = sched_ilp.solve(inst, time_budget=budget)
+    ms, sc4, st = sched_ilp.solve(inst, time_budget=min(budget, 60.0))
     ok4, m4 = executor.evaluate(inst, sc4)
     out["ILP"] = (m4["makespan_h"], m4["utilization"], ok4,
                   f"{st['nodes']}节点/{st['time']:.2f}s" + ("" if not st["bounded"] else " 未证完"))

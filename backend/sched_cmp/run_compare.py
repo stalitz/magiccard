@@ -49,7 +49,15 @@ def run_one(sets):
     for name, mod in (("DP", sched_dp), ("A*", sched_astar), ("ILP", sched_ilp)):
         try:
             t0 = _t.time()
-            ms, a, st = mod.solve(inst, time_budget=TIME_BUDGET)
+            if name == "DP":
+                # 机器受限实例（如 1星 sets=2：54/4=13.5h，最优 14.0h 仅高 0.5h）需大搜索量
+                # 才能证完；给足节点/时限预算（相对状态记忆化已能合并重复态）。
+                ms, a, st = mod.solve(inst, time_budget=max(TIME_BUDGET, 240.0),
+                                     node_budget=80_000_000)
+            elif name == "A*":
+                ms, a, st = mod.solve(inst, time_budget=max(TIME_BUDGET, 120.0))
+            else:
+                ms, a, st = mod.solve(inst, time_budget=TIME_BUDGET)
             el = _t.time() - t0
             ok, m = executor.evaluate(inst, a)
             nd = st.get("nodes", st.get("expanded", "-"))

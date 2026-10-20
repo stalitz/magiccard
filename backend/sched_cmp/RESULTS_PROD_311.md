@@ -14,9 +14,9 @@
 
 | sets | 生产引擎仿真墙钟 | 贪心 | DP | A* | ILP(时间索引B&B) |
 |---|---|---|---|---|---|
-| 1 | 1.4s（含 subprocess/网络模拟） | list scheduling | 495节点/0.01s | 33展开/0.02s | 497节点/0.01s |
-| 2 | 2.6s（含 subprocess/网络模拟） | list scheduling | 16979节点/0.06s | 7708展开/0.15s | 209488节点/0.74s |
-| 4 | 5.7s（含 subprocess/网络模拟） | list scheduling | 109节点/0.01s | 55展开/0.08s | 110节点/0.01s |
+| 1 | 1.4s（含 subprocess/网络模拟） | list scheduling | 495节点/0.01s | 65展开/0.05s | 497节点/0.01s |
+| 2 | 2.6s（含 subprocess/网络模拟） | list scheduling | 14097节点/0.08s | 7388展开/0.18s | 209488节点/0.77s |
+| 4 | 5.7s（含 subprocess/网络模拟） | list scheduling | 109节点/0.01s | 109展开/0.17s | 110节点/0.01s |
 
 生产引擎明细（t_last=最后作业精确完工时刻，含 45s tick 决策粒度）：
 

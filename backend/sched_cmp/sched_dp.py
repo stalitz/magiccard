@@ -1,16 +1,19 @@
 """DP 精确求解器（类型级，自包含，零第三方依赖）。
 
-状态 = (各类型待产数 need, 各类型库存 stock, 在炉 running=(类型,完成时刻)已排序, 当前时刻 t)
+状态 = (各类型待产数 need, 各类型库存 stock, 在炉 running=(类型,剩余时间)已排序)
   - 同类型卡完全可互换 → 按「类型计数向量」分支既完整又无排列爆炸
+  - running 以「相对剩余时间」(finish - t) 表示 → 完成耗时只取决于 (need,stock,running_rel)，
+    与绝对时刻 t 无关；memo 据此合并所有 t 平移的重复状态，大幅削减状态空间
   - 非延时：有空炉且有可开类型必开（可开数 total ∈ [1, min(空炉, 素材允许)]）
   - 开工即承诺（need 减 1、扣库存）；完成时入库存
-  - makespan = 最后一张卡的完工时刻（叶子返回 max(t, 在炉最晚完成时刻)）
+  - makespan = 最后一张卡的完工时刻（叶子返回 max(0, 在炉最晚剩余) 作为「额外耗时」）
 
-可采纳下界（均可采纳）：
-  1) max(在炉完成时刻, t)
-  2) t + 剩余总炉时 / M        （剩余炉时 = 未开工 need*dur + 在炉剩余）
-  3) 链式：对每个未完工类型 i，t + dur[i] + max(素材最早可增量时刻)
-UB = 内置关键路径列表调度；LB ≥ UB 剪枝；记忆化 state → 最优完工值。
+可采纳下界（均可采纳，返回相对额外耗时 extra）：
+  1) max(在炉剩余时间, 0)
+  2) 剩余总炉时 / M        （剩余炉时 = 未开工 need*dur + 在炉剩余）
+  3) 链式：对每个未完工类型 i，dur[i] + max(素材最早可增量相对时刻)
+  4) 累资源下界：考虑各类型最早开工(发布)时刻后的机器产能约束（≥ 2，永不劣化）
+UB = 内置关键路径列表调度；LB ≥ UB 剪枝；记忆化 state → 相对最优额外耗时。
 路径随递归下行携带（不回放 memo），叶子改进 UB 时记录完整调度。
 返回 (makespan, schedule, stats)。
 """
@@ -141,12 +144,70 @@ def _vectors(startable, mats, stock, need, cap, maximal_only=True):
     return res
 
 
+def _chain_avail_rel(j, k, stock, running_rel, seen):
+    """k 张 j 卡可用的最早增量时刻（相对剩余时间，可采纳下界）。"""
+    if stock[j] >= k:
+        return 0.0
+    fins = [f for (j2, f) in running_rel if j2 == j]
+    if fins:
+        if stock[j] + len(fins) >= k:
+            return sorted(fins)[k - stock[j] - 1]
+        return min(fins)
+    if j in seen:
+        return 0.0
+    seen.add(j)
+    return DUR[j] + max((_chain_avail_rel(m, kk, stock, running_rel, seen)
+                         for m, kk in MATS[j]), default=0.0)
+
+
+def _cum_lb(need, stock, running_rel, t):
+    """累资源下界（相对额外耗时，可采纳，≥ 剩余总炉时/M）。
+
+    各类型最早开工(发布)时刻 s_i 由链式可得；则最优 makespan ≥ max(
+      剩余总炉时/M,
+      max_i(s_i + dur_i),
+      max_t  max( A(t)/M, t + B(t)/M )    其中 A(t)=发布≤t 的炉时、B(t)=发布>t 的炉时
+    )。这些是任何可行调度的必要条件，故可采纳；且必 ≥ 2。"""
+    starts = []
+    running_types = set(i for i, _ in running_rel)
+    for i in range(N):
+        if need[i] <= 0:
+            continue
+        if i in running_types:
+            s = 0.0
+        else:
+            s = max((_chain_avail_rel(j, kk, stock, running_rel, set())
+                     for j, kk in MATS[i]), default=0.0)
+        starts.append((s, DUR[i], need[i]))
+    rem_running = sum(f for _, f in running_rel)
+    Wtot = sum(d * nd for _, d, nd in starts) + rem_running
+    lb = Wtot / MACHINES
+    for s, d, nd in starts:
+        if s + d > lb:
+            lb = s + d
+    pts = sorted(set([0.0] + [s for s, _, _ in starts]))
+    for tt in pts:
+        A = sum(d * nd for s, d, nd in starts if s <= tt) + (
+            rem_running if tt >= 0 else 0)
+        B = sum(d * nd for s, d, nd in starts if s > tt)
+        if A / MACHINES > lb:
+            lb = A / MACHINES
+        if tt + B / MACHINES > lb:
+            lb = tt + B / MACHINES
+    return lb
+
+
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           maximal_only=True):
-    dur = inst["dur"]
-    mats = inst["mats"]
-    M = inst["machines"]
-    n = inst["n"]
+    global DUR, MATS, MACHINES, N
+    DUR = inst["dur"]
+    MATS = inst["mats"]
+    MACHINES = inst["machines"]
+    N = inst["n"]
+    dur = DUR
+    mats = MATS
+    M = MACHINES
+    n = N
     need0 = tuple(inst["need0"])
 
     ub_sched = _ub_schedule(inst)
@@ -157,23 +218,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     t0 = _t.time()
     memo = {}
 
-    def key_of(need, stock, running, t):
-        return (need, stock, running, t)
-
-    def chain_avail(j, k, stock, running, t, seen):
-        """k 张 j 卡可用的最早增量时刻（下界，可采纳）。"""
-        if stock[j] >= k:
-            return 0.0
-        fins = [f for (j2, f) in running if j2 == j]
-        if fins:
-            if stock[j] + len(fins) >= k:
-                return sorted(fins)[k - stock[j] - 1] - t
-            return min(fins) - t
-        if j in seen:
-            return 0.0
-        seen.add(j)
-        return dur[j] + max((chain_avail(m, kk, stock, running, t, seen)
-                             for m, kk in mats[j]), default=0.0)
+    def key_of(need, stock, running_rel):
+        return (need, stock, running_rel)
 
     def path_to_sched(path):
         out = []
@@ -183,104 +229,108 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     out.append((i, t))
         return out
 
-    def dfs(need, stock, running, t, path):
-        adv = []
+    def dfs(need, stock, running_rel, t, path):
+        """返回从该状态的「相对额外耗时」(makespan - t)，或 INF。"""
         while True:
-            # ---- 叶子：全部开工完 → makespan = 最后完工时刻 ----
+            # ---- 叶子：全部开工完 → 额外耗时 = 在炉最晚剩余 ----
             if not any(need):
-                fin = max([t] + [f for _, f in running])
-                if fin < best["val"] - 1e-9:
-                    best["val"] = fin
+                fin = max([0.0] + [f for _, f in running_rel])
+                if t + fin < best["val"] - 1e-9:
+                    best["val"] = t + fin
                     best["sched"] = path_to_sched(path)
                     best["from"] = "DP"
-                v = fin
-                for k2 in adv:
-                    memo[k2] = v
-                return v
+                return fin
 
-            key = key_of(need, stock, running, t)
+            key = key_of(need, stock, running_rel)
             hit = memo.get(key) if use_memo else None
             if hit is not None:
                 stats["memo_hits"] += 1
-                for k2 in adv:
-                    memo[k2] = hit
                 return hit
             if stats["nodes"] > node_budget or (_t.time() - t0) > time_budget:
                 stats["bounded"] = True
                 return INF
             stats["nodes"] += 1
 
-            # ---- 收卡：完成时刻 <= t 的入库存 ----
-            if any(f <= t + EPS for _, f in running):
+            # ---- 收卡：剩余时间 <= 0 的入库存 ----
+            if any(f <= EPS for _, f in running_rel):
                 ns = list(stock)
                 nr = []
-                for i2, f in running:
-                    if f <= t + EPS:
+                for i2, f in running_rel:
+                    if f <= EPS:
                         ns[i2] += 1
                     else:
                         nr.append((i2, f))
                 stock = tuple(ns)
-                running = tuple(nr)
+                running_rel = tuple(nr)
                 continue
 
             startable = [i for i in range(n)
                          if need[i] > 0 and all(stock[j] >= kk for j, kk in mats[i])]
-            idle = M - len(running)
+            idle = M - len(running_rel)
             if idle <= 0 or not startable:
-                if not running:
+                if not running_rel:
                     return INF          # 死路：无机在炉也无矿可开
-                nt = min(f for _, f in running)
-                adv.append(key)
-                t = nt
+                dt = min(f for _, f in running_rel)
+                running_rel = tuple((i, f - dt) for i, f in running_rel)
+                t = t + dt
                 continue
 
-            # ---- 可采纳下界 ----
-            lb = max([t] + [f for _, f in running])
+            # ---- 可采纳下界（相对额外耗时）----
+            lb = max([0.0] + [f for _, f in running_rel])
             rem = sum(need[i] * dur[i] for i in range(n)) + \
-                sum(max(0.0, f - t) for _, f in running)
-            lb2 = t + rem / M
+                sum(f for _, f in running_rel)
+            lb2 = rem / M
             if lb2 > lb:
                 lb = lb2
-            running_types = set(i for i, _ in running)
+            running_types = set(i for i, _ in running_rel)
             for i in range(n):
                 if need[i] <= 0 or i in running_types:
                     continue
-                ch = dur[i] + max((chain_avail(j, kk, stock, running, t, set())
+                ch = dur[i] + max((_chain_avail_rel(j, kk, stock, running_rel, set())
                                    for j, kk in mats[i]), default=0.0)
-                if t + ch > lb:
-                    lb = t + ch
-            if lb >= best["val"] - 1e-9:
+                if ch > lb:
+                    lb = ch
+            cum = _cum_lb(need, stock, running_rel, t)
+            if cum > lb:
+                lb = cum
+            # 绝对下界 = t + lb；超过已知最优则剪枝（仅当前节点放弃）
+            if t + lb >= best["val"] - 1e-9:
                 return INF
 
             # ---- 分支：可行开工向量（总数 1..cap）----
+            # 每个向量推进到该向量下最早完工 dt，再递归；父额外耗时 = dt + 子额外
             cap = min(idle, sum(need[i] for i in startable))
             vecs = _vectors(startable, mats, stock, need, cap, maximal_only)
             best_v = INF
             for vec in vecs:
                 ns = list(stock)
                 nn = list(need)
-                nr = list(running)
+                nr = list(running_rel)
                 for i, c in vec:
                     for _ in range(c):
                         for j, kk in mats[i]:
                             ns[j] -= kk
                         nn[i] -= 1
-                        nr.append((i, t + dur[i]))
+                        nr.append((i, dur[i]))
                 nr.sort()
-                nt = min(f for _, f in nr)
-                v = dfs(tuple(nn), tuple(ns), tuple(nr), nt, path + ((t, vec),))
-                if v < best_v - 1e-9:
-                    best_v = v
-                if best_v <= lb + 1e-9:
+                dt = min(f for _, f in nr)
+                nrr = tuple((i, f - dt) for i, f in nr)
+                v = dfs(tuple(nn), tuple(ns), nrr, t + dt, path + ((t, vec),))
+                if dt + v < best_v - 1e-9:
+                    best_v = dt + v
+                if dt + v <= lb + 1e-9:
                     break               # 已达下界，无需再试其它向量
             memo[key] = best_v
-            for k2 in adv:
-                memo[k2] = best_v
             return best_v
 
+    # 初始 running 为空 → 相对剩余时间 = ()
     v = dfs(need0, tuple([0] * n), (), 0.0, ())
     stats["time"] = _t.time() - t0
-    stats["opt"] = v
-    if v < INF and abs(v - best["val"]) > 1e-6:
-        stats["note"] = f"root={v/3600:.2f}h best={best['val']/3600:.2f}h 不一致"
+    # 根 t=0，v 即绝对 makespan；若证完应与 best["val"] 一致
+    if v < INF:
+        stats["opt"] = v
+        if abs(v - best["val"]) > 1e-6:
+            stats["note"] = f"root={v/3600:.2f}h best={best['val']/3600:.2f}h 不一致"
+    else:
+        stats["opt"] = best["val"]
     return best["val"], best["sched"], stats

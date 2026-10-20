@@ -1,10 +1,13 @@
 """A* 精确求解器（类型级，自包含，零第三方依赖，不引用其它调度器）。
 
-状态 = (need, stock, running=(类型,完成时刻), t)，与 DP 同问题模型；
-f(state) = t + h_rem = 该状态完工时刻的可采纳下界（三者取大）：
-  1) max(在炉完成时刻, t)
-  2) t + 剩余总炉时 / M
-  3) t + max_i( dur[i] + 素材最早可增量时刻 )     （链式，孙膑喂多家也正确）
+状态 = (need, stock, running_rel=(类型,剩余时间)已排序)，与 DP 同问题模型；
+running 以「相对剩余时间」(finish - t) 表示 → 完成耗时只取决于 (need,stock,running_rel)，
+与绝对时刻 t 无关；去重(transposition)据此合并所有 t 平移的重复状态。
+f(state) = t + h_rel = 该状态完工时刻的可采纳下界（相对 h_rel 取三条 + 累资源）：
+  1) max(在炉剩余时间, 0)
+  2) 剩余总炉时 / M
+  3) 链式：dur[i] + max(素材最早可增量相对时刻)
+  4) 累资源下界（≥ 2，永不劣化）
 最佳优先弹出 f 最小状态；第一个弹出的「目标状态」（need 全 0）即最优：
   最优调度路径上每个状态的 f ≤ OPT，且目标状态 f = 精确完工时刻，
   故第一个出队目标的 f = OPT。
@@ -82,8 +85,7 @@ def _ub_schedule(inst):
 
 def _vectors(startable, mats, stock, need, cap, maximal_only=True):
     """所有可行开工向量：1 ≤ 总数 ≤ cap，每类型 ≤ min(need, 素材允许)，联合素材可行。
-    maximal_only=True 时只保留「极大」向量（再也加不进任何一张）——
-    非延时调度中还能加开却不开不会更优（空炉+库存素材是纯浪费）。"""
+    maximal_only=True 时只保留「极大」向量（再也加不进任何一张）。"""
     items = []
     for i in startable:
         lim = need[i]
@@ -138,11 +140,84 @@ def _vectors(startable, mats, stock, need, cap, maximal_only=True):
     return res
 
 
+def _chain_avail_rel(j, k, stock, running_rel, seen):
+    """k 张 j 卡可用的最早增量时刻（相对剩余时间，可采纳下界）。"""
+    if stock[j] >= k:
+        return 0.0
+    fins = [f for (j2, f) in running_rel if j2 == j]
+    if fins:
+        if stock[j] + len(fins) >= k:
+            return sorted(fins)[k - stock[j] - 1]
+        return min(fins)
+    if j in seen:
+        return 0.0
+    seen.add(j)
+    return DUR[j] + max((_chain_avail_rel(m, kk, stock, running_rel, seen)
+                         for m, kk in MATS[j]), default=0.0)
+
+
+def _cum_lb(need, stock, running_rel, t):
+    """累资源下界（相对额外耗时，可采纳，≥ 剩余总炉时/M）。"""
+    starts = []
+    running_types = set(i for i, _ in running_rel)
+    for i in range(N):
+        if need[i] <= 0:
+            continue
+        if i in running_types:
+            s = 0.0
+        else:
+            s = max((_chain_avail_rel(j, kk, stock, running_rel, set())
+                     for j, kk in MATS[i]), default=0.0)
+        starts.append((s, DUR[i], need[i]))
+    rem_running = sum(f for _, f in running_rel)
+    Wtot = sum(d * nd for _, d, nd in starts) + rem_running
+    lb = Wtot / MACHINES
+    for s, d, nd in starts:
+        if s + d > lb:
+            lb = s + d
+    pts = sorted(set([0.0] + [s for s, _, _ in starts]))
+    for tt in pts:
+        A = sum(d * nd for s, d, nd in starts if s <= tt) + (
+            rem_running if tt >= 0 else 0)
+        B = sum(d * nd for s, d, nd in starts if s > tt)
+        if A / MACHINES > lb:
+            lb = A / MACHINES
+        if tt + B / MACHINES > lb:
+            lb = tt + B / MACHINES
+    return lb
+
+
+def _lb_rel(need, stock, running_rel):
+    """可采纳下界（相对额外耗时）。"""
+    lb = max([0.0] + [f for _, f in running_rel])
+    rem = sum(need[i] * DUR[i] for i in range(N)) + sum(f for _, f in running_rel)
+    lb2 = rem / MACHINES
+    if lb2 > lb:
+        lb = lb2
+    running_types = set(i for i, _ in running_rel)
+    for i in range(N):
+        if need[i] <= 0 or i in running_types:
+            continue
+        ch = DUR[i] + max((_chain_avail_rel(j, kk, stock, running_rel, set())
+                           for j, kk in MATS[i]), default=0.0)
+        if ch > lb:
+            lb = ch
+    cum = _cum_lb(need, stock, running_rel, 0.0)
+    if cum > lb:
+        lb = cum
+    return lb
+
+
 def solve(inst, time_budget=120.0, max_queue=4_000_000, maximal_only=True):
-    dur = inst["dur"]
-    mats = inst["mats"]
-    M = inst["machines"]
-    n = inst["n"]
+    global DUR, MATS, MACHINES, N
+    DUR = inst["dur"]
+    MATS = inst["mats"]
+    MACHINES = inst["machines"]
+    N = inst["n"]
+    dur = DUR
+    mats = MATS
+    M = MACHINES
+    n = N
     need0 = tuple(inst["need0"])
     t0 = _t.time()
 
@@ -152,127 +227,97 @@ def solve(inst, time_budget=120.0, max_queue=4_000_000, maximal_only=True):
     stats = {"expanded": 0, "generated": 0, "time": 0.0, "bounded": False,
              "ub0": best_val, "opt": None}
 
-    def chain_avail(j, k, stock, running, t, seen):
-        if stock[j] >= k:
-            return 0.0
-        fins = [f for (j2, f) in running if j2 == j]
-        if fins:
-            if stock[j] + len(fins) >= k:
-                return sorted(fins)[k - stock[j] - 1] - t
-            return min(fins) - t
-        if j in seen:
-            return 0.0
-        seen.add(j)
-        return dur[j] + max((chain_avail(m, kk, stock, running, t, seen)
-                             for m, kk in mats[j]), default=0.0)
-
-    def h_of(need, stock, running, t):
-        """完工时刻可采纳下界（= f 值）。"""
-        lb = max([t] + [f for _, f in running])
-        rem = sum(need[i] * dur[i] for i in range(n)) + \
-            sum(max(0.0, f - t) for _, f in running)
-        lb2 = t + rem / M
-        if lb2 > lb:
-            lb = lb2
-        running_types = set(i for i, _ in running)
-        for i in range(n):
-            if need[i] <= 0 or i in running_types:
-                continue
-            ch = dur[i] + max((chain_avail(j, kk, stock, running, t, set())
-                               for j, kk in mats[i]), default=0.0)
-            if t + ch > lb:
-                lb = t + ch
-        return lb
-
-    def successors(need, stock, running, t):
-        """展开一个状态：先收卡，再生效后继（推进 / 开工向量）。"""
-        if any(f <= t + EPS for _, f in running):
+    def successors(need, stock, running_rel, t):
+        """展开一个状态：先收卡，再生效后继（推进 / 开工向量）。
+        返回 [(n_need, n_stock, n_running_rel, n_t, move), ...]，move=("adv",) 或 ("start", t, vec)。"""
+        out = []
+        if any(f <= EPS for _, f in running_rel):
             ns = list(stock)
             nr = []
-            for i2, f in running:
-                if f <= t + EPS:
+            for i2, f in running_rel:
+                if f <= EPS:
                     ns[i2] += 1
                 else:
                     nr.append((i2, f))
-            stock = tuple(ns)
-            running = tuple(nr)
+            out.append((tuple(need), tuple(ns), tuple(nr), t, ("adv",)))
+            return out
         startable = [i for i in range(n)
                      if need[i] > 0 and all(stock[j] >= kk for j, kk in mats[i])]
-        idle = M - len(running)
+        idle = M - len(running_rel)
         if idle <= 0 or not startable:
-            if not running:
-                return []                       # 死路
-            nt = min(f for _, f in running)
-            return [("adv", need, stock, running, nt)]
+            if not running_rel:
+                return []
+            dt = min(f for _, f in running_rel)
+            nrr = tuple((i, f - dt) for i, f in running_rel)
+            out.append((tuple(need), tuple(stock), nrr, t + dt, ("adv",)))
+            return out
         cap = min(idle, sum(need[i] for i in startable))
-        out = []
         for vec in _vectors(startable, mats, stock, need, cap, maximal_only):
             ns = list(stock)
             nn = list(need)
-            nr = list(running)
+            nr = list(running_rel)
             for i, c in vec:
                 for _ in range(c):
                     for j, kk in mats[i]:
                         ns[j] -= kk
                     nn[i] -= 1
-                    nr.append((i, t + dur[i]))
+                    nr.append((i, dur[i]))
             nr.sort()
-            nt = min(f for _, f in nr)
-            out.append(("start", tuple(nn), tuple(ns), tuple(nr), nt, vec))
+            dt = min(f for _, f in nr)
+            nrr = tuple((i, f - dt) for i, f in nr)
+            out.append((tuple(nn), tuple(ns), nrr, t + dt, ("start", t, vec)))
         return out
 
-    # 初始状态；堆元素 (f, -depth, seq, key, parent_key, move) —— 同 f 偏向深层（下潜）
-    start_key = (need0, tuple([0] * n), (), 0.0)
+    def key_of(need, stock, running_rel):
+        return (need, stock, running_rel)
+
+    start_key = key_of(need0, tuple([0] * n), ())
     counter = 0
-    heap = [(h_of(need0, tuple([0] * n), (), 0.0), 0, counter, start_key, None, None)]
+    # 堆元素 (f_abs, -depth, seq, key, parent_key, move, t)
+    f0 = _lb_rel(need0, tuple([0] * n), ())
+    heap = [(f0, 0, counter, start_key, None, None, 0.0)]
     expanded = set()
-    seen = set()               # transposition 表：已生成过的 key 不重复入堆
+    seen = set()
     parent = {}
     depth_of = {start_key: 0}
     goal_key = None
 
     while heap:
-        f, negd, _, key, pk, mv = heapq.heappop(heap)
+        f_abs, negd, _, key, pk, mv, t = heapq.heappop(heap)
         if key in expanded:
             continue
         expanded.add(key)
         if pk is not None:
             parent[key] = (pk, mv)
-        need, stock, running, t = key
+        need, stock, running_rel = key
         d = -negd
         if not any(need):
-            fin = max([t] + [q for _, q in running])
-            if fin < best_val - 1e-9:
-                best_val = fin
+            fin = max([0.0] + [f for _, f in running_rel])
+            if t + fin < best_val - 1e-9:
+                best_val = t + fin
                 goal_key = key
-            stats["opt"] = fin
+            stats["opt"] = best_val
             break
-        if f >= best_val - 1e-9:
+        if f_abs >= best_val - 1e-9:
             stats["opt"] = best_val
             break
         stats["expanded"] += 1
         if (_t.time() - t0) > time_budget:
             stats["bounded"] = True
             break
-        for succ in successors(need, stock, running, t):
-            if succ[0] == "adv":
-                _, n2, s2, r2, t2 = succ
-                skey = (n2, s2, r2, t2)
-                smove = ("adv", None)
-            else:
-                _, n2, s2, r2, t2, vec = succ
-                skey = (n2, s2, r2, t2)
-                smove = ("start", (t, vec))
+        for succ in successors(need, stock, running_rel, t):
+            n2, s2, r2, t2, smv = succ
+            skey = key_of(n2, s2, r2)
             if skey in expanded or skey in seen:
                 continue
-            fv = h_of(*skey)
+            fv = t2 + _lb_rel(n2, s2, r2)
             if fv >= best_val - 1e-9:
                 continue
             seen.add(skey)
             depth_of[skey] = d + 1
             counter += 1
             stats["generated"] += 1
-            heapq.heappush(heap, (fv, -(d + 1), counter, skey, key, smove))
+            heapq.heappush(heap, (fv, -(d + 1), counter, skey, key, smv, t2))
         if len(heap) > max_queue:
             stats["bounded"] = True
             stats["note"] = f"heap>{max_queue}"
@@ -286,7 +331,7 @@ def solve(inst, time_budget=120.0, max_queue=4_000_000, maximal_only=True):
         while k in parent:
             pk, mv = parent[k]
             if mv[0] == "start":
-                chain.append(mv[1])
+                chain.append((mv[1], mv[2]))
             k = pk
         chain.reverse()
         out = []

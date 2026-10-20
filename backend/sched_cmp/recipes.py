@@ -204,3 +204,9 @@ class RecipeSet:
 
 def build_recipe_set(tid, lib_path=None):
     return RecipeSet(tid, lib_path)
+
+
+# 模块级 name/star：TID==290 时 run_prod_compare 把本模块直接当 RECIPE 使用，
+# 需提供与 RecipeSet 同名的属性（其余接口 CARDS/DUR/compute_runs/... 已在模块级定义）。
+name = "七雄Q传"
+star = 2
