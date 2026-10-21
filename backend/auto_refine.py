@@ -1345,8 +1345,17 @@ class AutoRefine:
             无损，不卖）—— 换卡箱塞着鬼门关1337/酆都城1333 这类大面额杂卡，炼卡根本
             用不上，白占换卡箱（硬顶 18）；
           · 10 面值底卡**不动**（它们是炼卡素材，要买/留着当料）；
-          · 在炼套卡自己的卡不动（要当素材/收藏）；
-          · 保险箱也满 → 退回「卖」：卖掉这些无关高面值杂卡换金币 + 腾格（保底）。
+          · 在炼套卡自己的卡不动（要当素材/收藏）。
+
+        ★ **高面值杂卡永不自动卖**（用户 2026-10-21 定调，修正越权行为）：
+          旧实现在「保险箱也满」时会**自动卖掉高面值杂卡**当保底 —— 这超出了用户
+          2026-10-03 的授权（那次只说「未下架的 10 面值卡都买掉，高面值卡移保险箱，
+          优先移保险箱」，**没授权卖高面值卡**）。而且 `sell_card` 实证是
+          **「卖卡获得金币 = 卡面值」**（`mc_api.sell_card` 注释）→ 卖掉一张 588 面额
+          的卡只换回 588 金币，等于把高价值收藏卡折成零头金币，**用户明确反对**。
+          现在：高面值杂卡移不进保险箱就**跳过不卖**，只继续尝试下一张；
+          腾位只能靠 10 面值底卡（用户授权过的那条）。腾不出来就如实报
+          「保险箱已满 + 高面值卡不自动卖」，让用户自己决定。
 
         `running_themes` = 在炼套卡 id 集合，用于保护它们相关的卡不被误移/误卖。
         """
@@ -1389,9 +1398,19 @@ class AutoRefine:
         cands = candidates("change")
         if not cands:
             return 0
-        for cid, face, slot in cands:
-            if freed >= need:
+        # ★ 用 while + 每次重取候选：卖卡/移卡后**其他卡的 slot 会重排**，
+        #   继续用旧 slot 会 -311（卡牌有变化）；且失败的那张要跳过、试下一张，
+        #   不能每次都重扫 snapshot（保险箱满时会空转一串网络请求）。
+        freed = 0
+        tried: set = set()          # 已试过且失败的 (cid, slot)，避免重复试同一张
+        guard = 0
+        while freed < need and guard < 60:
+            guard += 1
+            cands = [c for c in candidates("change") if (c[0], c[2]) not in tried]
+            if not cands:
                 break
+            cid, face, slot = cands[0]
+            tried.add((cid, slot))
             nm = card_name(cid)
             done = False
             if face <= CHANGE_FACE:
@@ -1414,25 +1433,24 @@ class AutoRefine:
                                   "detail": f"{nm}（面{face}）移入保险箱"})
                     done = True
                 else:
-                    # 保险箱也满 → 卖（保底）：这卡不在在炼套内、又没处放，卖掉换格位
-                    sr = await self.s.sell_card(slot, cid, box_type=1)
-                    if sr.get("ok"):
-                        self._log("腾位", True, f"{nm}（面{face}）保险箱也满 → 卖掉腾位")
-                        steps.append({"action": "腾位", "ok": True,
-                                      "detail": f"{nm}（面{face}）卖掉腾位（保险箱已满）"})
-                        done = True
-                    else:
-                        self._log("腾位", False,
-                                  f"{nm} 移/卖都失败：{(r.get('message') or sr.get('message') or '')[:80]}")
+                    # ★ 2026-10-21 用户定调：高面值杂卡**不自动卖**（旧实现会卖掉当保底，
+                    #   属越权；且 sell_card 只换回面值等额金币，高价值卡被折成零头）。
+                    #   保险箱满 → 跳过这张，继续试下一张候选（可能还有底卡可卖）。
+                    self._log("腾位", False,
+                              f"{nm}（面{face}）移入保险箱失败（保险箱已满）——"
+                              f"高面值卡不自动卖，跳过")
             if done:
                 freed += 1
-            if freed < need:
-                # 每腾一张换卡箱/保险箱状态都变了，重扫一次拿最新槽位
-                ns = await snapshot()
-                if ns is None:
+                tried.clear()      # 状态变了，重新看全部候选
+            else:
+                snap = await snapshot()      # 换卡箱状态可能变（slot 重排）
+                if snap is None:
                     break
-                snap = ns
-                cands = candidates("change")
+        if freed < need:
+            # 腾不出位：如实说明原因（保险箱满 + 高面值卡不自动卖 → 只能靠清保险箱）
+            self._log("腾位", False,
+                      f"腾位不足：还需 {need - freed} 格。保险箱已满、高面值杂卡不自动卖，"
+                      f"只能腾 10 面值底卡 —— 请手动清理保险箱或换卡箱")
         return freed
 
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
