@@ -196,7 +196,15 @@ class Planner:
                             cur_per_set[t] += 1
                             break
 
-            # 每套待炼候选（按深层优先）
+            # 每套待炼候选（深层优先）。排序键改动曾两度实测否决（_exp_rules.py 有全量数据）：
+            # ① cp 关键路序：仅单套 3/4/5★ 有效（76/84/173 vs 82.7/95.4/184.5），
+            #   多套共享箱时把单链卡前置→互抢枢纽喂料（同 tick slot 争用 ×9、完全空炉
+            #   tick ×3.5，2套·各3轮 412→430h）；
+            # ② 按套 DP 序（dp_orders 接线）：共享段同样负（2套 +8h、3套 +27h），
+            #   且 DP 模型按 3 炉独占求解，与共享 reality 不符。
+            # 正解已在 engine.run_sim：`len(active)==1` 时最后剩下的套独占资源，
+            # 自动激活 DP 分支（3套·各3轮 475.8→467.8h、2套 424.9→412.2h）。
+            # 多套共享段的正确杠杆是跨套分配策略（P0 反转），不是套内排序。
             ready_by_set: Dict[int, List[int]] = {t: [] for t in admitted}
             for t in admitted:
                 m, runs, _buy = plans[t]

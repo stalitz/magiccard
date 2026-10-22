@@ -32,7 +32,8 @@ class Engine:
         self.executor = Executor()
         # DP 开关：单套高星（star>=3）走 DP 最优调度；低星单套 / 多套仍走贪心。
         self.dp_single = dp_single
-        self._dp_sched = None          # 单套高星的 DP 精炼优先序（只解一次，跨轮复用）
+        self._dp_sched = None          # 单套高星的 DP 精炼优先序
+        self._dp_round = -1            # 已解算对应的轮次（滚动重规划：轮变重解）
         self._dp_stats = None          # 最近一次 sched_dp 统计
         self.stats = {"refined": 0, "bought": 0, "buy_fail": 0,
                       "collected": 0, "errors": 0, "busy_ticks": 0, "total_ticks": 0,
@@ -80,16 +81,22 @@ class Engine:
                               self.completed_rounds.get(t, 0) >= self.max_rounds)]
             if not active:
                 return vs, n + 1
-            # ---- 单套高星：DP 精炼顺序只解一次并复用（sets=1 的 synthesis 顺序与轮次无关，
-            #      箱容/库存差异由 planner DP 分支的 stock+pending>=1 跳过处理；无需每轮重解）----
+            # ---- 单套高星：DP 精炼顺序。滚动重规划（2026-10-22）：轮次边界
+            #      （completed_rounds 变化 = 库存已变）带真实持有量重解；轮内不重解
+            #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。多套共享段不走
+            #      DP——实测按套 DP 序在共享段负（2套+8h/3套+27h，planner 有注释）；
+            #      先达标的套退出后最后一套独占资源时自动激活本分支（3套 -8h）。----
             dp_plan = None
             if self.dp_single and len(active) == 1:
                 tid = active[0]
                 if self.models[tid].star >= 3:
-                    if self._dp_sched is None:
+                    cr = self.completed_rounds.get(tid, 0)
+                    if self._dp_sched is None or cr != self._dp_round:
+                        self._dp_round = cr
                         from .dp_adapter import dp_order
                         self._dp_sched, self._dp_stats = dp_order(
-                            self.models[tid], sets=1, machines=3)
+                            self.models[tid], sets=1, machines=3,
+                            stock=dict(ws.stock), pending=dict(ws.pending))
                     dp_plan = self._dp_sched
             plan = self.decide(ws, dp_plan=dp_plan, queue=active)
             results = await self.executor.execute(plan, vs)

@@ -74,6 +74,31 @@ class ThemeModel:
         """净需求 (runs, buy)，直接复用 ThemePlan。"""
         return self.tp.net_plan(stock, pending, sets=sets)
 
+    def cp_order(self) -> list:
+        """关键路优先序（RCPSP 经典 CP 规则）：cp(c)=secs(c)+max(cp(父卡))，
+        父卡只在本套合成卡内找（comp 是全卡库，不能直接遍历）。按 cp 降序。
+        实例级缓存——静态量与运行期状态无关。
+        实测（单套×1轮，同 JIT/箱容/炉）：比深层优先快 6~11h
+        （3★ 76.06 vs 82.74 / 4★ 84.06 vs 95.39 / 5★ 173.11 vs 184.51）。"""
+        cached = getattr(self, "_cp_order_cache", None)
+        if cached is not None:
+            return cached
+        comp = [c for c in self.ids if not self.is_base(c)]
+        cache: dict = {}
+
+        def cp_of(c: int) -> int:
+            v = cache.get(c)
+            if v is not None:
+                return v
+            parents = [p for p in comp if c in self.feeders(p)]
+            v = self.secs(c) + max((cp_of(p) for p in parents), default=0)
+            cache[c] = v
+            return v
+
+        order = sorted(comp, key=lambda c: (-cp_of(c), c))
+        self._cp_order_cache = order
+        return order
+
     def complete_in_stock(self, stock: dict) -> bool:
         """库存是否已凑齐一整套（每个套内卡 >= 1）。"""
         for cid in self.ids:
