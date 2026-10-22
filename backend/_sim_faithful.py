@@ -99,7 +99,8 @@ class VirtualSession:
     def _free_store_slot(self):
         used = set(self.store)
         for s in range(1, self.store_cur + 1):
-            return s if s not in used else None
+            if s not in used:
+                return s
         return None
 
     def _free_main_stove(self):
@@ -270,11 +271,29 @@ class VirtualSession:
     async def open_pai(self):
         return {"ok": True, "message": "ok", "raw": "", "items": []}
 
-    # 腾位路径（箱满才触发，本仿真箱容量大不会走到，但保留接口）
+    # 腾位路径（BoxCompaction 触发）
     async def sell_card(self, slot, cid, box_type=1):
-        return {"ok": True, "message": "ok"}
+        """卖卡：从指定箱移除一张卡（仅用于多余 10 面底卡，绝不卖高值）。"""
+        box = self.store if box_type == 1 else self.change
+        if slot in box and box[slot] == cid:
+            box.pop(slot)
+            return {"ok": True, "message": "ok"}
+        return {"ok": False, "message": "槽位不匹配"}
 
     async def move_card(self, cid, slot, from_box=0):
+        """挪箱：换卡箱(from_box=0)->保险箱，或反向。目标箱需有空位。"""
+        src = self.change if from_box == 0 else self.store
+        dst = self.store if from_box == 0 else self.change
+        if slot not in src or src[slot] != cid:
+            return {"ok": False, "message": "源槽不匹配"}
+        if from_box == 0:
+            s = self._free_store_slot()
+        else:
+            s = self._free_change_slot()
+        if s is None:
+            return {"ok": False, "message": "目标箱满"}
+        cidval = src.pop(slot)
+        dst[s] = cidval
         return {"ok": True, "message": "ok"}
 
 

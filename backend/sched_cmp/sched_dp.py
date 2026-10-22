@@ -23,65 +23,75 @@ EPS = 1e-9
 INF = float("inf")
 
 
-def _ub_schedule(inst):
-    """关键路径列表调度求上界（鲁棒：无进展即推进时间）。"""
-    dur = inst["dur"]
-    mats = inst["mats"]
-    M = inst["machines"]
-    cp = inst["cp"]
-    depth = inst["depth"]
-    n = inst["n"]
-    stock = [0] * n
-    need = list(inst["need0"])
-    machine_free = [0.0] * M
-    running = []
-    out = []
-    guard = 0
-    limit = 8 * sum(need) + 64
-    while any(need):
-        guard += 1
-        if guard > limit:
+def _ub_schedule(inst, init_stock=None, init_running=None,
+                 init_machine_free=None):
+  """关键路径列表调度求上界（鲁棒：无进展即推进时间）。
+
+  init_stock / init_running / init_machine_free 支持**滚动重规划**：
+  传入当前库存、在炉剩余时间、炉位可用时刻，求「从现在起」的最优上界。
+    · init_stock        [张数]×n，类型索引序
+    · init_running      [(type_idx, 剩余秒)]，剩余秒 = 相对当前时刻
+    · init_machine_free [秒]×M，各炉位下次可用时刻（相对当前时刻）
+  默认全空 = 从零开始（与原行为完全一致）。"""
+  dur = inst["dur"]
+  mats = inst["mats"]
+  M = inst["machines"]
+  cp = inst["cp"]
+  depth = inst["depth"]
+  n = inst["n"]
+  stock = list(init_stock) if init_stock is not None else [0] * n
+  need = list(inst["need0"])
+  machine_free = list(init_machine_free) if init_machine_free is not None \
+      else [0.0] * M
+  running = [(float(f), int(i2)) for i2, f in init_running] \
+      if init_running is not None else []
+  out = []
+  guard = 0
+  limit = 8 * sum(need) + 64
+  while any(need):
+    guard += 1
+    if guard > limit:
+      break
+    t = min(machine_free)
+    still = []
+    for f, i in running:
+      if f <= t + EPS:
+        stock[i] += 1
+      else:
+        still.append((f, i))
+    running = still
+    free = [m for m in range(M) if machine_free[m] <= t + EPS]
+    ready = sorted([i for i in range(n)
+                    if need[i] > 0 and all(stock[j] >= k for j, k in mats[i])],
+                   key=lambda i: (-cp[i], -dur[i], -depth[i], i))
+    started = 0
+    if free and ready:
+      for m in free:
+        pick = None
+        for pos, i in enumerate(ready):
+          if all(stock[j] >= k for j, k in mats[i]):
+            pick = ready.pop(pos)
             break
-        t = min(machine_free)
-        still = []
-        for f, i in running:
-            if f <= t + EPS:
-                stock[i] += 1
-            else:
-                still.append((f, i))
-        running = still
-        free = [m for m in range(M) if machine_free[m] <= t + EPS]
-        ready = sorted([i for i in range(n)
-                        if need[i] > 0 and all(stock[j] >= k for j, k in mats[i])],
-                       key=lambda i: (-cp[i], -dur[i], -depth[i], i))
-        started = 0
-        if free and ready:
-            for m in free:
-                pick = None
-                for pos, i in enumerate(ready):
-                    if all(stock[j] >= k for j, k in mats[i]):
-                        pick = ready.pop(pos)
-                        break
-                if pick is None:
-                    break
-                i = pick
-                for j, k in mats[i]:
-                    stock[j] -= k
-                need[i] -= 1
-                out.append((i, t))
-                running.append((t + dur[i], i))
-                machine_free[m] = t + dur[i]
-                started += 1
-        if started:
-            continue
-        nxt = [mf for mf in machine_free if mf > t + EPS]
-        if not nxt:
-            break
-        nv = min(nxt)
-        for m in range(M):
-            if machine_free[m] <= t + EPS:
-                machine_free[m] = nv
-    return out
+        if pick is None:
+          break
+        i = pick
+        for j, k in mats[i]:
+          stock[j] -= k
+        need[i] -= 1
+        out.append((i, t))
+        running.append((t + dur[i], i))
+        machine_free[m] = t + dur[i]
+        started += 1
+    if started:
+      continue
+    nxt = [mf for mf in machine_free if mf > t + EPS]
+    if not nxt:
+      break
+    nv = min(nxt)
+    for m in range(M):
+      if machine_free[m] <= t + EPS:
+        machine_free[m] = nv
+  return out
 
 
 def _vectors(startable, mats, stock, need, cap, maximal_only=True):
@@ -198,7 +208,17 @@ def _cum_lb(need, stock, running_rel, t):
 
 
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
-          maximal_only=True):
+          maximal_only=True, init_stock=None, init_running=None,
+          init_machine_free=None):
+    """求解 RCPSP 实例。
+
+    ★ 滚动重规划入口（init_* 三参数）：从**当前真实状态**起算，而非从零开始。
+      · init_stock      当前库存 {type_idx: 张数}
+      · init_running    在炉 [(type_idx, 剩余秒)]（相对当前时刻的剩余时间）
+      · init_machine_free 各炉位下次可用时刻（秒，相对当前时刻）
+      传入后返回的 makespan 是「从当前时刻起还需多久」，
+      可直接用于「按当前状态重新排产」——这才是线上能用的形态。
+    """
     global DUR, MATS, MACHINES, N
     DUR = inst["dur"]
     MATS = inst["mats"]
@@ -210,12 +230,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     n = N
     need0 = tuple(inst["need0"])
 
-    ub_sched = _ub_schedule(inst)
+    ub_sched = _ub_schedule(inst, init_stock, init_running, init_machine_free)
     ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
     best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None}
-    t0 = _t.time()
+    t0 = _t.perf_counter()
     memo = {}
 
     def key_of(need, stock, running_rel):
@@ -246,7 +266,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             if hit is not None:
                 stats["memo_hits"] += 1
                 return hit
-            if stats["nodes"] > node_budget or (_t.time() - t0) > time_budget:
+            if stats["nodes"] > node_budget or (_t.perf_counter() - t0) > time_budget:
                 stats["bounded"] = True
                 return INF
             stats["nodes"] += 1
@@ -323,9 +343,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             memo[key] = best_v
             return best_v
 
-    # 初始 running 为空 → 相对剩余时间 = ()
-    v = dfs(need0, tuple([0] * n), (), 0.0, ())
-    stats["time"] = _t.time() - t0
+    # 初始状态：默认全空（从零开始）；传入 init_* 时从当前状态起算
+    if init_stock is not None or init_running is not None:
+        st0 = tuple(init_stock) if init_stock is not None else tuple([0] * n)
+        if init_running:
+            rg = tuple(sorted((int(i), float(f)) for i, f in init_running))
+        else:
+            rg = ()
+        v = dfs(need0, st0, rg, 0.0, ())
+    else:
+        v = dfs(need0, tuple([0] * n), (), 0.0, ())
+    stats["time"] = _t.perf_counter() - t0
     # 根 t=0，v 即绝对 makespan；若证完应与 best["val"] 一致
     if v < INF:
         stats["opt"] = v
