@@ -285,9 +285,13 @@ class Planner:
             held = stock.get(c, 0) + pending.get(c, 0)
             if n > held:
                 emit_set[c] = n - held
-        # 每 tick 买量上限：只买「够喂当前空闲炉」的底卡（每炉约 3 喂料），避免空箱时
-        # 一次性买光全部需求把箱撑满、制造病态（之前多套死锁根因之一）。
-        buy_cap = (ws.main_free + (ws.steal_free if self.steal_enabled else 0)) * 3 + 3
+        # 每 tick 买量上限：与【总炉数】挂钩而非【空闲炉】——炉忙时正该前瞻买下
+        # 一批喂料，炉一空就有料可投（2026-10-23 修）。旧版 buy_cap=空闲炉*3+3 在
+        # 炉忙(main_free=0)时压到 3/tick，而 5★ 顶层 42.5h 炼完整层 feeder 瞬时
+        # 集中到期，3/tick 跟不上 → 实测 98% 空闲是喂料卡没买（非在途）。改后炉忙
+        # 也能按总炉数×3 预买。最终上限仍是 free_after（箱容闸门），不会囤货撑爆。
+        total_furn = len(ws.furnaces)
+        buy_cap = total_furn * 3 + 6
         # 底卡名查找（修旧版误用循环残留变量 t 取卡名的潜在 bug）
         cid_name: Dict[int, str] = {}
         for tt in admitted:
