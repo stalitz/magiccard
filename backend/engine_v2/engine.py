@@ -30,9 +30,10 @@ class Engine:
         self.completed_rounds: Counter = Counter()
         self.planner = Planner(steal_enabled=steal_enabled)
         self.executor = Executor()
-        # DP 开关：单套高星（star>=3）走 DP 最优调度；低星单套 / 多套仍走贪心。
+        # DP 开关：单套高星（star>=3）走 DP 最优调度；多套走联合 DP（2026-10-23）；
+        # 低星单套 / 无限炼仍走贪心。
         self.dp_single = dp_single
-        self._dp_sched = None          # 单套高星的 DP 精炼优先序
+        self._dp_sched = None          # DP 精炼优先序（单套或联合，全局 cid 列表）
         self._dp_round = -1            # 已解算对应的轮次（滚动重规划：轮变重解）
         self._dp_stats = None          # 最近一次 sched_dp 统计
         self.stats = {"refined": 0, "bought": 0, "buy_fail": 0,
@@ -83,9 +84,18 @@ class Engine:
                 return vs, n + 1
             # ---- 单套高星：DP 精炼顺序。滚动重规划（2026-10-22）：轮次边界
             #      （completed_rounds 变化 = 库存已变）带真实持有量重解；轮内不重解
-            #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。多套共享段不走
-            #      DP——实测按套 DP 序在共享段负（2套+8h/3套+27h，planner 有注释）；
-            #      先达标的套退出后最后一套独占资源时自动激活本分支（3套 -8h）。----
+            #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。
+            #      多套联合 DP 接线实验（2026-10-23，回应「你是不是在反对 DP」）：
+            #      先重做了被推翻两条论证的公平对比——同 3 炉（禁偷炉）下联合 DP
+            #      静态解 2套 532.7h / 3套 595.7h（均证完最优，253/315 节点 0.1/0.3s），
+            #      比同炉数引擎（540.9/602.9）快 7~8h。旧 reject 论证①「3 炉 DP 界
+            #      595.7h > 4 槽引擎 467.8h」是拿被砍偷炉的 DP 跟完整引擎赛跑，不公
+            #      平；②「56+ 类型 2s 解不动」是事实错误。但接线实测：滚动引擎全面
+            #      变慢（2套 411.5→433.6h、3套 459.9→500.2h，炉占 -5~8pt、峰值箱
+            #      +35~56）——DP 的 8h 静态优势是全知假设换的，滚动现实（JIT 物流
+            #      延迟、跨套料争抢、轮内序过时）把它放大成 22~40h 劣势。已回退，
+            #      联合序代码与探针留在 dp_adapter.joint_dp_order / probe_fair_dp.py，
+            #      后续可试「更频重解 / DP 序仅作 tie-break / 物流延迟建进 DP 模型」。
             dp_plan = None
             if self.dp_single and len(active) == 1:
                 tid = active[0]

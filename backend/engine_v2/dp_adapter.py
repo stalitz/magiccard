@@ -66,6 +66,76 @@ def build_dp_instance(model: "ThemeModel", sets: int, machines: int,
     }
 
 
+def joint_dp_order(models: dict, sets_map: dict, machines: int = 3,
+                   time_budget: float = 5.0, node_budget: int = 8_000_000,
+                   stock: dict | None = None, pending: dict | None = None
+                   ) -> Tuple[List[int], dict]:
+    """多套联合 DP：一次解全部在跑套卡的全局最优精炼顺序。
+
+    与「按套分别解再拼接序」的本质区别：联合实例在跨套共享 machines 炉的约束下
+    优化全局 makespan，DP 自己决定哪套的哪张卡该在什么时刻开工——按套分别解再
+    拼接的序会把长链卡无脑前置、互抢枢纽喂料（实测共享段 2套+8h/3套+27h，
+    2026-10-21 回退）；联合序是另一个物种（公平 3 炉对比：2套 532.7 vs 引擎
+    540.9、3套 595.7 vs 602.9，均证完最优，2026-10-23）。
+
+    前置假设：各套卡库 cid 不相交（调用方负责验证，theme 卡库按 tid 独立）。
+    底卡同样按单套口径剔除（无限可用 0 炉时前置），DP 界偏乐观、方向保守。
+
+    stock/pending：当前持有量（滚动重规划：轮边界库存已变 → 重解）。
+    """
+    st = dict(stock or {})
+    pd = dict(pending or {})
+    runs: Dict[int, int] = {}
+    owner: Dict[int, ThemeModel] = {}
+    for tid, m in models.items():
+        r, _buy = m.net_plan(st, pd, sets=max(1, sets_map.get(tid, 1)))
+        for c, n in r.items():
+            runs[c] = runs.get(c, 0) + n
+        for c in m.ids:
+            owner[c] = m
+    types = [c for c in runs if not owner[c].is_base(c)]
+    idx = {c: i for i, c in enumerate(types)}
+    n = len(types)
+    dur = [owner[c].secs(c) for c in types]
+    mats: List[Tuple] = []
+    for c in types:
+        m = owner[c]
+        mc: Dict[int, int] = {}
+        for f in m.feeders(c):
+            if not m.is_base(f) and f in idx:
+                mc[idx[f]] = mc.get(idx[f], 0) + 1
+        mats.append(tuple(sorted(mc.items())))
+    need0 = [runs.get(c, 0) for c in types]
+    depth = [owner[c].depth.get(c, 0) for c in types]
+    cp = [0] * n
+
+    def cpf(i: int) -> int:
+        if cp[i]:
+            return cp[i]
+        cp[i] = dur[i] + max((cpf(j) for j, _ in mats[i]), default=0)
+        return cp[i]
+
+    for i in range(n):
+        cpf(i)
+    inst = {
+        "machines": machines, "types": types, "n": n, "dur": dur,
+        "mats": mats, "need0": need0, "depth": depth, "cp": cp,
+        "init_stock": [st.get(c, 0) + pd.get(c, 0) for c in types],
+    }
+    mk, sched, stats = solve(inst, time_budget=time_budget,
+                             node_budget=node_budget,
+                             init_stock=inst["init_stock"])
+    order = [types[i] for (i, _t) in sorted(sched, key=lambda x: x[1])]
+    return order, {
+        "makespan_h": round(mk / 3600, 2),
+        "nodes": stats.get("nodes"),
+        "time_s": round(stats.get("time", 0), 3),
+        "bounded": stats.get("bounded"),
+        "opt": stats.get("opt"),
+        "n_types": n,
+    }
+
+
 def dp_order(model: "ThemeModel", sets: int = 1, machines: int = 3,
              time_budget: float = 2.0, node_budget: int = 8_000_000,
              stock: dict | None = None, pending: dict | None = None
