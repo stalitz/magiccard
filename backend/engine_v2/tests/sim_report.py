@@ -83,8 +83,9 @@ def fmt_tids(tids):
     return " + ".join(parts)
 
 
-async def run_one(name, tids, box, max_rounds, max_ticks):
-    eng = Engine(tids, buy=True, max_rounds=max_rounds, steal_enabled=True)
+async def run_one(name, tids, box, max_rounds, max_ticks, use_dp=False):
+    eng = Engine(tids, buy=True, max_rounds=max_rounds, steal_enabled=True,
+                 use_dp=use_dp)
     change_cur = box["change_cur"]
     store_cur = box["store_cur"]
     vs, ticks = await eng.run_sim(change_cur=change_cur, store_cur=store_cur,

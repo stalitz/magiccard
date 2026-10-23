@@ -21,7 +21,7 @@ from .world import WorldState
 class Engine:
     def __init__(self, tids, buy: bool = True, surplus_sets: int = 0,
                  max_rounds: int = 0, steal_enabled: bool = True,
-                 dp_single: bool = True):
+                 dp_single: bool = True, use_dp: bool = False):
         self.models = {int(t): ThemeModel(t) for t in tids}
         self.queue = [int(t) for t in tids]
         self.buy = buy
@@ -30,12 +30,21 @@ class Engine:
         self.completed_rounds: Counter = Counter()
         self.planner = Planner(steal_enabled=steal_enabled)
         self.executor = Executor()
+        # DP 每 tick 控制器开关（2026-10-23）：开启后把 DP 作为调度控制器，每个 tick
+        # 用真实 WorldState 重解、取最优 t=0 动作执行；贪心路径完全不动。
+        self.use_dp = use_dp
+        self.dp_ctrl = None
+        if use_dp:
+            from .dp_controller import DPTickController
+            self.dp_ctrl = DPTickController(self.models, machines=3,
+                                           time_budget=0.3)
         # DP 开关：单套高星（star>=3）走 DP 最优调度；多套走联合 DP（2026-10-23）；
         # 低星单套 / 无限炼仍走贪心。
         self.dp_single = dp_single
         self._dp_sched = None          # DP 精炼优先序（单套或联合，全局 cid 列表）
         self._dp_round = -1            # 已解算对应的轮次（滚动重规划：轮变重解）
         self._dp_stats = None          # 最近一次 sched_dp 统计
+        self._dp_stats_last = None     # DP 控制器最近一次 decide 统计（含 solve_ms）
         self.stats = {"refined": 0, "bought": 0, "buy_fail": 0,
                       "collected": 0, "errors": 0, "busy_ticks": 0, "total_ticks": 0,
                       "slot_busy_ticks": 0, "slot_total_ticks": 0,
@@ -82,33 +91,42 @@ class Engine:
                               self.completed_rounds.get(t, 0) >= self.max_rounds)]
             if not active:
                 return vs, n + 1
-            # ---- 单套高星：DP 精炼顺序。滚动重规划（2026-10-22）：轮次边界
-            #      （completed_rounds 变化 = 库存已变）带真实持有量重解；轮内不重解
-            #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。
-            #      多套联合 DP 接线实验（2026-10-23，回应「你是不是在反对 DP」）：
-            #      先重做了被推翻两条论证的公平对比——同 3 炉（禁偷炉）下联合 DP
-            #      静态解 2套 532.7h / 3套 595.7h（均证完最优，253/315 节点 0.1/0.3s），
-            #      比同炉数引擎（540.9/602.9）快 7~8h。旧 reject 论证①「3 炉 DP 界
-            #      595.7h > 4 槽引擎 467.8h」是拿被砍偷炉的 DP 跟完整引擎赛跑，不公
-            #      平；②「56+ 类型 2s 解不动」是事实错误。但接线实测：滚动引擎全面
-            #      变慢（2套 411.5→433.6h、3套 459.9→500.2h，炉占 -5~8pt、峰值箱
-            #      +35~56）——DP 的 8h 静态优势是全知假设换的，滚动现实（JIT 物流
-            #      延迟、跨套料争抢、轮内序过时）把它放大成 22~40h 劣势。已回退，
-            #      联合序代码与探针留在 dp_adapter.joint_dp_order / probe_fair_dp.py，
-            #      后续可试「更频重解 / DP 序仅作 tie-break / 物流延迟建进 DP 模型」。
-            dp_plan = None
-            if self.dp_single and len(active) == 1:
-                tid = active[0]
-                if self.models[tid].star >= 3:
-                    cr = self.completed_rounds.get(tid, 0)
-                    if self._dp_sched is None or cr != self._dp_round:
-                        self._dp_round = cr
-                        from .dp_adapter import dp_order
-                        self._dp_sched, self._dp_stats = dp_order(
-                            self.models[tid], sets=1, machines=3,
-                            stock=dict(ws.stock), pending=dict(ws.pending))
-                    dp_plan = self._dp_sched
-            plan = self.decide(ws, dp_plan=dp_plan, queue=active)
+            # ---- 调度决策：DP 控制器 vs 贪心 ----
+            if self.use_dp and self.dp_ctrl is not None:
+                # DP 每 tick 控制器：用真实状态重解，取最优 t=0 动作
+                plan, dpstats = self.dp_ctrl.decide(
+                    ws, active, self.completed_rounds, self.max_rounds)
+                self._dp_stats_last = dpstats
+            else:
+                # ---- 单套高星：DP 精炼顺序。滚动重规划（2026-10-22）：轮次边界
+                #      （completed_rounds 变化 = 库存已变）带真实持有量重解；轮内不重解
+                #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。
+                #      多套联合 DP 接线实验（2026-10-23，回应「你是不是在反对 DP」）：
+                #      先重做了被推翻两条论证的公平对比——同 3 炉（禁偷炉）下联合 DP
+                #      静态解 2套 532.7h / 3套 595.7h（均证完最优，253/315 节点 0.1/0.3s），
+                #      比同炉数引擎（540.9/602.9）快 7~8h。旧 reject 论证①「3 炉 DP 界
+                #      595.7h > 4 槽引擎 467.8h」是拿被砍偷炉的 DP 跟完整引擎赛跑，不公
+                #      平；②「56+ 类型 2s 解不动」是事实错误。但接线实测：滚动引擎全面
+                #      变慢（2套 411.5→433.6h、3套 459.9→500.2h，炉占 -5~8pt、峰值箱
+                #      +35~56）——DP 的 8h 静态优势是全知假设换的，滚动现实（JIT 物流
+                #      延迟、跨套料争抢、轮内序过时）把它放大成 22~40h 劣势。已回退，
+                #      联合序代码与探针留在 dp_adapter.joint_dp_order / probe_fair_dp.py，
+                #      后续可试「更频重解 / DP 序仅作 tie-break / 物流延迟建进 DP 模型」。
+                dp_plan = None
+                if self.dp_single and len(active) == 1:
+                    tid = active[0]
+                    if self.models[tid].star >= 3:
+                        cr = self.completed_rounds.get(tid, 0)
+                        if self._dp_sched is None or cr != self._dp_round:
+                            self._dp_round = cr
+                            from .dp_adapter import dp_order
+                            self._dp_sched, self._dp_stats = dp_order(
+                                self.models[tid], sets=1, machines=3,
+                                stock=dict(ws.stock), pending=dict(ws.pending))
+                        dp_plan = self._dp_sched
+                plan = self.decide(ws, dp_plan=dp_plan, queue=active)
+            if not self.buy:                      # 不允许买 → 剥离买卡动作
+                plan = [a for a in plan if a.kind != "buy"]
             results = await self.executor.execute(plan, vs)
             self._tally(results)
             # 炉利用率抽样：

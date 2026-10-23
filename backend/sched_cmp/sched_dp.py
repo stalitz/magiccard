@@ -209,7 +209,7 @@ def _cum_lb(need, stock, running_rel, t):
 
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           maximal_only=True, init_stock=None, init_running=None,
-          init_machine_free=None):
+          init_machine_free=None, memo=None):
     """求解 RCPSP 实例。
 
     ★ 滚动重规划入口（init_* 三参数）：从**当前真实状态**起算，而非从零开始。
@@ -218,6 +218,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
       · init_machine_free 各炉位下次可用时刻（秒，相对当前时刻）
       传入后返回的 makespan 是「从当前时刻起还需多久」，
       可直接用于「按当前状态重新排产」——这才是线上能用的形态。
+
+    ★ memo：允许传入外部 memo 字典实现跨 tick 热启动（同一实例骨架下复用记忆，
+      大幅削减重复状态搜索）。调用方须在实例骨架（dur/mats/类型集）变化时重置 memo
+      ——相对额外耗时只依赖 dur/mats，骨架不变则记忆有效。
     """
     global DUR, MATS, MACHINES, N
     DUR = inst["dur"]
@@ -236,7 +240,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None}
     t0 = _t.perf_counter()
-    memo = {}
+    memo = memo if (use_memo and memo is not None) else {}
 
     def key_of(need, stock, running_rel):
         return (need, stock, running_rel)
