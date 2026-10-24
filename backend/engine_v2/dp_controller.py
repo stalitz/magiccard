@@ -63,7 +63,11 @@ class DPTickController:
         self.node_budget = node_budget
         self.lag_secs = float(lag_secs)     # 买卡物流延迟（1 tick）
         self.shop_cap = int(shop_cap)       # 每 tick 买卡并发上限
-        self.streak_limit = streak_limit    # 头动作连续被卡 tick 数 → 骨架过时
+        # 头动作连续被卡 tick 数 → 骨架过时。配合 streak 判定的「等待过滤」
+        # （喂料在炉即将落箱/本 tick 已买 = JIT 物流等待，不累积），4 tick
+        # 足够灵敏——2026-10-24 前无过滤版在紧箱 60 格把等料当过时触发重解
+        # 级联（500tick solves 69 次）。
+        self.streak_limit = streak_limit
         self.scan_window = scan_window      # 有限偏差向后扫描窗口
         self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
         self._memo: dict = {}
@@ -89,6 +93,14 @@ class DPTickController:
         self.emergency_total = 0        # 应急买卡累计张数
         self.opportunistic_total = 0    # 提前发累计次数（纯时机微调，不计偏差）
         self.streak_max = 0
+        # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
+        # （等买卡落箱/等炉出货，JIT 正常等待）连续被卡 → streak 触发重解，
+        # 但新骨架头动作往往不变（短缺不是顺序问题）→ 每 4 tick 一次 2s 解算
+        # 的级联（60 格·各2轮实测 24 分钟没到 tick 5000，全程预估 5h+）。
+        # 连续无进展重解累计到 cap 后暂停 streak 触发，等物理条件真实变化
+        # （有精炼/买卡/应急动作即清零）——不改变调度决策质量，纯止血。
+        self._no_progress_resolves = 0
+        self.streak_resolve_cap = 16
         self._dbg: dict = {}            # 临时插桩（提前发失败原因），验收后删
 
     # ---- 静态骨架（类型级），active 套集合 / 箱容变化才重建 ----
@@ -268,9 +280,13 @@ class DPTickController:
         # 箱容兜底：回退 UB 可能超容（DP 搜不到可行解）→ relax 重解。
         # ⚠️ relax 必须用全新 memo：箱容约束下的 INF/有限值会毒化无约束重解
         # （LB 剪枝与箱容无关仍有效，但「落箱超容」分支在 relax 后变可行）。
+        # relax 只要一个可行上界（_ub_schedule 初始 incumbent 本就是合法
+        # 列表调度）→ 预算砍到 min(0.5s, 全预算)：2026-10-24 紧箱实测每次
+        # 承诺点「有约束 2s + relax 2s」= 4s，500tick 墙钟 139s 里 solve 占
+        # 139s；relax 半秒后 incumbent 不变（UB 兜底），墙钟对半砍。
         if self._box_peak(inst, sched, sum(init_stockL)) > box_cap + EPS:
             inst["box_cap"] = None
-            mk, sched, stats = solve(inst, time_budget=self.time_budget,
+            mk, sched, stats = solve(inst, time_budget=min(0.5, self.time_budget),
                                      node_budget=self.node_budget,
                                      init_stock=init_stockL, init_running=running,
                                      memo=None)
@@ -354,7 +370,16 @@ class DPTickController:
         # ---- 箱预算（买卡闸；精炼腾出的位在 pass 2 汇入）----
         # Ⅴ 类约束：炼成卡落箱失败会被静默丢弃（get_refined_card 先 pop 炉再
         # _add_to_box，箱满即丢卡）→ 必须给在炉卡留落位，口径同贪心 Step5。
-        reserve = len(ws.furnaces) + 2
+        # ★ 只保留「即将收卡」的炉位（endtime-now <= 1 tick）：旧版
+        # reserve=len(furnaces)+2 把所有在炉卡的未来落位全预留——4 炉全忙
+        # 长时任务（顶层 42.5h）时 reserve=6 吃光 box_free（60 格实测
+        # box_free=6 恰被 reserve=6 清零）→ reactive 买卡全停、头 op 永远
+        # 发不出 → cursor 冻结、系统饿死（done=0/4）。落箱安全性不受影响：
+        # 精炼净腾 2 格（3 喂料出箱/1 成品落箱），只需保证 endtime 那一 tick
+        # 箱有位；长时炉的产物远未到收卡时刻，提前几十 tick 占位纯属过虑。
+        soon = sum(1 for f in ws.furnaces
+                   if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
+        reserve = soon + 2
         box_free_local = max(0, ws.box_free + collect_freed
                              - album_bought - reserve)
         used_main = 0
@@ -517,12 +542,61 @@ class DPTickController:
                 plan["discrepancy"] += len(miss_buy)
                 self.emergency_total += len(miss_buy)
                 break
-            # 有限偏差②：等炉/等复合料 → 保护其在箱喂料，窗口内向后扫描
+            # 有限偏差②：等炉/等复合料 → 保护其在箱喂料，窗口内向后扫描。
+            # 计 discrepancy：紧箱场景「等料扫描」高频是计划与现实偏差的信
+            # 号——60 格·各2轮 实测：discrepancy 累计驱动 disc_over 重解
+            # 正是系统生机（禁掉后槽占 93.6%→3.6%、进度冻结）；CPU 代价由
+            # relax 0.5s + 小实例快解算摊薄（10000tick 墙钟 578s）。
             for f in feeders:
                 if f in avail_slots:
                     protected.add(f)
             plan["discrepancy"] += 1
             i += 1
+        # ---- 死锁边缘兜底：本 tick 零精炼、但有空炉 + 箱内 trio 可炼 ----
+        # 箱闸死锁（60 格·各2轮 实测 done=0/4、槽占 21.5%）：cursor 卡在
+        # 成堆发不出的 buy op 上（box_free 被 reserve 吃光），pass 2 的
+        # scan_window 全被「缺底卡的 refine」占满，而箱内 trio（如 157×6）
+        # 对应的 refine op 在窗口外 → 每 tick 零动作饿死。此时全量扫第一
+        # 个「到期 + 喂料齐 + 有空炉」的 refine op 发掉：消耗 trio 净腾 2
+        # 格 → 箱闸松 → buy 恢复流动。语义安全：发的是计划内合法 op（只改
+        # 时机不改序），每 tick 最多 1 个（防打乱 DP 顺序），记 discrepancy。
+        if n_ref == 0 and n_emerg == 0:
+            for j in range(plan["cursor"], len(ops)):
+                opj = ops[j]
+                if issued[j] or opj["kind"] != "refine":
+                    continue
+                if opj["start"] > elapsed + EPS:
+                    break           # 未到期（start 有序，后面更晚）
+                mj = self._owner[opj["cid"]]
+                feedersj = mj.feeders(opj["cid"])
+                if not feedersj:
+                    continue
+                if any(f in protected or not has_slot(f) for f in feedersj):
+                    continue
+                if used_main >= ws.main_free:
+                    if not (steal_avail > 0 and mj.is_40(opj["cid"])):
+                        break       # 无炉位（后续 op 同样无炉）
+                picks = []
+                slots_ok = True
+                for f in feedersj:
+                    sl = take_slot(f)
+                    if sl is None:
+                        slots_ok = False
+                        break
+                    picks.append((f, sl[0], sl[1]))
+                if not slots_ok:
+                    continue
+                used_main += 1
+                for _c, _s, _st in picks:
+                    box_free_local += 1
+                actions.append(Action(
+                    kind="refine", target=opj["cid"],
+                    feeders=[(s, st) for (_c, s, st) in picks],
+                    steal=False, note=f"DP精炼 {opj['cid']}（箱闸兜底）"))
+                issued[j] = True
+                n_ref += 1
+                plan["discrepancy"] += 1
+                break               # 每 tick 最多兜底 1 个
         while plan["cursor"] < len(ops) and issued[plan["cursor"]]:
             plan["cursor"] += 1
         self.discrepancy_total += plan["discrepancy"] - disc0
@@ -530,7 +604,27 @@ class DPTickController:
         head_due = (plan["cursor"] < len(ops)
                     and ops[plan["cursor"]]["start"] <= elapsed + EPS)
         if head_due and n_ref == 0 and n_buy == 0 and n_emerg == 0:
-            plan["streak"] += 1
+            # 等待性卡住不算 streak：喂料正在炉里炼（即将落箱）或本 tick
+            # 刚买（在途 LAG）→ JIT 正常物流延迟。只有「喂料既不在箱、不在
+            # 炉、也不在途」的真短缺才累积。2026-10-24 紧箱 60 格实测：旧口径
+            # 把 20+ tick 的等料当骨架过时（streak_limit=4 → 500tick 重解 69
+            # 次、solve 占满 139s 墙钟）；=20 又让 4★ 单套 incumbent 退化
+            # （78.81→84.14h，重解时机敏感）→ 必须按等待语义精准过滤。
+            head_op = ops[plan["cursor"]]
+            waiting = False
+            if head_op["kind"] == "refine":
+                for f in head_op["feeders"]:
+                    if f in bought_this_tick:
+                        waiting = True
+                        break
+                    for fr in ws.furnaces:
+                        if fr.cid == f and fr.endtime <= ws.now + 2 * TICK_SECS:
+                            waiting = True
+                            break
+                    if waiting:
+                        break
+            if not waiting:
+                plan["streak"] += 1
         else:
             plan["streak"] = 0
         self.streak_max = max(self.streak_max, plan["streak"])
@@ -584,16 +678,24 @@ class DPTickController:
         rounds_sig = tuple(sorted(completed_rounds.items()))
         plan = self._plan
         exhausted = plan is not None and plan["cursor"] >= len(plan["ops"])
+        # disc_over 不带退避：60 格·各2轮 实测高频重解（按当前库存重新投影）
+        # 正是紧箱生机——禁掉后槽占 93.6%→3.6%、进度冻结。仅 streak 走退避
+        # （纯等待信号，物理短缺下重解无新信息）；CPU 代价靠 relax 0.5s 摊薄。
         disc_over = (plan is not None
                      and plan["discrepancy"] > max(12, len(plan["ops"]) // 4))
+        by_streak = plan is not None and plan["streak"] >= self.streak_limit
+        streak_over = by_streak and self._no_progress_resolves < self.streak_resolve_cap
         if (plan is None or self._plan_rounds_sig != rounds_sig
-                or exhausted or disc_over
-                or plan["streak"] >= self.streak_limit):
+                or exhausted or disc_over or streak_over):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
                                            box_cap, self._skel, rounds_sig)
             self._plan = plan
             self._plan_rounds_sig = rounds_sig
             self.resolves += 1
+            if by_streak:
+                self._no_progress_resolves += 1
+            else:
+                self._no_progress_resolves = 0
         else:
             stats = {"skip_solve": True, "n_types": self._skel["n"]}
 
@@ -605,6 +707,12 @@ class DPTickController:
         run_stats = self._run_plan(ws, plan, self._skel, actions,
                                    bought_this_tick, len(bought_this_tick),
                                    collect_freed, box_stock, pending)
+        # 真实进展 = 本 tick 有真实精炼产出（n_ref>0）。**买卡/应急不算**——
+        # 紧箱场景几乎每 tick 都有零星 reactive 买卡，若据此清零退避等于没
+        # 退避（实测 500tick streak 重解 66 次 > cap 16）；**cursor 微推进
+        # 也不算**——「重解一次挤出一个 op」正是要防的级联蠕动形态。
+        if run_stats["refined"]:
+            self._no_progress_resolves = 0
         stats = dict(stats)
         stats.update({"plan_ops": len(plan["ops"]), "cursor": plan["cursor"],
                       "streak": plan["streak"],
