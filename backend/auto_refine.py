@@ -167,12 +167,15 @@ def parse_full(xml_text: str) -> dict:
         out["cap"][key] = {"cur": int(head.get("cur") or 0),
                            "max": int(head.get("max") or 0)}
         free_main = free_steal = 0
+        steal_ids: set = set()
         for cm in re.finditer(r"<card\s+([^>]*?)/?>", mm.group(2)):
             a = _attrs(cm.group(1))
             a["slot"] = int(a.get("slot") or -1)
             a["id"] = int(a.get("id") or 0)
             if a["id"] > 0:
                 out[key].append(a)
+                if key == "stove" and a.get("slottype") == "steal":
+                    steal_ids.add(a["id"])
             elif key == "stove":
                 # stovebox 的空槽 id=0：slottype="steal" 的是偷炉位（本版引擎暂不占用）
                 if a.get("slottype") == "steal":
@@ -187,11 +190,22 @@ def parse_full(xml_text: str) -> dict:
             # 返回「您的炼卡炉满了」）；cur 里含偷炉格 + 1 个用不了的格子。
             out["cap"][key]["free_main"] = free_main
             out["cap"][key]["free_steal"] = free_steal
+    stove_entries = []
     for sm in re.finditer(r"<stove[^>]*>", xml_text):
         a = _attrs(sm.group(0))
         if "id" in a:
-            out["stoves"].append({"id": int(a.get("id") or 0),
-                                  "endtime": int(a.get("endtime") or 0)})
+            stove_entries.append(a)
+    stove_id_cnt = Counter(int(a.get("id") or 0) for a in stove_entries)
+    for a in stove_entries:
+        sid = int(a.get("id") or 0)
+        # 偷炉判定：① <stove> 显式 slottype="steal"（仿真序列化保证）；
+        # ② 兜底——id 与 stovebox 偷炉槽卡片一致且该 id 在 <stove> 里唯一
+        # （同 cid 同时炼于主炉+偷炉时不判定，保守按主炉处理）。
+        steal = (a.get("slottype") == "steal"
+                 or (sid > 0 and sid in steal_ids and stove_id_cnt[sid] == 1))
+        out["stoves"].append({"id": sid,
+                              "endtime": int(a.get("endtime") or 0),
+                              "steal": steal})
     return out
 
 
@@ -1182,7 +1196,7 @@ class AutoRefine:
             from .engine_v2.dp_controller import DPTickController
             self._dp_ctrl = DPTickController(
                 {t: self._dp_model(t) for t in self.queue}, machines=3,
-                time_budget=0.3)
+                time_budget=2.0, steal_enabled=bool(self.steal_enabled))
             self._dp_sig = sig
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
         if not self.steal_enabled:
@@ -1198,7 +1212,14 @@ class AutoRefine:
         self.dp_stats_last = {"solve_ms": dpstats.get("solve_ms"),
                               "n_types": dpstats.get("n_types"),
                               "bounded": dpstats.get("bounded"),
-                              "skip": bool(dpstats.get("skip_solve"))}
+                              "skip": bool(dpstats.get("skip_solve")),
+                              "resolves": dpstats.get("resolves"),
+                              "plan_ops": dpstats.get("plan_ops"),
+                              "streak": dpstats.get("streak"),
+                              "discrepancy": dpstats.get("discrepancy"),
+                              "emergency_now": dpstats.get("emergency_now"),
+                              "early_now": dpstats.get("early_now"),
+                              "box_relaxed": dpstats.get("box_relaxed")}
         # cid -> 所属套（买卡要带 theme_id；合成卡/底卡都可能被买）
         owner: dict[int, int] = {}
         for t in self.queue:

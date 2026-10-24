@@ -3137,7 +3137,7 @@ function renderAuto(st, bx) {
     head.push(`<span class="run-head" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <span class="dot ${running ? "run" : "idle"}"></span><b>${esc(p.name)}</b>${stars(p.star ?? 0)}
       <span class="tag ${p.ok ? "comp" : "nocomp"}">${p.ok ? "可买底卡刷" : "底卡不全可买"}</span>
-      ${st.dp_mode ? `<span class="tag comp" title="炼卡顺序由 DP 每周期重新求解最优解">DP 调度</span>` : ""}
+      ${st.dp_mode ? `<span class="tag comp" title="炼卡顺序由 DP 骨架调度：承诺点（首解/套变/轮界/过时）才重解，tick 内按骨架做有限偏差微调">DP 调度</span>` : ""}
       <span style="color:var(--muted);font-size:12px">${running ? "运行中（每45秒一个周期）" : "已停止"}</span></span>`);
     head.push(`<div class="state-box">` +
       stat("套内卡", p.cards, "张") +
@@ -3148,8 +3148,8 @@ function renderAuto(st, bx) {
       stat("炼卡", sts.refined ?? 0, "次") +
       stat("买卡", sts.bought ?? 0, "张") +
       stat("随机抽卡", st.randchance ?? 0, "次") +
-      (st.dp_mode && st.dp && st.dp.solve_ms != null
-        ? stat("DP 求解", st.dp.skip ? "跳过" : `${st.dp.solve_ms}`, st.dp.skip ? "" : "ms/周期")
+      (st.dp_mode && st.dp
+        ? `<div class="stat-chip" title="骨架代数=承诺点重解次数；解=最近一次求解耗时；应急/提前发=有限偏差微调量"><span class="k">DP 骨架</span><span class="v">${st.dp.skip ? "复用" : `${st.dp.resolves ?? 0} 代`}${st.dp.skip ? "" : `<small>解 ${st.dp.solve_ms}ms</small>`}</span></div>`
         : "") +
       stat("错误", sts.errors ?? 0, sts.errors ? "⚠" : "") +
       `</div>`);

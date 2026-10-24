@@ -165,8 +165,9 @@ class VirtualSession:
             f'<stovebox cur="{len(self.MAIN_SLOTS)+1}" max="{(len(self.MAIN_SLOTS)+1)*2}">'
             + "".join(stove_cards) + "</stovebox>")
         stoves_xml = "".join(
-            f'<stove id="{st["cid"]}" endtime="{st["endtime"]}"/>'
-            for st in self.stoves.values())
+            f'<stove id="{st["cid"]}" endtime="{st["endtime"]}"'
+            + (' slottype="steal"' if slot == self.STEAL_SLOT else '') + '/>'
+            for slot, st in self.stoves.items())
         return (f'<user randchance="0" gold_fen="0" color_stone="0">'
                 f'<hello time="{now}"/>'
                 + change_xml + store_xml + stovebox + stoves_xml +

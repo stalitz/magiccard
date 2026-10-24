@@ -83,7 +83,8 @@ class WorldState:
         furnaces: list = []
         for i, sv in enumerate(st.get("stoves", [])):
             furnaces.append(Furnace(slot=i, cid=int(sv.get("id", 0)),
-                                    endtime=int(sv.get("endtime", 0)), steal=False))
+                                    endtime=int(sv.get("endtime", 0)),
+                                    steal=bool(sv.get("steal"))))
         return cls(
             now=now,
             change=change, store=store,

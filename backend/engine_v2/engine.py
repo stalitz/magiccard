@@ -30,14 +30,18 @@ class Engine:
         self.completed_rounds: Counter = Counter()
         self.planner = Planner(steal_enabled=steal_enabled)
         self.executor = Executor()
-        # DP 每 tick 控制器开关（2026-10-23）：开启后把 DP 作为调度控制器，每个 tick
-        # 用真实 WorldState 重解、取最优 t=0 动作执行；贪心路径完全不动。
+        # DP 控制器开关（2026-10-24 重构为「骨架 + 有限偏差」）：承诺点才解算
+        # 骨架（带 start 的动作表，买卡入状态、偷炉可规划），tick 内只做列表调度；
+        # 贪心路径完全不动。
         self.use_dp = use_dp
         self.dp_ctrl = None
         if use_dp:
             from .dp_controller import DPTickController
+            # 骨架+有限偏差架构：承诺点才解算（首次/active变/轮界/耗尽/偏差超限/
+            # streak），一局通常只解 2~5 次 → 每次可给大预算（2s）求更紧的 UB
             self.dp_ctrl = DPTickController(self.models, machines=3,
-                                           time_budget=0.3)
+                                           time_budget=2.0,
+                                           steal_enabled=steal_enabled)
         # DP 开关：单套高星（star>=3）走 DP 最优调度；多套走联合 DP（2026-10-23）；
         # 低星单套 / 无限炼仍走贪心。
         self.dp_single = dp_single
@@ -69,7 +73,12 @@ class Engine:
 
         vs = VirtualSession(change_cur=change_cur, store_cur=store_cur)
         vs.ar = self
+        import sys as _sys
         for n in range(max_ticks):
+            if n and n % 5000 == 0:
+                print(f"  …tick {n}/{max_ticks} "
+                      f"({round(n*45/3600,1)}h) done={dict(self.completed_rounds)}",
+                      file=_sys.stderr, flush=True)
             vs.now += interval
             # 收卡：把到时的炉内卡取回箱（与真机「每 tick 收卡」一致）
             for slot, stt in list(vs.stoves.items()):

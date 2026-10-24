@@ -1,23 +1,44 @@
-"""DP 每 tick 控制器：把 DP 作为**调度控制器**，每个 tick 用真实 WorldState 重解，
-取最优调度里 start_time==0 的动作执行。DP 即控制器 → 静态/滚动 gap 消失。
+"""DP 控制器 v2：骨架（skeleton）+ 有限偏差执行（2026-10-24 重构）。
 
-状态空间（有限离散，类型级聚合，sched_dp 同构）：
-  · 每类非底卡 c：need0[c]（净需求，按**箱内+炉内**持有量净减）、
-    stock[c]（箱内持有，作为即时可用喂料）、running_rel[cid,剩余]（炉内）。
-  · 底卡从 mats 剥离（买即来、无限供应、0 炉时——真实游戏买卡瞬时），
-    建模为无限前置；买卡由「JIT 拉动 + 箱容闸门」实现（不囤货撑箱）。
-  · 炉 = 3 主炉（DP 建模容量）；偷炉作 40 面专属 bonus（不进 DP 容量，引擎执行时
-    在主炉满时兜底 40 面卡，绝不改变 DP 的可行性）。
+架构（用户定调，原话）：
+  高星长前置 → DP 解出来的是一个「大致顺序」（骨架）
+  物流延迟 / 人干预 → 在这个骨架内做局部重分配（反应式微调）
+  不重解全局 → 不 churn
+  骨架过时了 → 触发重解（低频）
+  = branch-and-bound with limited discrepancy，不是「每 tick 全量重解 vs
+    一次性静态排产」的二选一。
 
-相对 dp_adapter.joint_dp_order 的修正（bug fix）：
-  · init_stock 只用**箱内**持有，不含炉内在炼（pending）——炉内卡正在炼、不可当喂料，
-    须等其 finish（由 init_running + collect 转移处理）；旧版 `+pd` 会把在炉卡当可用
-    喂料误消费，是接滚动引擎错位的根之一。
+对应实现（对照旧版每 tick 全量重解的结构性缺陷逐条修）：
+  1) 买卡入状态：底卡是 shop 机器类上的买卡类型（dur=LAG=1 tick 物流），DP 选卡
+     时就知道「买这张底料要 1 tick」→ 骨架里的买卡动作天然排在消费者前 LAG。
+     旧版 _jit_prebuy 是执行层外挂（DP 不知道物流），已删除。
+  2) 跨 tick 状态继承：解算产出的是**带 start 时间的骨架动作表**，跨 tick 缓存
+     （_plan），下一 tick 只做列表调度（微秒级），不再把「未来 20 tick 的计划」
+     整个丢掉重算。旧版每 tick 重解 = rolling horizon 无 warm start。
+  3) 骨架/微调分层：承诺点才解算（首次 / active 变 / 轮界 / 计划耗尽 / 偏差超限 /
+     头动作连续被卡），解算带 init_stock + init_running（机器感知，start 诚实）；
+     tick 内按「start<=elapsed 到期门 + 喂料在箱 + 炉空闲」列表调度。
+  4) 有限偏差（局部重分配）：物流失败（缺底卡且骨架无到期买卡）→ emergency buy；
+     头动作被卡时在 scan_window 内向后扫描可执行动作，但**绝不消费被阻塞动作
+     的在箱喂料**（不偷关键路素材）；偏差计数超限 → 判骨架过时 → 重解。
+  5) 低频重解 → 每次可给大预算（默认 2s，旧版每 tick 0.3s）：高星也更可能证最优。
+     tick 内成本 = O(扫描窗口) ≈ 微秒级（满足「每 tick 毫秒级出结果」）。
 
-性能：跨 tick 热启动 memo（骨架不变则记忆有效）；无空闲炉时不重解（此时无可启动动作）。
+箱容：box_cap（change+store）进 DP 状态，任何落箱超限即剪枝 → DP 自动 JIT。
+专辑底卡（collect 优先级策略）保留控制器侧预买：DP 的 lazy 规则把专辑底卡排在
+终局，提前买让 collect 早触发、轮次早翻页；执行层按计划去重不超买。
+
+执行层两趟结构（2026-10-24 定型，tid=59 实测 75.49→70.79h）：
+  pass 1 买卡 reactive：扫描到就买、不等计划时刻——JIT 严守 start 门时，
+    消费者到点常差 1~2 tick 才等到落箱卡 → 空转 + streak 假过时 → 重解
+    级联；解耦后消失。纪律：按 DP 顺序发 + 箱预算闸（box_free + collect
+    释放 - 专辑预扣 - 在炉落位保留，Ⅴ 类防丢卡）+ 每 tick 速率闸（同贪心
+    口径在炉数×3+6）+ 计划去重。
+  pass 2 精炼时序门：到期门 + 头动作提前发 + 阻塞保护 + 窗口扫描。
 """
 from __future__ import annotations
 
+import time as _t
 from collections import Counter
 from typing import Dict, List, Tuple
 
@@ -26,213 +47,190 @@ from .model import ThemeModel
 from .plan import Action
 from .world import WorldState
 
+TICK_SECS = 45.0        # 生产/仿真 tick 粒度（买卡物流 LAG = 1 tick）
+EPS = 1e-9
+
 
 class DPTickController:
     def __init__(self, models: Dict[int, ThemeModel], machines: int = 3,
-                 time_budget: float = 0.3, node_budget: int = 8_000_000):
+                 time_budget: float = 2.0, node_budget: int = 8_000_000,
+                 lag_secs: float = TICK_SECS, shop_cap: int = 15,
+                 streak_limit: int = 4, scan_window: int = 6,
+                 steal_enabled: bool = True):
         self.models = models
         self.machines = machines
         self.time_budget = time_budget
         self.node_budget = node_budget
+        self.lag_secs = float(lag_secs)     # 买卡物流延迟（1 tick）
+        self.shop_cap = int(shop_cap)       # 每 tick 买卡并发上限
+        self.streak_limit = streak_limit    # 头动作连续被卡 tick 数 → 骨架过时
+        self.scan_window = scan_window      # 有限偏差向后扫描窗口
+        self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
         self._memo: dict = {}
         self._skel_sig: tuple = None
         self._skel: dict = None
+        self._skel_box_cap: int = None
         # cid -> owner model（各套卡库不相交，安全）
         self._owner: Dict[int, ThemeModel] = {}
         for tid, m in models.items():
             for c in m.ids:
                 self._owner[c] = m
+        # ---- 骨架缓存（承诺式调度）----
+        self._plan: dict = None
+        self._plan_rounds_sig: tuple = None
         # profiling
         self.solve_count = 0
         self.solve_max_ms = 0.0
         self.solve_total_ms = 0.0
-        self.bounded_count = 0          # solve 返回 bounded=True（未证最优）的次数
+        self.bounded_count = 0
         self.buy_failed = 0
+        self.resolves = 0               # 承诺点重解次数（骨架代数）
+        self.discrepancy_total = 0      # 有限偏差累计（应急买 + 扫描跳过）
+        self.emergency_total = 0        # 应急买卡累计张数
+        self.opportunistic_total = 0    # 提前发累计次数（纯时机微调，不计偏差）
+        self.streak_max = 0
+        self._dbg: dict = {}            # 临时插桩（提前发失败原因），验收后删
 
-    # ---- 静态骨架（类型级），active 套集合不变时复用 ----
+    # ---- 静态骨架（类型级），active 套集合 / 箱容变化才重建 ----
     def _skeleton(self, active):
-        types = []
+        """类型级骨架：非底卡 = 精炼类型；底卡 = 买卡类型（mclass [1]、
+        dur=LAG、mats 空）——买卡是状态里的一等公民，DP 选卡即知物流延迟。
+
+        机器类（mclass，2026-10-24 偷炉可规划）：40 面精炼 = [0,2]（主炉或偷炉
+        均可，DP 逐作业选类）→ 骨架是 4 炉调度而非 3 炉；其余精炼 = [0]；
+        偷炉关闭时全部退化为 [0]（3 炉）。
+        """
+        ut: List[int] = []
+        seen = set()
         for t in active:
             m = self.models[t]
             for c in m.ids:
-                if not m.is_base(c):
-                    types.append(c)
-        seen = set()
-        ut = []
-        for c in types:
-            if c not in seen:
-                seen.add(c)
-                ut.append(c)
+                if c not in seen:
+                    seen.add(c)
+                    ut.append(c)
         idx = {c: i for i, c in enumerate(ut)}
         n = len(ut)
-        dur = [self._owner[c].secs(c) for c in ut]
-        mats = []
+        dur, mclass, mats = [], [], []
         for c in ut:
-            mc = {}
-            for f in self._owner[c].feeders(c):
-                if (not self._owner[f].is_base(f)) and f in idx:
-                    mc[idx[f]] = mc.get(idx[f], 0) + 1
-            mats.append(tuple(sorted(mc.items())))
+            m = self._owner[c]
+            if m.is_base(c):
+                dur.append(float(self.lag_secs))
+                mclass.append((1,))
+                mats.append(())
+            else:
+                dur.append(float(m.secs(c)))
+                if self.steal_enabled and m.is_40(c):
+                    mclass.append((0, 2))     # 40 面：主炉或偷炉
+                else:
+                    mclass.append((0,))
+                mc = {}
+                for f in m.feeders(c):
+                    if f in idx:            # 喂料（含底卡）都在骨架内
+                        mc[idx[f]] = mc.get(idx[f], 0) + 1
+                mats.append(tuple(sorted(mc.items())))
         depth = [self._owner[c].depth.get(c, 0) for c in ut]
-        cp = [0] * n
+        cp = [0.0] * n
 
-        def cpf(i: int) -> int:
+        def cpf(i: int) -> float:
             if cp[i]:
                 return cp[i]
-            cp[i] = dur[i] + max((cpf(j) for j, _ in mats[i]), default=0)
+            cp[i] = dur[i] + max((cpf(j) for j, _ in mats[i]), default=0.0)
             return cp[i]
 
         for i in range(n):
             cpf(i)
         return {"types": ut, "idx": idx, "n": n, "dur": dur,
-                "mats": mats, "depth": depth, "cp": cp}
+                "mats": mats, "mclass": mclass, "depth": depth, "cp": cp}
 
-    def _union_need0(self, box_stock, pending, active, completed_rounds, max_rounds):
-        """净需求（每张非底卡还需炼几次）。
+    def _union_need0(self, box_stock, pending, active, completed_rounds,
+                     max_rounds):
+        """净需求：(非底卡炼几次, 底卡买几张)。
 
-        ★ 必须直接复用 net_plan(box, pending, sets)（与贪心 Planner 完全同口径）：
-        它在**每一层**自顶向下扣减 box+pending（底层卡被高层消费后，其上层需求同步
-        减少），是正确的 MRP 净需求。
-        旧实现先 net_plan({},{},1) 取「全集需求」再在末尾平减一次 box+pending —— 与
-        逐层扣减不等价，会**净需求被放大**（实测 cid168 2 vs 1、cid164 3 vs 2），导致
-        DP 每 tick 多排精炼 → 全作业约翻倍（112 vs 55 炼）→ 耗时从 73h 涨到 119h。
+        直接复用 net_plan(box, pending, sets)（与贪心 Planner 完全同口径）：
+        每一层自顶向下扣减 box+pending，是正确的 MRP 净需求。底卡需求取 net_plan
+        的 buy 字典（含集卡册收藏需求 + 喂料需求，已净减持有）。
         """
-        total = Counter()
+        need, buy = Counter(), Counter()
         for t in active:
             m = self.models[t]
             sets = (max_rounds - completed_rounds.get(t, 0)) if max_rounds else 1
             sets = max(1, sets)
-            runs, _buy = m.net_plan(dict(box_stock), dict(pending), sets=sets)
+            runs, buys = m.net_plan(dict(box_stock), dict(pending), sets=sets)
             for c, nd in runs.items():
-                if not m.is_base(c):        # 底卡买即用、不进 DP 合成需求
-                    total[c] += nd
-        return total
+                if not m.is_base(c):
+                    need[c] += nd
+            for c, nd in (buys or {}).items():
+                buy[c] += nd
+        return need, buy
 
-    def _jit_prebuy(self, ws, active, need0_map, box_stock, pending,
-                    actions, bought):
-        """JIT 预买底卡（与贪心 Planner Step5 同口径，2026-10-23 修 DP 慢于贪心）。
+    def _album_prebuy(self, ws, active, box_stock, pending, actions, bought,
+                      extra_free: int = 0):
+        """专辑底卡预买（collect 优先级策略，非物流补偿）。
 
-        现象：旧版 DP 控制器只在 t0 提取时买「本 tick 正在炼的精炼」的底料喂料，且其
-        他无炉位时连这也不买 → 底料总是「要用才买、下 tick 才到」→ 精炼被迫顺延、炉空闲
-        等待底料。贪心靠 `due` 前瞻预买（每 tick 最多 总炉数×3+6 张、箱容闸门兜底）让喂料
-        提前到位，炉不空等。
-
-        修法：本步按 net_plan 需求算 `due`（即将能炼的合成卡实例底卡喂料 + collect 在即的
-        收藏底卡），轮转预买、箱容闸门防撑爆。底卡建模为无限即时供应，预买即兑现该假设，
-        使 t0 提取几乎不再因缺底料顺延。与贪心 Step5 完全同口径 → DP 炉占向贪心对齐。
+        DP 骨架按 lazy 规则把专辑底卡排在终局（无精炼需求时才买）；但 collect 要等
+        它们在箱。同贪心 Step5 口径：某套非底卡全在箱 → 只差专辑底卡 → 现在就买，
+        collect 早触发、轮次早翻页（多轮流水）。执行层按计划去重，不超买。
+        箱预算同贪心 Step5：box_free + collect 释放 - 在炉落位保留（Ⅴ 类：
+        炼成卡落箱失败会被静默丢弃，必须给在炉卡留落位）。
         """
-        due = Counter()
-        # ① 合成卡喂料底卡：非底卡喂料全在箱/炉的合成卡 → 拉其实例底卡喂料
-        for cid, nd in need0_map.items():
-            if nd <= 0:
-                continue
-            m = self._owner[cid]
-            feeders = m.feeders(cid)
-            if any((not m.is_base(f)) and box_stock.get(f, 0) < 1
-                   and pending.get(f, 0) < 1 for f in feeders):
-                continue
-            for f in feeders:
-                if m.is_base(f):
-                    due[f] += 1
-        # ② 收藏底卡：该套合成卡全在箱（只差底卡即可 collect）补缺口
+        reserve = len(ws.furnaces) + 2
+        free = max(0, ws.box_free + extra_free - reserve)
         for t in active:
             m = self.models[t]
-            if all(box_stock.get(c, 0) >= 1 for c in m.ids
-                   if not m.is_base(c)):
-                for c in m.ids:
-                    if m.is_base(c):
-                        gap = 1 - box_stock.get(c, 0) - pending.get(c, 0)
-                        if gap > 0:
-                            due[c] = max(due.get(c, 0), gap)
-        # 箱容闸门：当前箱位 + collect 释放位 - 预留（在炉卡落地位）
-        collect_freed = sum(len(self.models[a.tid].ids)
-                            for a in actions if a.kind == "collect")
-        free_after = ws.box_free + collect_freed
-        reserve = len(ws.furnaces) + 2
-        if free_after > reserve:
-            free_after -= reserve
-        else:
-            free_after = 0
-        buy_cap = len(ws.furnaces) * 3 + 6
-        emit = {}
-        for c, n in due.items():
-            held = (box_stock.get(c, 0) + pending.get(c, 0)
-                    + (1 if c in bought else 0))
-            g = n - held
-            if g > 0:
-                emit[c] = g
-        order_cids = sorted(emit)
-        remaining = dict(emit)
-        b = 0
-        while b < buy_cap and free_after > 0:
-            progressed = False
-            for cid in order_cids:
-                if remaining.get(cid, 0) <= 0:
+            if not all(box_stock.get(c, 0) >= 1
+                       for c in m.ids if not m.is_base(c)):
+                continue
+            for c in m.ids:
+                if not m.is_base(c):
                     continue
-                if free_after <= 0 or b >= buy_cap:
-                    break
-                actions.append(Action(kind="buy", cid=cid, n=1,
-                                     note=f"DP-JIT买底料 {cid}"))
-                remaining[cid] -= 1
-                free_after -= 1
-                b += 1
-                bought.add(cid)
-                progressed = True
-            if not progressed:
-                break
+                gap = 1 - box_stock.get(c, 0) - pending.get(c, 0)
+                if gap > 0 and free > 0:
+                    actions.append(Action(kind="buy", cid=c, n=1,
+                                         note=f"DP专辑底卡 {c}"))
+                    bought.add(c)
+                    free -= 1
 
-    def decide(self, ws: WorldState, active: List[int],
-               completed_rounds: Counter, max_rounds: int = 0
-               ) -> Tuple[List[Action], dict]:
-        actions: List[Action] = []
-        box_stock = ws.stock
-        pending = ws.pending
+    @staticmethod
+    def _box_peak(inst, sched, init_sum):
+        """模拟骨架调度的箱占用峰值（买卡/精炼落箱 +1、精炼开工 -喂料数）。
 
-        # ---- 骨架缓存（active 套集合变化才重建，否则复用 + memo 热启动）----
-        sig = tuple(sorted(active))
-        if sig != self._skel_sig:
-            self._skel = self._skeleton(active)
-            self._skel_sig = sig
-            self._memo = {}
-        sk = self._skel
+        用于兜底：DP 搜不到可行解（箱容装不下）时会回退乐观 UB，其调度可能超容 →
+        调用方据此 relax（去掉箱容）重解，执行层真实箱检兜底。
+        """
+        dur = inst["dur"]
+        mats = inst["mats"]
+        mclass = inst["mclass"]
+        ev = []
+        for i, s in sched:
+            if mclass[i] == 1:
+                ev.append((s + dur[i], 1))
+            else:
+                ev.append((s, -sum(k for _j, k in mats[i])))
+                ev.append((s + dur[i], 1))
+        # 同 t 先落箱后消耗（保守，峰值取上界）
+        ev.sort(key=lambda x: (x[0], -x[1]))
+        occ = peak = init_sum
+        for _t, d in ev:
+            occ += d
+            if occ > peak:
+                peak = occ
+        return peak
+
+    def _solve_plan(self, ws, active, need0_map, buy0_map, box_cap, sk,
+                    rounds_sig):
+        """承诺点解算：从当前真实状态（箱内 + 在炉）求剩余问题最优骨架。"""
         idx = sk["idx"]
         types = sk["types"]
-
-        # ---- 净需求（每张非底卡还需炼几次，套内 × 剩余轮数）----
-        # 需在 collect / 预买 / 建实例前算出（预买按 due 拉底料依赖它）。
-        need0_map = self._union_need0(box_stock, pending, active,
-                                       completed_rounds, max_rounds)
-
-        # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
-        for t in active:
-            m = self.models[t]
-            if m.complete_in_stock(box_stock):
-                actions.append(Action(kind="collect", tid=t, target=m.top_cid,
-                                     giftid=m.giftid, note="DP:凑齐整套→上交"))
-
-        # ---- 1b) JIT 预买底卡（与贪心 Planner Step5 同口径，2026-10-23 修 DP 慢于贪心）----
-        # 放 skip-solve 检查之前：即便 3 主炉+偷炉全忙，也持续预买喂料，炉一空即有料可投。
-        bought_this_tick: set = set()
-        self._jit_prebuy(ws, active, need0_map, box_stock, pending, actions,
-                         bought_this_tick)
-
-        # ---- 2) 无空闲炉（主+偷）则无需重解：此时无可启动精炼 ----
-        # DP 建模 3 主炉；若 3 主炉全忙且偷炉也满，直接返回（collect 已处理）。
-        if ws.main_free <= 0 and ws.steal_free <= 0:
-            return actions, {"skip_solve": True, "n_types": len(types)}
-
-        # ---- 3) 建实例 + 每 tick 重解（reacting to true state，即「DP 即控制器」）----
-        # 每 tick 用真实 box+pending 重解 → 始终最优序。实测（2026-10-23）：比「承诺式
-        # 调度（解一次+列表调度）」更适合浅树/快卡（3★/4★）——JIT 买卡有 1 tick 物流延迟，
-        # 承诺静态序会因喂料未落箱而炉空闲（3★ 88h/68.7% vs 每 tick 重解 72h/84%）；深树
-        # 慢卡（5★）静态序虽再快 ~17h，但那是「全知假设」换的、且以浅树回归为代价，故取
-        # 每 tick 重解的均衡形态（赢低星/多套低星，见 bench_focused）。不传 init_running
-        # （实测退化到 800 万节点/53s 仍 bounded；在炉卡由 need0 净减 + 喂料在箱过滤覆盖）。
+        box_stock = ws.stock
+        pending = ws.pending
         present = {c: box_stock.get(c, 0) + pending.get(c, 0) for c in types}
-        live = [c for c in types if need0_map.get(c, 0) > 0 or present.get(c, 0) > 0]
+        live = [c for c in types
+                if need0_map.get(c, 0) > 0 or buy0_map.get(c, 0) > 0
+                or present.get(c, 0) > 0]
         live_idx = {c: i for i, c in enumerate(live)}
         nL = len(live)
         durL = [sk["dur"][idx[c]] for c in live]
+        mclassL = [sk["mclass"][idx[c]] for c in live]
         matsL = []
         for c in live:
             mc = {}
@@ -241,22 +239,42 @@ class DPTickController:
                 if cj in live_idx:
                     mc[live_idx[cj]] = mc.get(live_idx[cj], 0) + k
             matsL.append(tuple(sorted(mc.items())))
-        need0L = [need0_map.get(c, 0) for c in live]
+        need0L = []
+        for c in live:
+            i = live_idx[c]
+            need0L.append(max(0, buy0_map.get(c, 0)) if 1 in mclassL[i]
+                          else max(0, need0_map.get(c, 0)))
         depthL = [sk["depth"][idx[c]] for c in live]
         cpL = [sk["cp"][idx[c]] for c in live]
-        # ★ init_stock 只用箱内（不含炉内 pending）
+        # ★ init_stock 只用箱内（不含炉内 pending）；在炉由 init_running 记产出
         init_stockL = [box_stock.get(c, 0) for c in live]
-        M = self.machines
-        inst = {"machines": M, "types": live, "n": nL, "dur": durL,
-                "mats": matsL, "need0": need0L, "depth": depthL, "cp": cpL,
-                "init_stock": init_stockL}
-
-        import time as _t
+        running = []
+        for f in ws.furnaces:
+            if f.cid <= 0 or f.cid not in live_idx:
+                continue
+            rem = max(0.0, float(f.endtime) - float(ws.now))
+            cls = 2 if getattr(f, "steal", False) else 0
+            running.append((live_idx[f.cid], rem, cls))
+        inst = {"machines": self.machines, "shop_cap": self.shop_cap,
+                "box_cap": box_cap, "mclass": mclassL, "types": live, "n": nL,
+                "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
+                "cp": cpL, "init_stock": init_stockL,
+                "steal_cap": 1 if self.steal_enabled else 0}
         t0 = _t.perf_counter()
         mk, sched, stats = solve(inst, time_budget=self.time_budget,
                                  node_budget=self.node_budget,
-                                 init_stock=init_stockL,
+                                 init_stock=init_stockL, init_running=running,
                                  memo=self._memo)
+        # 箱容兜底：回退 UB 可能超容（DP 搜不到可行解）→ relax 重解。
+        # ⚠️ relax 必须用全新 memo：箱容约束下的 INF/有限值会毒化无约束重解
+        # （LB 剪枝与箱容无关仍有效，但「落箱超容」分支在 relax 后变可行）。
+        if self._box_peak(inst, sched, sum(init_stockL)) > box_cap + EPS:
+            inst["box_cap"] = None
+            mk, sched, stats = solve(inst, time_budget=self.time_budget,
+                                     node_budget=self.node_budget,
+                                     init_stock=init_stockL, init_running=running,
+                                     memo=None)
+            stats["box_relaxed"] = True
         dt_ms = (_t.perf_counter() - t0) * 1000.0
         self.solve_count += 1
         self.solve_total_ms += dt_ms
@@ -266,8 +284,53 @@ class DPTickController:
         stats = dict(stats)
         stats["n_types"] = nL
         stats["solve_ms"] = round(dt_ms, 2)
+        # ---- 骨架动作表（按 start 排序；同 start 买卡优先）----
+        # ★ start 向上取齐到 tick 边界：执行层按 tick 触发（elapsed 是 45 的整数
+        # 倍、solved_at 必为 tick 边界），连续时间的 start 每拍系统性迟到 0~45s，
+        # 买卡链上「buy 晚 1 tick 触发 → 落箱再晚 1 tick」放大成等料空转与
+        # streak 假过时。取齐后「计划时刻 = 实际触发时刻」，买卡落箱时刻
+        # (= 触发 tick + LAG) 与计划假设一致，消费者到点即有料。
+        tick = float(self.lag_secs)
+        ops = []
+        planned_buy = Counter()
+        for i, s in sched:
+            st_tick = (int(s / tick + (1 - EPS)) * tick) if s > EPS else 0.0
+            c = live[i]
+            if 1 in mclassL[i]:
+                ops.append({"kind": "buy", "cid": c, "start": st_tick})
+                planned_buy[c] += 1
+            else:
+                ops.append({"kind": "refine", "cid": c, "start": st_tick,
+                            "feeders": list(self._owner[c].feeders(c))})
+        ops.sort(key=lambda o: (o["start"], 0 if o["kind"] == "buy" else 1,
+                                -cpL[live_idx[o["cid"]]], o["cid"]))
+        plan = {"ops": ops, "issued": [False] * len(ops), "cursor": 0,
+                "solved_at": float(ws.now), "rounds_sig": rounds_sig,
+                "planned_buy": planned_buy, "bought": Counter(),
+                "streak": 0, "discrepancy": 0, "makespan": mk,
+                "n_types": nL, "box_relaxed": bool(stats.get("box_relaxed"))}
+        return plan, stats
 
-        # ---- 4) 取 t=0 动作（最优调度里 start==0 的精炼）----
+    def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
+                  album_bought: int, collect_freed: int,
+                  box_stock, pending):
+        """有限偏差列表调度（两趟：买卡 reactive + 精炼时序门）。
+
+        pass 1 — 买卡（reactive，不过时序门）：
+          每 tick 扫描全部买卡 op、按 DP 顺序发；箱预算闸 + 每 tick 速率闸兜底。
+          实测（tid=59）：JIT 买卡严守 start 门时，消费者到点常差 1~2 tick 才
+          等到落箱卡 → 空转 + streak 假过时 → 重解级联（75.49h）；买卡与精炼
+          扫描解耦后 70.79h / 槽占 85.5%（优于贪心 73.41h）。
+          纪律：① 按 DP 顺序发（DP 已平衡关键路与箱压，不轮转打乱其决策）；
+          ② 箱预算 = box_free + collect 释放 - 专辑预扣 - 在炉落位保留；
+          ③ 每 tick 速率闸同贪心口径（在炉数×3+6，专辑预买计入额度）；
+          ④ 与计划去重（plan["bought"] 已含专辑预买）→ 绝不超买。
+        pass 2 — 精炼（时序门）：到期门 + 头动作提前发 + 阻塞保护 + 窗口扫描；
+          买卡 op 在此趟透明跳过（pass 1 已处理）。
+        """
+        ops = plan["ops"]
+        issued = plan["issued"]
+        elapsed = max(0.0, float(ws.now) - plan["solved_at"])
         avail_slots: Dict[int, List[tuple]] = {}
         for cid, slot, slottype in ws.slots:
             if cid > 0:
@@ -284,53 +347,272 @@ class DPTickController:
                     return (slot, slottype)
             return None
 
-        box_free_local = ws.box_free
+        def has_slot(cid: int) -> bool:
+            return any((cid, slot) not in taken
+                       for slot, _st in avail_slots.get(cid, []))
 
-        t0starts = [(live[i], s) for (i, s) in sched if abs(s) < 1e-6]
-        # 长链优先（与 DP cp 一致）
-        t0starts.sort(key=lambda cv: (-cpL[live_idx[cv[0]]], cv[0]))
-
+        # ---- 箱预算（买卡闸；精炼腾出的位在 pass 2 汇入）----
+        # Ⅴ 类约束：炼成卡落箱失败会被静默丢弃（get_refined_card 先 pop 炉再
+        # _add_to_box，箱满即丢卡）→ 必须给在炉卡留落位，口径同贪心 Step5。
+        reserve = len(ws.furnaces) + 2
+        box_free_local = max(0, ws.box_free + collect_freed
+                             - album_bought - reserve)
         used_main = 0
         steal_avail = ws.steal_free
+        n_ref = n_buy = n_emerg = n_early = 0
+        disc0 = plan["discrepancy"]
 
-        for cid, _ in t0starts:
+        # ============ pass 1: 买卡 reactive（扫描到就买，不等计划时刻）============
+        buy_cap = max(0, len(ws.furnaces) * 3 + 6 - album_bought)
+        for i, op in enumerate(ops):
+            if n_buy >= buy_cap or box_free_local <= 0:
+                break                   # 速率闸 / 箱闸（紧急买也进不来）
+            if issued[i] or op["kind"] != "buy":
+                continue
+            cid = op["cid"]
+            if plan["bought"][cid] >= plan["planned_buy"][cid]:
+                issued[i] = True        # 专辑预买/应急买已买到 → 去重跳过
+                continue
+            actions.append(Action(kind="buy", cid=cid, n=1,
+                                 note=f"DP骨架买底料 {cid}"))
+            plan["bought"][cid] += 1
+            bought_this_tick.add(cid)
+            box_free_local -= 1
+            issued[i] = True
+            n_buy += 1
+
+        # ============ pass 2: 精炼时序门 ============
+        i = plan["cursor"]
+        scanned = 0
+        first_refine = True             # 头动作（首个精炼）才允许提前发
+        protected: set = set()          # 被阻塞动作的在箱喂料（后续不得消费）
+
+        def avail_count(cid: int) -> int:
+            """箱内该卡可用张数（未被 protected 征用）。"""
+            if cid in protected:
+                return 0
+            return sum(1 for slot, _st in avail_slots.get(cid, [])
+                       if (cid, slot) not in taken)
+
+        def early_ok(idx: int, cid: int) -> bool:
+            """有限偏差③（提前发）：op 未到期但喂料在箱、有空炉 → 现在就发。
+
+            动机（tid=59 实测）：计划因机器投影把 op 排得很晚，现实里喂料已在箱、
+            炉位空着（专辑预买/量化把箱填在计划投影之前）→ 严格执行 start 门会
+            把炉子闲死（1165/1215 空转 tick 属此类）。按骨架**顺序**提前发只改
+            时机不改序，是最轻型的微调。
+            安全条件：
+              1) 喂料按重数在箱（未被 protected / 本 tick 占用）；
+              2) 有空炉（主炉优先；40 面可偷炉）；
+              3) 预留：箱内每种喂料 ≥ 本 op 需求 + 所有「未到期且未发的前序 op」
+                 对该料的需求（前序 start 更早/相等，不能抢它们的料）；
+              4) 只发 refine（买卡不提前——提前买只占箱位，无收益）。
+            """
             m = self._owner[cid]
             feeders = m.feeders(cid)
-            picks: List[tuple] = []
-            ok = True
-            for f in feeders:
-                if f in avail_slots:                 # 在箱（含底卡）→ 取槽消耗
-                    sl = take_slot(f)
-                    if sl is None:
-                        ok = False
-                        break
-                    picks.append((f, sl[0], sl[1]))
-                else:
-                    # 喂料不在箱（底卡未落箱 / 复合卡在炉或缺失）：本 tick 顺延，
-                    # 下 tick 重解 reacting（底料由 1b 预买提前拉好，落箱即可投）。
-                    ok = False
-                    break
-            if not ok:
-                for cid2, slot2, _st2 in picks:
-                    taken.discard((cid2, slot2))
-                continue
-            # 全部喂料已在箱 → 精炼（主炉优先；满则 40 面走偷炉 bonus）
-            steal = False
+            my_need = Counter(feeders)
+            # 3) 预留未到期前序 op 的喂料
+            reserved: Counter = Counter()
+            for j in range(plan["cursor"], idx):
+                if issued[j]:
+                    continue
+                opj = ops[j]
+                if opj["kind"] != "refine":
+                    continue
+                if opj["start"] <= elapsed + EPS:
+                    continue      # 已到期未发 = 被卡，其喂料已在 protected
+                reserved.update(Counter(self._owner[opj["cid"]].feeders(opj["cid"])))
+            for f, k in my_need.items():
+                if avail_count(f) < k + reserved.get(f, 0):
+                    self._dbg.setdefault("喂料不足:" + str(f), 0)
+                    self._dbg["喂料不足:" + str(f)] += 1
+                    return False
+            # 2) 空炉
             if used_main < ws.main_free:
-                used_main += 1
-            elif steal_avail > 0 and m.is_40(cid):
-                steal_avail -= 1
-                steal = True
-            else:
-                for cid2, slot2, _st2 in picks:
-                    taken.discard((cid2, slot2))
-                continue                                # 无炉位 → 本 tick 不炼（喂料在箱，下 tick 再投）
-            for _c, _s, _st in picks:
-                box_free_local -= 1
-            actions.append(Action(
-                kind="refine", target=cid,
-                feeders=[(slot, slottype) for (_c, slot, slottype) in picks],
-                steal=steal,
-                note=f"DP精炼 {cid}{'（偷炉）' if steal else ''}"))
+                return True
+            if steal_avail > 0 and m.is_40(cid):
+                return True
+            self._dbg.setdefault("无炉位", 0)
+            self._dbg["无炉位"] += 1
+            return False
 
+        while i < len(ops) and scanned <= self.scan_window:
+            op = ops[i]
+            if issued[i]:
+                i += 1
+                continue
+            if op["kind"] == "buy":
+                i += 1
+                continue               # 买卡已在 pass 1 处理（透明跳过）
+            early = False
+            if op["start"] > elapsed + EPS:
+                if first_refine and early_ok(i, op["cid"]):
+                    # 头动作提前发（有限偏差③）。仅限头动作——实测：放过窗口内
+                    # 任意未到期 op 提前发会占掉关键 op 的计划炉位（75.49→79.46h）。
+                    early = True
+                else:
+                    break               # 未到期（start 有序，后面更晚）
+            first_refine = False
+            scanned += 1
+            cid = op["cid"]
+            m = self._owner[cid]
+            feeders = m.feeders(cid)
+            miss_buy: List[int] = []        # 缺且可紧急买的底卡
+            blocked = False
+            for f in feeders:
+                if f in bought_this_tick or f in protected or not has_slot(f):
+                    blocked = True
+                    if (self._owner[f].is_base(f) and pending.get(f, 0) < 1
+                            and f not in bought_this_tick and f not in protected):
+                        miss_buy.append(f)
+            if not blocked:
+                picks = []
+                for f in feeders:
+                    sl = take_slot(f)
+                    picks.append((f, sl[0], sl[1]))
+                steal = False
+                if used_main < ws.main_free:
+                    used_main += 1
+                elif steal_avail > 0 and m.is_40(cid):
+                    steal_avail -= 1
+                    steal = True
+                else:
+                    for f in feeders:        # 无炉位：保护喂料，向后扫描
+                        if f in avail_slots:
+                            protected.add(f)
+                    i += 1
+                    continue
+                for _c, _s, _st in picks:
+                    box_free_local += 1     # 喂料出箱 → 空位 +1（旧版误减）
+                note = f"DP精炼 {cid}{'（偷炉）' if steal else ''}"
+                if early:
+                    note += "（提前发）"
+                actions.append(Action(
+                    kind="refine", target=cid,
+                    feeders=[(s, st) for (_c, s, st) in picks],
+                    steal=steal,
+                    note=note))
+                issued[i] = True
+                n_ref += 1
+                if early:
+                    n_early += 1
+                i += 1
+                continue
+            # ---- 阻塞 ----
+            if early:
+                # 提前发试探失败（喂料/炉位在二次检查时被占）→ 静默跳过，
+                # 不计偏差（本就没到计划时刻）。
+                i += 1
+                continue
+            if miss_buy and box_free_local >= len(miss_buy):
+                # 有限偏差①：物流失败（缺底卡且骨架无到期买卡）→ 应急补买，
+                # 下 tick 落箱即可投炉。本 tick 只买不炼（LAG）。
+                for f in miss_buy:
+                    actions.append(Action(kind="buy", cid=f, n=1,
+                                         note=f"DP应急买底料 {f}"))
+                    bought_this_tick.add(f)
+                    box_free_local -= 1
+                    plan["bought"][f] += 1
+                n_emerg += len(miss_buy)
+                plan["discrepancy"] += len(miss_buy)
+                self.emergency_total += len(miss_buy)
+                break
+            # 有限偏差②：等炉/等复合料 → 保护其在箱喂料，窗口内向后扫描
+            for f in feeders:
+                if f in avail_slots:
+                    protected.add(f)
+            plan["discrepancy"] += 1
+            i += 1
+        while plan["cursor"] < len(ops) and issued[plan["cursor"]]:
+            plan["cursor"] += 1
+        self.discrepancy_total += plan["discrepancy"] - disc0
+        # ---- 卡死统计（骨架过时信号）----
+        head_due = (plan["cursor"] < len(ops)
+                    and ops[plan["cursor"]]["start"] <= elapsed + EPS)
+        if head_due and n_ref == 0 and n_buy == 0 and n_emerg == 0:
+            plan["streak"] += 1
+        else:
+            plan["streak"] = 0
+        self.streak_max = max(self.streak_max, plan["streak"])
+        self.opportunistic_total += n_early
+        return {"refined": n_ref, "bought": n_buy, "emergency": n_emerg,
+                "early": n_early}
+
+    def decide(self, ws: WorldState, active: List[int],
+               completed_rounds: Counter, max_rounds: int = 0
+               ) -> Tuple[List[Action], dict]:
+        actions: List[Action] = []
+        box_stock = ws.stock
+        pending = ws.pending
+
+        # ---- 骨架缓存（active 套集合 / 箱容变化才重建 + memo 作废）----
+        sig = tuple(sorted(active))
+        box_cap = (ws.change_cur or 0) + (ws.store_cur or 0)
+        if sig != self._skel_sig or box_cap != self._skel_box_cap:
+            self._skel = self._skeleton(active)
+            self._skel_sig = sig
+            self._skel_box_cap = box_cap
+            self._memo = {}
+            self._plan = None
+
+        # ---- 净需求（非底卡炼几次 / 底卡买几张）----
+        need0_map, buy0_map = self._union_need0(box_stock, pending, active,
+                                                completed_rounds, max_rounds)
+
+        # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
+        # 上交整套 = 箱位释放（同贪心 Step5 口径：collect_freed 计入买卡预算）
+        collect_freed = 0
+        for t in active:
+            m = self.models[t]
+            if m.complete_in_stock(box_stock):
+                actions.append(Action(kind="collect", tid=t, target=m.top_cid,
+                                     giftid=m.giftid, note="DP:凑齐整套→上交"))
+                collect_freed += len(m.ids)
+
+        # ---- 1b) 专辑底卡预买（collect 优先级策略；执行层按计划去重）----
+        bought_this_tick: set = set()
+        self._album_prebuy(ws, active, box_stock, pending, actions,
+                           bought_this_tick, extra_free=collect_freed)
+
+        # ---- 2) 无需求（等 collect / 等炉内到货）→ 不解算、不执行 ----
+        if not need0_map and not buy0_map:
+            self._plan = None
+            return actions, {"skip_solve": True, "reason": "no_demand",
+                             "n_types": self._skel["n"]}
+
+        # ---- 3) 承诺点判定：仅在这些情况重解（低频），否则复用骨架 ----
+        rounds_sig = tuple(sorted(completed_rounds.items()))
+        plan = self._plan
+        exhausted = plan is not None and plan["cursor"] >= len(plan["ops"])
+        disc_over = (plan is not None
+                     and plan["discrepancy"] > max(12, len(plan["ops"]) // 4))
+        if (plan is None or self._plan_rounds_sig != rounds_sig
+                or exhausted or disc_over
+                or plan["streak"] >= self.streak_limit):
+            plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
+                                           box_cap, self._skel, rounds_sig)
+            self._plan = plan
+            self._plan_rounds_sig = rounds_sig
+            self.resolves += 1
+        else:
+            stats = {"skip_solve": True, "n_types": self._skel["n"]}
+
+        # ---- 3.5) 专辑预买记入计划去重（防计划同卡买卡 op 重买 / 超买）----
+        for cid in bought_this_tick:
+            plan["bought"][cid] += 1
+
+        # ---- 4) 有限偏差列表调度（两趟：买卡 reactive + 精炼时序门）----
+        run_stats = self._run_plan(ws, plan, self._skel, actions,
+                                   bought_this_tick, len(bought_this_tick),
+                                   collect_freed, box_stock, pending)
+        stats = dict(stats)
+        stats.update({"plan_ops": len(plan["ops"]), "cursor": plan["cursor"],
+                      "streak": plan["streak"],
+                      "discrepancy": plan["discrepancy"],
+                      "resolves": self.resolves,
+                      "refined_now": run_stats["refined"],
+                      "bought_now": run_stats["bought"],
+                      "emergency_now": run_stats["emergency"],
+                      "early_now": run_stats["early"],
+                      "box_relaxed": plan["box_relaxed"]})
         return actions, stats
