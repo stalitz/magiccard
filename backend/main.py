@@ -344,7 +344,7 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
                     steal: int = 1, steal_friend: str = "",
                     gift_drain: int = 0, gift_dst: int = 0,
                     gift_upper: int = 0, gift_lower: int = 0,
-                    sets: int = 0):
+                    sets: int = 0, dp: int = 0):
     """启动自动炼卡（**可多套并行**）。先按**实时库存算净需求**做启动预检。
 
     · `tids` = 逗号分隔的套卡 id 列表（队列，按序轮转，空着的炉位给各套分着用）；
@@ -373,6 +373,9 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
         eng = AutoRefine(_session, ids, buy=bool(buy), max_rounds=rounds)
     except Exception as exc:  # noqa: BLE001  (tid 不存在等)
         return {"ok": False, "message": f"无法加载该套卡计划：{exc}"}
+    # DP 调度（2026-10-24 界面开关）：勾选后炼卡环节走 engine_v2 DPTickController
+    # （每 tick 重解 RCPSP 取最优动作），执行层/偷炉/买卡兜底不变。
+    eng.dp_mode = bool(dp)
     eng.surplus_sets = max(0, int(sets or 0))   # 套数设置：0=自动（1星按囤卡多套）
     eng.steal_enabled = bool(steal)
     if steal_friend.strip():

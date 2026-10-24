@@ -629,6 +629,16 @@ class AutoRefine:
         # 常去好友（用户指定，如 983688972）：若有值，选友时**优先**用它，
         # 仅当它被失败缓存或炉上挂着我未取回的卡时才退回「从最后往回扫」。
         self.preferred_steal_friend: str | None = None
+        # ★ DP 调度开关（2026-10-24 用户「把界面加上」）：勾选后炼卡环节改用
+        #   engine_v2 的 DPTickController —— 每 tick 用真实库存重解类型级 RCPSP
+        #   （3 合 1 固定树 + 3 主炉 + 1 偷炉），取最优 start==0 动作执行；
+        #   执行层仍走本引擎 API（买卡逐张过容量、偷炉挑好友+冷却+拉黑、库存同步全保留）。
+        #   离线评测（16 场景）：低星/多套比贪心快 1~4h，高星单套与默认相当。
+        self.dp_mode = False
+        self._dp_models: dict = {}            # tid -> engine_v2 ThemeModel（懒加载）
+        self._dp_ctrl = None                  # DPTickController 单例（跨 tick memo 热启动）
+        self._dp_sig: tuple = None            # 控制器对应的队列签名（追加套卡时重建）
+        self.dp_stats_last: dict | None = None  # 最近一次 decide 统计（面板透传）
         # 套间共享的素材保护：任一套的套内卡都要保底留 1 张
         self._keep: dict[int, int] = {}
         for p in self.plans.values():
@@ -1047,8 +1057,13 @@ class AutoRefine:
                 st, stock, slots, pending = rd2
                 self._stock, self._pending = stock, pending
 
-        # 4) 按轮转顺序把**空着的主炉位**分给各套（多套并行，长炉时不让炉位闲着）
-        await self._refine_all(st, stock, slots, pending, steps)
+        # 4) 把**空着的炉位**分给各套（多套并行，长炉时不让炉位闲着）
+        #    DP 调度（勾选时）：改用 DPTickController 每 tick 重解最优调度；
+        #    执行层（买卡/炼卡/偷炉/库存同步）仍在 _dp_refine_all 里走本引擎 API。
+        if self.dp_mode:
+            await self._dp_refine_all(st, stock, slots, pending, steps)
+        else:
+            await self._refine_all(st, stock, slots, pending, steps)
 
         # 5) 收尾：某套该炼的都炼完了（成品卡全在箱内或在炉），只差商店底卡
         #    → 只给这一套把底卡买齐。买来只为放进集卡册，不再入炉消耗。
@@ -1138,6 +1153,162 @@ class AutoRefine:
             if not moved:
                 break
         return out
+
+    # ---------- DP 调度（engine_v2 DPTickController，2026-10-24 接界面） ----------
+    def _dp_model(self, tid: int):
+        """懒加载 engine_v2 ThemeModel（包装同一张 ThemePlan，静态量无副作用）。"""
+        m = self._dp_models.get(tid)
+        if m is None:
+            from .engine_v2.model import ThemeModel
+            m = ThemeModel(tid)
+            self._dp_models[tid] = m
+        return m
+
+    async def _dp_refine_all(self, st: dict, stock: Counter, slots: dict,
+                             pending: Counter, steps: list[dict]) -> None:
+        """DP 控制器版炼卡环节（勾选「DP 调度」时走这里，替代 _refine_all）。
+
+        分工：DP 决定「这一 tick 炼什么/买什么」（每 tick 用真实箱内库存+在炉重解
+        类型级 RCPSP，取最优 start==0 动作）；执行仍走本引擎的 API 与全部兜底
+        （买卡逐张过容量、偷炉挑好友+失败冷却+拉黑、本地库存/炉位同步）。
+        异常绝不卡死生产：decide 抛错只记日志、本 tick 不炼，下 tick 重试。
+        """
+        if not self.queue:
+            return
+        from .engine_v2.world import WorldState
+        # 队列变化（追加套卡）→ 控制器模型集合跟上（memo 热启动作废，重建）
+        sig = tuple(self.queue)
+        if self._dp_ctrl is None or self._dp_sig != sig:
+            from .engine_v2.dp_controller import DPTickController
+            self._dp_ctrl = DPTickController(
+                {t: self._dp_model(t) for t in self.queue}, machines=3,
+                time_budget=0.3)
+            self._dp_sig = sig
+        ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
+        if not self.steal_enabled:
+            ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）
+        completed = {t: self.plans[t].rounds for t in self.queue}
+        try:
+            actions, dpstats = self._dp_ctrl.decide(
+                ws, list(self.queue), completed, self.max_rounds)
+        except Exception as exc:  # noqa: BLE001  DP 异常不拖死生产循环
+            # _log(ok=False) 自身会累加 stats["errors"]，这里别再 +1
+            self._log("DP调度", False, f"decide 异常：{str(exc)[:120]}")
+            return
+        self.dp_stats_last = {"solve_ms": dpstats.get("solve_ms"),
+                              "n_types": dpstats.get("n_types"),
+                              "bounded": dpstats.get("bounded"),
+                              "skip": bool(dpstats.get("skip_solve"))}
+        # cid -> 所属套（买卡要带 theme_id；合成卡/底卡都可能被买）
+        owner: dict[int, int] = {}
+        for t in self.queue:
+            for c in self.plans[t].ids:
+                owner.setdefault(c, t)
+        # (slot, slottype) -> cid：执行成功后同步本地库存用
+        slot2cid: dict[tuple, int] = {}
+        for cid, lst in slots.items():
+            for sl in lst:
+                slot2cid[(sl[0], sl[1])] = cid
+        for a in actions:
+            if a.kind == "collect":
+                continue              # 上交已在 tick 第 3 步做过（DP 看到的是上交后状态）
+            if a.kind == "buy":
+                tid_c = owner.get(a.cid) or self.queue[0]
+                for _ in range(max(1, a.n)):
+                    if self._free_change(st) <= 0:
+                        self._log("买卡", False,
+                                  f"卡箱 0 空位，{card_name(a.cid)} 买不进来")
+                        break
+                    r = await self.s.post(EP_BUY, card_id=a.cid, theme_id=tid_c)
+                    ok = r.get("code") == 0
+                    if ok:
+                        self.stats["bought"] += 1
+                        stock[a.cid] += 1
+                        st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
+                    msg = r.get("message") or err_msg(r.get("code"))
+                    self._log("买卡", ok, f"{card_name(a.cid)}（DP预买） {msg}")
+                    steps.append({"action": "买卡", "ok": ok,
+                                  "detail": f"{card_name(a.cid)}（DP预买） {msg}"})
+                    if not ok:
+                        break
+                continue
+            if a.kind != "refine":
+                continue              # move/sell 当前 DP 不产出；出了也跳过（保底不执行）
+            target = a.target
+            tid_c = owner.get(target) or self.queue[0]
+            plan = self.plans[tid_c]
+            comp = plan.comp.get(target)
+            if not comp:
+                continue
+            # 喂料槽 -> payload（与 _payload 同构；DP 的 taken 集合保证槽不重复）
+            payload = {"targetid": target, "bflash": 0, "ver": 1,
+                       "targettype": 1, "themeid": comp[0], "code": ""}
+            used_feeders: list[tuple] = []
+            ok_slots = True
+            for i, (sl, stt) in enumerate(a.feeders, 1):
+                cid_f = slot2cid.get((sl, stt))
+                if cid_f is None or not slots.get(cid_f):
+                    ok_slots = False
+                    break
+                payload[f"slot{i}"] = sl
+                payload[f"slottype{i}"] = stt
+                used_feeders.append((cid_f, sl, stt))
+            if not ok_slots:
+                self._log("DP炼卡", False,
+                          f"{plan.cname(target)}：喂料槽已不在箱内（状态变了），跳过")
+                continue
+            steal = bool(a.steal)
+            friend = None
+            if steal:
+                if self._steal_cooldown_until > time.time():
+                    continue
+                friend = await self._pick_steal_friend(st)
+                if not friend:
+                    self.steal_blocked = "DP 想偷炉但挑不到有空主炉的好友"
+                    continue
+                payload.pop("code", None)
+                payload["opuin"] = friend
+                r = await self.s.post(EP_STEAL, **payload)
+            else:
+                r = await self.s.post(EP_REFINE, **payload)
+            code = r.get("code")
+            ok = code == 0
+            msg = r.get("message") or err_msg(code)
+            tag = "DP偷炉" if steal else "DP炼卡"
+            self._log(tag, ok,
+                      f"{plan.cname(target)}（{plan.name}）"
+                      f"{('@' + friend) if (steal and friend) else ''} {msg}")
+            steps.append({"action": tag, "ok": ok,
+                          "detail": f"{plan.cname(target)}（{plan.name}） {msg}"})
+            if not ok:
+                if steal:
+                    now = time.time()
+                    if code == -33031:
+                        self._steal_cooldown_until = now + 120   # 全局限制，不拉黑好友
+                    else:
+                        if friend:
+                            self._friend_fail[friend] = now + 1800
+                        self._steal_cooldown_until = now + 120
+                continue
+            # ---- 成功：同步本地库存/炉位（与 _refine_steal 同口径）----
+            self.stats["refined"] += 1
+            for cid_f, _sl, stt in used_feeders:
+                stock[cid_f] -= 1
+                if slots.get(cid_f):
+                    slots[cid_f].pop(0)
+                if stt == 0:
+                    st["cap"]["change"]["used"] = max(
+                        0, st["cap"]["change"].get("used", 0) - 1)
+            pending[target] += 1
+            if steal:
+                st["cap"]["stove"]["free_steal"] = max(
+                    0, st["cap"]["stove"].get("free_steal", 1) - 1)
+                self.last_steal = {"friend": friend, "target": target,
+                                   "name": plan.cname(target), "code": code,
+                                   "msg": msg, "ts": time.time()}
+            else:
+                st["cap"]["stove"]["free_main"] = max(
+                    0, st["cap"]["stove"].get("free_main", 1) - 1)
 
     async def _refine_all(self, st: dict, stock: Counter, slots: dict,
                           pending: Counter, steps: list[dict]) -> None:
@@ -2057,8 +2228,11 @@ class AutoRefine:
                              "have40": (pick.get("have") if pick else 0),
                              "useful": bool(pick), "last": self.box_gift_last},
                 "steal": {"enabled": self.steal_enabled,
-                           "preferred": self.preferred_steal_friend,
-                           "last_steal": self.last_steal,
-                           "blocked": self.steal_blocked,
-                           "cooldown_until": self._steal_cooldown_until},
+                          "preferred": self.preferred_steal_friend,
+                          "last_steal": self.last_steal,
+                          "blocked": self.steal_blocked,
+                          "cooldown_until": self._steal_cooldown_until},
+                # DP 调度开关 + 最近一次 decide 统计（solve_ms/n_types/bounded）
+                "dp_mode": self.dp_mode,
+                "dp": self.dp_stats_last,
                 "log": self.log[-30:]}

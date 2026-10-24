@@ -3045,6 +3045,7 @@ async function autoStart() {
   const buy = $("auto-buy").checked ? 1 : 0;
   const rounds = parseInt($("auto-rounds").value, 10) || 0;
   const steal = $("auto-steal").checked ? 1 : 0;
+  const dp = $("auto-dp").checked ? 1 : 0;
   const sf = ($("auto-steal-friend").value || "").trim();
   const gd = $("auto-gift-drain").checked ? 1 : 0;
   // 变卡目标改成自动（用户 2026-09-26 定调「不要指定，缺哪个变哪个」）：
@@ -3056,12 +3057,12 @@ async function autoStart() {
   const bold = b ? b.textContent : "";
   if (b) { b.disabled = true; b.textContent = "启动中…"; }
   try {
-    const qs = `tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}&steal=${steal}`
+    const qs = `tid=${encodeURIComponent(tid)}&buy=${buy}&rounds=${rounds}&steal=${steal}&dp=${dp}`
       + (sf ? `&steal_friend=${encodeURIComponent(sf)}` : "")
       + `&gift_drain=${gd}&gift_dst=${gdst}&gift_upper=${gup}&gift_lower=${glow}`;
     const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
-      log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）`, "ok");
+      log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）${dp ? " · DP 调度" : ""}`, "ok");
       autoLogCleared = false;
       startAutoPoll();
     } else {
@@ -3136,6 +3137,7 @@ function renderAuto(st, bx) {
     head.push(`<span class="run-head" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       <span class="dot ${running ? "run" : "idle"}"></span><b>${esc(p.name)}</b>${stars(p.star ?? 0)}
       <span class="tag ${p.ok ? "comp" : "nocomp"}">${p.ok ? "可买底卡刷" : "底卡不全可买"}</span>
+      ${st.dp_mode ? `<span class="tag comp" title="炼卡顺序由 DP 每周期重新求解最优解">DP 调度</span>` : ""}
       <span style="color:var(--muted);font-size:12px">${running ? "运行中（每45秒一个周期）" : "已停止"}</span></span>`);
     head.push(`<div class="state-box">` +
       stat("套内卡", p.cards, "张") +
@@ -3146,6 +3148,9 @@ function renderAuto(st, bx) {
       stat("炼卡", sts.refined ?? 0, "次") +
       stat("买卡", sts.bought ?? 0, "张") +
       stat("随机抽卡", st.randchance ?? 0, "次") +
+      (st.dp_mode && st.dp && st.dp.solve_ms != null
+        ? stat("DP 求解", st.dp.skip ? "跳过" : `${st.dp.solve_ms}`, st.dp.skip ? "" : "ms/周期")
+        : "") +
       stat("错误", sts.errors ?? 0, sts.errors ? "⚠" : "") +
       `</div>`);
     // 队列（多套并行）：每套各一行，空炉位按轮转分给各套能立刻提交的炉次

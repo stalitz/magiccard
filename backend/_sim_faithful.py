@@ -349,6 +349,8 @@ async def main():
     ap.add_argument("--rounds", type=int, default=1, help="max_rounds：每套上交 N 轮后停")
     ap.add_argument("--random", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--dp", default="off",
+                    help="on = 炼卡环节走 engine_v2 DPTickController（DP 调度）")
     args = ap.parse_args()
 
     if args.random:
@@ -369,6 +371,7 @@ async def main():
     if args.sets > 0:
         ar.surplus_sets = args.sets        # 固定套数，对齐 sched_cmp 实例口径
     ar.steal_enabled = (args.steal == "on")
+    ar.dp_mode = (args.dp == "on")         # DP 调度开关（2026-10-24 界面同款）
     vs.ar = ar
 
     # seed 已收集 qq秀：自动模式的「未收集数」= 总秀数 - 已seed数。
@@ -396,7 +399,8 @@ async def main():
 
     print(f"=== 忠实 tick 仿真：tid={args.tid} {ar.plans[args.tid].name} "
           f"初始礼物卡{args.gift}张 变卡{'随机50%' if args.random else '确定性100%'} "
-          f"偷炉={'开' if ar.steal_enabled else '关'} ===")
+          f"偷炉={'开' if ar.steal_enabled else '关'} "
+          f"调度={'DP' if ar.dp_mode else '贪心轮转'} ===")
     print(f"主炉={vs.MAIN_SLOTS.__len__()}个 偷炉={'1个' if ar.steal_enabled else '0个'} "
           f"interval=45s 卡炉秒数来自 theme_compose_list[6]（真实）")
     print(f"套数模式={'固定%d套/轮' % args.sets if args.sets > 0 else '自动(未收集qq秀数)'} "
