@@ -43,6 +43,7 @@
 """
 from __future__ import annotations
 
+import os
 import time as _t
 from collections import Counter
 from typing import Dict, List, Tuple
@@ -61,11 +62,22 @@ class DPTickController:
                  time_budget: float = 2.0, node_budget: int = 8_000_000,
                  lag_secs: float = TICK_SECS, shop_cap: int = 15,
                  streak_limit: int = 4, scan_window: int = 6,
-                 steal_enabled: bool = True):
+                 steal_enabled: bool = True,
+                 cp_first: bool = False, cp_budget: float = 120.0):
         self.models = models
         self.machines = machines
         self.time_budget = time_budget
         self.node_budget = node_budget
+        # ★ CP-SAT 冷启骨架（2026-10-25，A 步实验开关）：
+        # sched_dp 实测差真最优 2★ 18% / 3★ 7.9% / 4★ 7.3%（CP-SAT 对照），
+        # 但 CP-SAT 单次 100~240s，不能进每 tick 滚动循环。故只允许
+        # **第一个承诺点（冷启：空箱+空炉+无 memo）**用它出一次全局骨架，
+        # 之后所有偏差点仍走 sched_dp 2s 快路径。
+        # 环境变量 MC_CP_FIRST=1 可开启（便于 bench 对照，不改调用方）。
+        self.cp_first = bool(cp_first) or os.environ.get("MC_CP_FIRST") == "1"
+        self.cp_budget = float(os.environ.get("MC_CP_BUDGET") or cp_budget)
+        self._cp_used = False
+        self.cp_stats: dict = None
         self.lag_secs = float(lag_secs)     # 买卡物流延迟（1 tick）
         self.shop_cap = int(shop_cap)       # 每 tick 买卡并发上限
         # 头动作连续被卡 tick 数 → 骨架过时。配合 streak 判定的「等待过滤」
@@ -451,10 +463,40 @@ class DPTickController:
                 "cp": cpL, "init_stock": init_stockL,
                 "steal_cap": 1 if self.steal_enabled else 0}
         t0 = _t.perf_counter()
-        mk, sched, stats = solve(inst, time_budget=self.time_budget,
-                                 node_budget=self.node_budget,
-                                 init_stock=init_stockL, init_running=running,
-                                 memo=self._memo)
+        mk = sched = stats = None
+        # ---- ★ CP-SAT 冷启骨架（2026-10-25，实验开关 MC_CP_FIRST=1）----
+        # 条件：仅第一个承诺点 + 空箱空炉空 memo（CP 模型只支持冷启）
+        #     + 箱容不瓶颈（Σneed0 ≤ box_cap：CP 不建模箱容，峰值上限=总张数）。
+        # 用途：sched_dp 在宽 ready 集（2★~4★）实测差真最优 7~18%，用 CP 的
+        # 精确/近优全局骨架换掉第一个骨架；后续偏差重解仍走 sched_dp 2s。
+        if (self.cp_first and not self._cp_used and self.solve_count == 0
+                and not running and not any(init_stockL)
+                and (box_cap is None or sum(need0L) <= box_cap)):
+            self._cp_used = True
+            try:
+                from backend.sched_cmp import cp_sat_plan
+                mk, sched, stats = cp_sat_plan.solve(
+                    inst, time_limit=self.cp_budget)
+            except Exception as exc:      # noqa: BLE001 — 任何异常都回退
+                mk = sched = stats = None
+                self.cp_stats = {"status": f"ERROR:{type(exc).__name__}",
+                                 "err": str(exc)[:200]}
+            if sched is not None:
+                self.cp_stats = dict(stats)
+                stats["cp_used"] = True
+                # CP 不建模箱容 → 保守复核峰值，超容即弃用回退 sched_dp
+                if (box_cap is not None
+                        and self._box_peak(inst, sched, sum(init_stockL))
+                        > box_cap + EPS):
+                    self.cp_stats["rejected"] = "box_peak"
+                    mk = sched = stats = None
+            else:
+                self.cp_stats = self.cp_stats or dict(stats or {})
+        if sched is None:
+            mk, sched, stats = solve(inst, time_budget=self.time_budget,
+                                     node_budget=self.node_budget,
+                                     init_stock=init_stockL, init_running=running,
+                                     memo=self._memo)
         # 箱容兜底：回退 UB 可能超容（DP 搜不到可行解）→ relax 重解。
         # ⚠️ relax 必须用全新 memo：箱容约束下的 INF/有限值会毒化无约束重解
         # （LB 剪枝与箱容无关仍有效，但「落箱超容」分支在 relax 后变可行）。
