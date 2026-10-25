@@ -122,6 +122,34 @@ def _buy_demand(n, mclass, mats, stock, need, running_cnt):
                 dem[b] = need[b]
     return dem
 
+def _up_cp(dur, mats, n):
+  """向上关键路径：dur + 消费者链（「有多少活等我」）。
+
+  ★ RCPSP 经典 CP 口径，与骨架 `inst["cp"]`（dur + 喂料链，**向下**）相对。
+  向下 cp 对叶子卡全部打平（叶子只等底卡，dur 相同就完全同值）→ 列表调度
+  的 ready 排序退化成「按索引」，会把炉位先给非关键叶子（2026-10-25 CP 最优
+  轨迹差分实锤：2★ 引擎先炼 238/234，而 241←233←{237,235,232} 才是关键链，
+  233 因此延到 t328 才开工，顶层 241 晚 87t = 1.09h）。
+  """
+  consumers = [[] for _ in range(n)]
+  for i in range(n):
+    for j, _k in mats[i]:
+      j = int(j)
+      if 0 <= j < n:
+        consumers[j].append(i)
+  up = [0.0] * n
+
+  def f(i):
+    if up[i]:
+      return up[i]
+    up[i] = dur[i] + max((f(p) for p in consumers[i]), default=0.0)
+    return up[i]
+
+  for i in range(n):
+    f(i)
+  return up
+
+
 def _ub_schedule(inst, init_stock=None, init_running=None,
                  init_machine_free=None):
   """关键路径列表调度求上界（含 shop 买卡类型，lazy 买卡；鲁棒：无进展即推进时间）。
@@ -138,6 +166,10 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
   cp = inst["cp"]
   depth = inst["depth"]
   n = inst["n"]
+  # ★ 注意：ready 排序**仍用向下 cp**（inst["cp"]）。2026-10-25 试过换「向上 cp」：
+  # 3★/5★ UB 变好（78.68→76.01、178.82→173.08）但 2★ UB 变差（27.01→28.01）、
+  # 引擎级 2★ 23.10→24.11h 回退 → 已回退。2★ 的 233/239/240 三条支路 ucp 完全相同
+  # （都经 320t 卡喂 241），静态优先级无法区分，换口径只是换了个平局顺序。
   mclass = inst.get("mclass") or [0] * n
   S = int(inst.get("shop_cap") or 0)
   box_cap = inst.get("box_cap")
@@ -549,6 +581,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     sc = inst.get("steal_cap")
     sc = int(sc) if sc is not None else (1 if _has_steal(mclass, n, run_norm) else 0)
 
+    # ★ 向上 cp 在此预计算并注入 inst["ucp"]：供 vec_prio（搜索指路）复用，
+    # 外部也可直接传 inst["ucp"] 覆盖。注意 UB 的 ready 排序**不用**它
+    # （2026-10-25 试过 → 2★ 回退，见 _ub_schedule 内注释）。
+    if not inst.get("ucp"):
+        inst["ucp"] = _up_cp(dur, mats, n)
+    _up = inst["ucp"]
     ub_sched = _ub_schedule(inst, init_stock, init_running, init_machine_free)
     ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
     best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
@@ -556,34 +594,13 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
              "memo_hits": 0, "opt": None, "capped": 0}
     t0 = _t.perf_counter()
     memo = memo if (use_memo and memo is not None) else {}
-    # 向量启发式权重：关键路径（cp）降序——与 UB 列表调度同口径，
-    # 截断/排序只保留「靠近关键路径」的极大向量（有限偏差的偏差定义）。
-    vec_prio = [float(x) for x in (inst.get("cp") or [0.0] * n)]
-    # ★ 向量启发式改「向上 cp」（2026-10-25，4★ 回归根治）：骨架 inst["cp"]
-    # 是**向下**口径（dur + 喂料链，mats 是素材），所有叶子卡打平
-    # （4★ 实测全 = 7245）→ LDS 截断（max_vecs=96）按权重截向量时，
-    # 关键链向量（188→180→192→189，向上 cp 163200）与非关键叶向量
-    # 同权 → 枚举序决定存亡 → 4★ 搜索只能找到 82.04h（旧代码 78.05h
-    # 靠 bulk 买造成的窄 ready 集意外指路，轮转买后 ready 集宽 → 失效）。
-    # 向上 cp（dur + 消费者链）= 有多少活等我，RCPSP 经典 CP 规则，
-    # 与 model.cp_order 同口径；只影响向量截断/排序（搜索指路），
-    # 不影响 DP 正确性（值由搜索+下界决定）。UB 仍用 inst["cp"]。
-    # 实测（4★ 引擎级）：向下 84.08h → 向上 77.45h（优于 HEAD 基线 78.81h）。
-    _consumers = [[] for _ in range(n)]
-    for _i in range(n):
-        for _j, _k in mats[_i]:
-            _consumers[_j].append(_i)
-    _up = [0.0] * n
-
-    def _upf(_i: int) -> float:
-        if _up[_i]:
-            return _up[_i]
-        _up[_i] = dur[_i] + max(
-            (_upf(_p) for _p in _consumers[_i]), default=0.0)
-        return _up[_i]
-
-    for _i in range(n):
-        _upf(_i)
+    # 向量启发式权重 = 向上 cp（上面已算并注入 inst["ucp"]）。
+    # 骨架 inst["cp"] 是**向下**口径（dur + 喂料链），所有叶子打平（4★ 实测全
+    # = 7245）→ LDS 截断（max_vecs=96）按权重截向量时关键链向量与非关键叶向量
+    # 同权 → 枚举序决定存亡 → 4★ 只能搜到 82.04h（旧代码 78.05h 是 bulk 买造成
+    # 窄 ready 集的意外）。向上 cp = 有多少活等我（RCPSP 经典 CP 规则），只影响
+    # 向量截断/排序与 UB ready 排序（搜索指路），不影响 DP 正确性。
+    # 实测：4★ 引擎级 84.08h → 77.45h；2★ 关键链开工提前（见 _up_cp 注释）。
     vec_prio = _up
 
     def key_of(need, stock, running_rel):
