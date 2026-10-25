@@ -48,7 +48,7 @@ import time as _t
 from collections import Counter
 from typing import Dict, List, Tuple
 
-from backend.sched_cmp.sched_dp import solve
+from backend.sched_cmp.sched_dp import solve, tb_of
 from .model import ThemeModel
 from .plan import Action
 from .world import WorldState
@@ -78,6 +78,18 @@ class DPTickController:
         self.cp_budget = float(os.environ.get("MC_CP_BUDGET") or cp_budget)
         self._cp_used = False
         self.cp_stats: dict = None
+        # ★ CP 顺序 tie-break（2026-10-25 option 2）：离线从 CP 最优轨迹抽出
+        # 「谁该早上炉」的静态优先级（sched_dp.tb_hints），只改列表调度/向量
+        # 的选卡顺序，**不动时刻口径**（执行层仍保留容差）。
+        # 实测结论：solver 层有效（2★ iso DP 26.02→24.02h），但引擎级**负收益**
+        # （23.10→24.07h，5 次重复确定复现）——更好的静态序让头动作更少被卡，
+        # 重解 5→2 次，执行层自适应修正被浪费。故默认关闭，仅作实验入口：
+        #   MC_TB=1      开启 tb tie-break
+        #   MC_TB_FIRST=1 让 CP 顺序接管主序（实测更差，2★ UB 28.01h）
+        #   MC_TB_SCOPE=first 只用于冷启首个承诺点（实测与全程同值）
+        self.tb_on = os.environ.get("MC_TB") == "1"
+        self.tb_first = os.environ.get("MC_TB_FIRST") == "1"
+        self.tb_scope = os.environ.get("MC_TB_SCOPE", "all")
         self.lag_secs = float(lag_secs)     # 买卡物流延迟（1 tick）
         self.shop_cap = int(shop_cap)       # 每 tick 买卡并发上限
         # 头动作连续被卡 tick 数 → 骨架过时。配合 streak 判定的「等待过滤」
@@ -462,6 +474,17 @@ class DPTickController:
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
                 "cp": cpL, "init_stock": init_stockL,
                 "steal_cap": 1 if self.steal_enabled else 0}
+        if not self.tb_on:
+            inst["tb"] = None           # 显式关闭（对照实验用）
+        else:
+            inst["tb"] = tb_of(inst)    # 离线 CP 顺序表（cid → 最优开工 tick）
+            if self.tb_first:
+                inst["tb_first"] = True
+        # scope=first：CP 顺序只用于**冷启首个承诺点**，后续滚动重解回基线
+        # （2026-10-25 实测：全程开启会把引擎从 23.10 拖到 24.07h——更好的静态
+        #  序让头动作更少被卡 → 重解次数 5→2 → 少掉了执行层的自适应修正）。
+        if self.tb_scope == "first" and self.solve_count > 0:
+            inst["tb"] = None
         t0 = _t.perf_counter()
         mk = sched = stats = None
         # ---- ★ CP-SAT 冷启骨架（2026-10-25，实验开关 MC_CP_FIRST=1）----

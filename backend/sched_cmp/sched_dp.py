@@ -43,10 +43,58 @@ UB = 内置关键路径列表调度（含 lazy 买卡 + 死锁强买保底）；
 路径随递归下行携带（不回放 memo），叶子改进 UB 时记录完整调度。
 返回 (makespan, schedule, stats)。
 """
+import json as _json
+import os as _os
 import time as _t
 
 EPS = 1e-9
 INF = float("inf")
+
+# ---- CP 最优轨迹 tie-break 表（2026-10-25 option 2）------------------------
+# 背景：CP-SAT 的**精确时刻**接执行层是负收益（零容差紧排产，2★ 实测
+# 24.12h vs sched_dp 骨架 23.10h）；但 CP 的**开工顺序**是对的（2★ 差分：
+# 引擎 t166 先跑 240 的素材叶、把 233/239 推到 t328，CP t162 就让 233/239
+# 上炉）。于是只抽「顺序」当静态优先级，时刻仍由 sched_dp 的列表调度/搜索
+# 带余量重算，执行层保留容差 —— 搜索与执行解耦，各用其长。
+_TB_FILE = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "tb_hints.json")
+_TB_CACHE = {"mtime": None, "map": {}}
+
+
+def tb_hints():
+    """cid → 最优开工 tick（升序优先）。文件缺失/损坏一律返回空表（= 不启用）。"""
+    try:
+        mtime = _os.path.getmtime(_TB_FILE)
+    except OSError:
+        return {}
+    if _TB_CACHE["mtime"] != mtime:
+        try:
+            with open(_TB_FILE) as f:
+                raw = _json.load(f)
+            m = {}
+            for k, d in raw.items():
+                if str(k).startswith("__") or not isinstance(d, dict):
+                    continue
+                for c, v in d.items():
+                    ci = int(c)
+                    vi = float(v)
+                    if ci not in m or vi < m[ci]:
+                        m[ci] = vi
+        except Exception:
+            return {}
+        _TB_CACHE.update(mtime=mtime, map=m)
+    return _TB_CACHE["map"]
+
+
+def tb_of(inst):
+    """instance 的 tb 权重序列（与 inst["types"] 对齐）；无数据 → None。"""
+    if inst.get("tb") is not None:
+        return inst["tb"]
+    m = tb_hints()
+    types = inst.get("types") or []
+    if not m or not types:
+        return None
+    return [m.get(int(c), 1e9) for c in types]
 
 
 def _norm_running(init_running, n):
@@ -171,6 +219,17 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
   # 引擎级 2★ 23.10→24.11h 回退 → 已回退。2★ 的 233/239/240 三条支路 ucp 完全相同
   # （都经 320t 卡喂 241），静态优先级无法区分，换口径只是换了个平局顺序。
   mclass = inst.get("mclass") or [0] * n
+  # ★ CP 顺序 tie-break（2026-10-25 option 2）：tb[i] 升序 = CP 最优解里
+  # 该类卡更早开工。tb_first=True 时 tb 作**主序**（CP 顺序完全接管列表调度
+  # 的选卡），否则只作 cp 的同分 tie-break（对既有行为零影响）。
+  tb = inst.get("tb")
+  tb_first = bool(inst.get("tb_first"))
+  if tb is None:
+      tb = [0.0] * n
+  def _skey(i):
+      if tb_first:
+          return (tb[i], -cp[i], -dur[i], -depth[i], i)
+      return (-cp[i], tb[i], -dur[i], -depth[i], i)
   S = int(inst.get("shop_cap") or 0)
   box_cap = inst.get("box_cap")
   if box_cap is None:
@@ -266,7 +325,7 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
       ready = sorted([i for i in range(n)
                       if 0 in _cls_of(mclass, i) and need[i] > 0
                       and all(stock[j] >= k for j, k in mats[i])],
-                     key=lambda i: (-cp[i], -dur[i], -depth[i], i))
+                     key=_skey)
       for m in free_f:
         pick = None
         for pos, i in enumerate(ready):
@@ -289,7 +348,7 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
       ready_st = sorted([i for i in range(n)
                          if 2 in _cls_of(mclass, i) and need[i] > 0
                          and all(stock[j] >= k for j, k in mats[i])],
-                        key=lambda i: (-cp[i], -dur[i], -depth[i], i))
+                        key=_skey)
       pick = None
       for i in ready_st:
         if all(stock[j] >= k for j, k in mats[i]):
@@ -355,7 +414,8 @@ class _CapAbort(Exception):
 
 
 def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
-             deadline=None, max_vecs=None, rec_budget=None, prio=None):
+             deadline=None, max_vecs=None, rec_budget=None, prio=None,
+             prio2=None, prio2_first=False):
     """所有可行开工向量：每类型数 ≤ items 里的上限，且**按机器类**不超容量。
 
     items: [(type_idx, 单类型上限)]——上限已按 need/素材压过（买卡已改为
@@ -457,7 +517,18 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
         complete = False
     if res:
         if prio is not None:
-            res.sort(key=lambda v: -sum(c * prio[i] for i, c, _ci in v))
+            if prio2 is not None and prio2_first:
+                # CP 顺序作主序（2026-10-25 option 2）：先让「更该早上炉」的
+                # 卡型占位，同分再按 cp。仅改尝试顺序/截断保留，不改可行性。
+                res.sort(key=lambda v: (
+                    sum(c * prio2[i] for i, c, _ci in v),
+                    -sum(c * prio[i] for i, c, _ci in v)))
+            elif prio2 is not None:
+                res.sort(key=lambda v: (
+                    -sum(c * prio[i] for i, c, _ci in v),
+                    sum(c * prio2[i] for i, c, _ci in v)))
+            else:
+                res.sort(key=lambda v: -sum(c * prio[i] for i, c, _ci in v))
         else:
             res.sort(key=lambda v: -sum(c for _i, c, _ci in v))
         if max_vecs is not None and len(res) > max_vecs:
@@ -587,6 +658,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     if not inst.get("ucp"):
         inst["ucp"] = _up_cp(dur, mats, n)
     _up = inst["ucp"]
+    # CP 顺序 tie-break（option 2）：**只认显式传入**，不自动加载——
+    # 2026-10-25 引擎级实锤：自动启用会把 2★ 从 23.10h 拖到 24.07h
+    # （更好的静态序让头动作更少被卡 → 重解 5→2 次 → 少掉执行层自适应修正），
+    # 故默认关闭，由 dp_controller 按 MC_TB=1 显式注入。
     ub_sched = _ub_schedule(inst, init_stock, init_running, init_machine_free)
     ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
     best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
@@ -860,7 +935,9 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             vecs, complete = _vectors(items, caps, mclass, mats, stock, need,
                                       maximal_only, deadline=t0 + time_budget,
                                       max_vecs=max_vecs, rec_budget=rec_budget,
-                                      prio=vec_prio)
+                                      prio=vec_prio,
+                                      prio2=inst.get("tb"),
+                                      prio2_first=bool(inst.get("tb_first")))
             if not complete:
                 stats["capped"] += 1
             if not vecs:
