@@ -200,26 +200,35 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
         running_cnt[i] = running_cnt.get(i, 0) + 1
       dem = _buy_demand(n, mclass, mats, stock, need, running_cnt)
       box_used = sum(stock) + len(buy_run)
-      for b in sorted(dem):
-        if not free_s:
-          break
-        if need[b] <= stock[b]:
-          continue
-        want = min(need[b], dem[b]) - stock[b]
-        while want > 0 and free_s and box_used < box_cap:
-          # 落箱时刻的箱占用预估：现有 + 在途 + 这之前会落箱的炉内产出
-          land_t = t + dur[b]
-          proj = box_used + sum(1 for f, _i in running if f <= land_t + EPS)
-          if proj > box_cap + EPS:
+      # 每类型上限 = min(剩余总需求, readyish 需求) - 箱内（dem 封顶保 JIT）
+      caps = {b: min(need[b], dem[b]) - stock[b]
+              for b in sorted(dem) if dem[b] > stock[b]}
+      # ★ 轮转买 + 落位保留（2026-10-25 紧箱根治，对齐 dfs 与贪心纪律）：
+      # ① 每轮每种各买 1 张——旧版按类型序把一种买到上限 → 箱被单类型塞满
+      #    → 3 合 1 trio 凑不齐 → 列表调度死锁 → 死锁保护强制买卡（无箱检）
+      #    → UB 超容（紧箱 60 格实测静态峰 88/60 → 回退即超容 → relax）。
+      # ② 不变量「箱内 + 在途 + 在炉产物 + 本 buy ≤ cap」——买前校验买后
+      #    占用（旧版 proj=买前占用 ≤ cap 即放行 → 买后实占 cap+1，差一）。
+      #    不变量被全部迁移保持 → UB 箱容可行（峰值 ≤ cap）。
+      while free_s and box_used + len(running) + 1 <= box_cap + EPS:
+        progressed = False
+        for b in list(caps):
+          if caps[b] <= 0:
+            continue
+          if not free_s or box_used + len(running) + 1 > box_cap + EPS:
             break
           m = free_s.pop(0)
+          land_t = t + dur[b]
           buy_run.append((land_t, b))
           mfree[1][m] = land_t
           out.append((b, t))
           need[b] -= 1
-          want -= 1
+          caps[b] -= 1
           box_used += 1
           started += 1
+          progressed = True
+        if not progressed:
+          break
     # ---- 精炼：填满空主炉（cp 降序）----
     if free_f:
       ready = sorted([i for i in range(n)
@@ -550,6 +559,32 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # 向量启发式权重：关键路径（cp）降序——与 UB 列表调度同口径，
     # 截断/排序只保留「靠近关键路径」的极大向量（有限偏差的偏差定义）。
     vec_prio = [float(x) for x in (inst.get("cp") or [0.0] * n)]
+    # ★ 向量启发式改「向上 cp」（2026-10-25，4★ 回归根治）：骨架 inst["cp"]
+    # 是**向下**口径（dur + 喂料链，mats 是素材），所有叶子卡打平
+    # （4★ 实测全 = 7245）→ LDS 截断（max_vecs=96）按权重截向量时，
+    # 关键链向量（188→180→192→189，向上 cp 163200）与非关键叶向量
+    # 同权 → 枚举序决定存亡 → 4★ 搜索只能找到 82.04h（旧代码 78.05h
+    # 靠 bulk 买造成的窄 ready 集意外指路，轮转买后 ready 集宽 → 失效）。
+    # 向上 cp（dur + 消费者链）= 有多少活等我，RCPSP 经典 CP 规则，
+    # 与 model.cp_order 同口径；只影响向量截断/排序（搜索指路），
+    # 不影响 DP 正确性（值由搜索+下界决定）。UB 仍用 inst["cp"]。
+    # 实测（4★ 引擎级）：向下 84.08h → 向上 77.45h（优于 HEAD 基线 78.81h）。
+    _consumers = [[] for _ in range(n)]
+    for _i in range(n):
+        for _j, _k in mats[_i]:
+            _consumers[_j].append(_i)
+    _up = [0.0] * n
+
+    def _upf(_i: int) -> float:
+        if _up[_i]:
+            return _up[_i]
+        _up[_i] = dur[_i] + max(
+            (_upf(_p) for _p in _consumers[_i]), default=0.0)
+        return _up[_i]
+
+    for _i in range(n):
+        _upf(_i)
+    vec_prio = _up
 
     def key_of(need, stock, running_rel):
         return (need, stock, running_rel)
@@ -752,21 +787,45 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # 箱占用保守口径：箱内 + 在途买卡（在途精炼产出由落箱时校验）
                 box_now = sum(stock) + sum(1 for _i, _f, c in running_rel
                                            if c == 1)
-                bv = []
+                # ★ 两项紧箱根治（2026-10-25，对齐贪心 2026-10-23 实锤纪律）：
+                # ① 在炉产物落位保留：不变量「箱内 + 在途买卡 + 在炉产物 ≤
+                #    box_cap」——旧版只校验箱内+在途 < cap，确定性买卡把箱囤到
+                #    顶 → 在炉产物落箱即超容 → 所有分支 INF → 约束解 15 节点
+                #    即死（紧箱 60 格·各2轮实测：root 返 INF → relax 无约束 →
+                #    静态投影 88/60 → 执行层囤死 done=0/4）。不变量被全部迁移
+                #    保持（买卡买前校验、落箱 ±0、精炼开工 -(k-1)）。
+                # ② 轮转买：每轮每种需求类型各买 1 张——旧版按类型序把一种
+                #    底卡买到需求上限（如 231×24 买完才买 230）→ 箱被单类型
+                #    塞满 → 3 合 1 trio 永远凑不齐 → 无精炼可开 → 死锁（正是
+                #    贪心侧 2026-10-23 修掉的「多套死锁另一根因」，DP 同款）。
+                #    平衡采购让 trio 尽快成型、被精炼及时消耗、箱位滚动释放。
+                n_run = sum(1 for _i2, _f2, c2 in running_rel
+                            if c2 in (0, 2))
+                # 每类型本轮买量上限 = min(剩余总需求, readyish 需求) - 箱内
+                # （dem 封顶保持 JIT：不囤超出「可炼前沿」的量）
+                caps = {}
                 for b in range(n):
-                    if idle[1] <= 0 or box_now >= box_cap + EPS:
-                        break
-                    if 1 not in _cls_of(mclass, b) or need[b] <= stock[b]:
-                        continue
-                    want = min(need[b] - stock[b], dem.get(b, 0) - stock[b])
-                    while want > 0 and idle[1] > 0 \
-                            and box_now < box_cap + EPS:
+                    if 1 in _cls_of(mclass, b) and dem.get(b, 0) > stock[b]:
+                        caps[b] = min(need[b], dem[b]) - stock[b]
+                bv = []
+                while idle[1] > 0 \
+                        and box_now + n_run + 1 <= box_cap + EPS:
+                    progressed = False
+                    for b, cap_left in caps.items():
+                        if cap_left <= 0:
+                            continue
+                        if idle[1] <= 0 \
+                                or box_now + n_run + 1 > box_cap + EPS:
+                            break
                         need[b] -= 1
                         running_rel = running_rel + ((b, dur[b], 1),)
                         bv.append((b, 1, 1))
+                        caps[b] = cap_left - 1
                         idle[1] -= 1
                         box_now += 1
-                        want -= 1
+                        progressed = True
+                    if not progressed:
+                        break
                 if bv:
                     # ★ 买卡 op 必须落在**真实购买时刻**并贯穿 while 循环：
                     # 旧版只在分支点记 buy_path，而「无向量可开→推进时间」分支

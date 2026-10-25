@@ -29,12 +29,17 @@
 终局，提前买让 collect 早触发、轮次早翻页；执行层按计划去重不超买。
 
 执行层两趟结构（2026-10-24 定型，tid=59 实测 75.49→70.79h）：
-  pass 1 买卡 reactive：扫描到就买、不等计划时刻——JIT 严守 start 门时，
-    消费者到点常差 1~2 tick 才等到落箱卡 → 空转 + streak 假过时 → 重解
-    级联；解耦后消失。纪律：按 DP 顺序发 + 箱预算闸（box_free + collect
-    释放 - 专辑预扣 - 在炉落位保留，Ⅴ 类防丢卡）+ 每 tick 速率闸（同贪心
-    口径在炉数×3+6）+ 计划去重。
-  pass 2 精炼时序门：到期门 + 头动作提前发 + 阻塞保护 + 窗口扫描。
+   pass 1 买卡 reactive + JIT 门：扫描到就买、不等计划时刻——JIT 严守 start 门时，
+     消费者到点常差 1~2 tick 才等到落箱卡 → 空转 + streak 假过时 → 重解
+     级联；解耦后消失。纪律：按 DP 顺序发 + 箱预算闸（box_free + collect
+     释放 - 专辑预扣 - 在炉落位保留，Ⅴ 类防丢卡）+ 每 tick 速率闸（同贪心
+     口径在炉数×3+6）+ 计划去重。★ JIT 门（2026-10-25 紧箱根治）：喂料底卡
+     只买到 due（可炼前沿需求）——旧版无门按箱预算买齐整套 buy op → 囤货 →
+     紧箱 60 格箱囤满 → 买卡闸吃光 → 头 op（buy）永发不出 → cursor 冻结饿死
+     （done=0/4、槽占 21.5%，同代码两轨迹分化 93.6%/21.5%）。
+   pass 2 精炼时序门：到期门 + 头动作提前发 + 阻塞保护 + 窗口扫描。
+   腾箱（BoxCompaction，同贪心 Step4）：箱紧时卖多余 10 面底卡（保留 due，
+   铁律只卖 10 面）+ 挪多余合成卡进保险箱，腾出的位当 tick 即可被买卡用上。
 """
 from __future__ import annotations
 
@@ -79,6 +84,16 @@ class DPTickController:
         for tid, m in models.items():
             for c in m.ids:
                 self._owner[c] = m
+        # 喂料底卡集合（某合成卡的素材）——JIT 门只门喂料卡；纯收藏底卡
+        # （不喂任何合成卡）无精炼消费者，由专辑预买/计划终局 op 拉起。
+        self._feeder_cids: set = set()
+        self._base_cids: set = set()
+        for tid, m in models.items():
+            for c in m.comp:
+                self._feeder_cids.update(m.feeders(c))
+            for c in m.ids:
+                if m.is_base(c):
+                    self._base_cids.add(c)
         # ---- 骨架缓存（承诺式调度）----
         self._plan: dict = None
         self._plan_rounds_sig: tuple = None
@@ -93,6 +108,10 @@ class DPTickController:
         self.emergency_total = 0        # 应急买卡累计张数
         self.opportunistic_total = 0    # 提前发累计次数（纯时机微调，不计偏差）
         self.streak_max = 0
+        # JIT 门 + 腾箱统计（2026-10-25 紧箱根治，见 _jit_due/_box_compaction）
+        self.jit_blocked = 0            # JIT 门拦下的买卡 op 数（未到需求不买）
+        self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
+        self.compact_moved = 0          # 腾箱挪保险箱累计张数
         # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
         # （等买卡落箱/等炉出货，JIT 正常等待）连续被卡 → streak 触发重解，
         # 但新骨架头动作往往不变（短缺不是顺序问题）→ 每 4 tick 一次 2s 解算
@@ -165,8 +184,12 @@ class DPTickController:
         need, buy = Counter(), Counter()
         for t in active:
             m = self.models[t]
-            sets = (max_rounds - completed_rounds.get(t, 0)) if max_rounds else 1
-            sets = max(1, sets)
+            # 每解只排「下一轮」（task#96 紧箱各2轮 FAIL 根治）：
+            # 原 sets = max_rounds - completed_rounds[t] 会把多轮卡一次性全排进计划，
+            # 两轮中间卡叠加占满箱 → collect 永不触发 → rounds_sig 不变 → 永不重解 →
+            # 永久饿死（实测 done=0/4、箱满 60/60、槽占仅 22%）。改为每解只排下一轮，
+            # 第一轮完成后 completed 变化触发重解下一轮。
+            sets = 1
             runs, buys = m.net_plan(dict(box_stock), dict(pending), sets=sets)
             for c, nd in runs.items():
                 if not m.is_base(c):
@@ -184,12 +207,17 @@ class DPTickController:
         collect 早触发、轮次早翻页（多轮流水）。执行层按计划去重，不超买。
         箱预算同贪心 Step5：box_free + collect 释放 - 在炉落位保留（Ⅴ 类：
         炼成卡落箱失败会被静默丢弃，必须给在炉卡留落位）。
+        ★ 条件放宽到「在箱**或在炉**」（2026-10-25）：最后一个非底卡常是长时
+        顶层卡（4★ 实测在炉 ~1400 tick），严条件（只在箱）会让收藏底卡迟买
+        到顶卡落箱之后 → collect 白等；旧版 bulk 计划把终局 buy 前置掩盖了
+        这一点，轮转买计划暴露（4★ 尾部 371→1439 tick、makespan +6h）。
+        bought: Counter（cid -> 本 tick 已买张数，含在途未落箱）。
         """
         reserve = len(ws.furnaces) + 2
         free = max(0, ws.box_free + extra_free - reserve)
         for t in active:
             m = self.models[t]
-            if not all(box_stock.get(c, 0) >= 1
+            if not all(box_stock.get(c, 0) + pending.get(c, 0) >= 1
                        for c in m.ids if not m.is_base(c)):
                 continue
             for c in m.ids:
@@ -199,8 +227,158 @@ class DPTickController:
                 if gap > 0 and free > 0:
                     actions.append(Action(kind="buy", cid=c, n=1,
                                          note=f"DP专辑底卡 {c}"))
-                    bought.add(c)
+                    bought[c] += 1
                     free -= 1
+
+    def _jit_due(self, ws, plan, box_stock, pending, window: int = 0,
+                 active=None):
+        """JIT 需求（due）：即将能炼的合成卡 → 其实例底卡喂料（同贪心口径）。
+
+        根因（2026-10-25 紧箱 60 格·各2轮 DP done=0/4 根治）：pass 1 旧版
+        reactive 把整套 buy op 按箱预算一次性买齐 → 囤货（4★ 峰值 201/218、
+        94% 是底卡；紧箱 60 格箱被喂料囤到 60/60）→ 买卡闸 box_free-reserve
+        被吃光 → 头 op（buy）永发不出 → cursor 冻结饿死（全程槽占 21.5%；
+        同代码两次运行轨迹分化 93.6% 流动 / 21.5% 饿死，场景处死锁边缘）。
+        due = 「非底卡喂料已齐（可炼）」的合成卡的底卡喂料毛需求；pass 1
+        只买到 due-held，即买即用，箱内只存前沿管道量而非整套底卡。
+        与贪心 Step-JIT 同口径（net_plan runs 的可炼判定），只是把 runs
+        换成 DP 骨架的未发 refine op（feeders 已随 op 落盘，免重复查找）。
+
+        ★ window（2026-10-25 二层根治）：只把**接下来 window 个**可炼 op
+        计入 due。无窗口时整个可炼前沿都进门禁——紧箱 60 格·各2轮 可炼前沿
+        base 需求 ≈276（远超箱容 60）→ 门限永不触发 → reactive 买卡把骨架
+        前段 bulk buy 全量拉齐 → 箱囤满 58/60 → 买闸吃光 → 4 个长炉期间
+        全程冻结（26000tick 实测 done=0/4、零精炼 tick 占 99.5%、t12000
+        与 t25000 状态逐字节相同）。窗口 = 2 波炉次工作量（≈2×炉数），
+        箱内只存前沿管道量（~2×window×3 张），随精炼消耗逐波滚动。
+
+        ★ collect 缺口项（同贪心口径②）：某套非底卡全在箱**或在炉**（collect
+        在即）→ 缺口（1 - 持有）进 due。缺了它，终局收藏底卡被 JIT 门拦死
+        （due=0）→ 只能等专辑预买、而预买曾被最后一个长炉卡住 → 4★ 尾部
+        白等 1439 tick（旧版 bulk 计划前置终局 buy 才掩盖，轮转买后暴露）。
+        """
+        due: Dict[int, int] = {}
+        ops = plan["ops"]
+        issued = plan["issued"]
+        base_cids = self._base_cids
+        n_ready = 0
+        for j, op in enumerate(ops):
+            if issued[j] or op["kind"] != "refine":
+                continue
+            feeders = op.get("feeders") or ()
+            if not feeders:
+                continue
+            if any((f not in base_cids) and box_stock.get(f, 0) < 1
+                   and pending.get(f, 0) < 1 for f in feeders):
+                continue                # 非底卡喂料未齐 → 这张还炼不了
+            if window and n_ready >= window:
+                break                   # 窗口外的前沿需求不进门禁（不拉齐囤货）
+            n_ready += 1
+            for f in feeders:
+                if f in base_cids:
+                    due[f] = due.get(f, 0) + 1
+        # ---- collect 缺口（不走窗口：只 1 张/套，天然有界）----
+        for t in (active or ()):
+            m = self.models.get(t)
+            if m is None:
+                continue
+            if not all(box_stock.get(c, 0) + pending.get(c, 0) >= 1
+                       for c in m.ids if not m.is_base(c)):
+                continue                # 合成卡未齐（含在炉）→ collect 不在即
+            for c in m.ids:
+                if not m.is_base(c):
+                    continue
+                gap = 1 - box_stock.get(c, 0) - pending.get(c, 0)
+                if gap > 0:
+                    due[c] = max(due.get(c, 0), gap)
+        return due
+
+    def _box_compaction(self, ws, plan, due, actions, avail_slots):
+        """腾箱（BoxCompaction，同贪心 Step4 口径）：箱紧时卖多余 10 面底卡
+        + 挪多余合成卡进保险箱，给 JIT 买卡 / 落箱腾位。返回卖卡腾出的
+        双箱合计空位（挪箱不改变合计，只腾换卡箱位）。
+
+        触发：change_free <= 2 或 box_free <= 4（同贪心）。安全边界：
+        ① 只卖 is_base 且 price==10 的底卡（铁律：高面值卡永不自动卖；
+          10 面卡 sell_card 只换回面值等额金币，卖+买无损，绝不动 40 面
+          素材与合成卡—— tid=709 底卡 57 面也不卖，保守）；
+        ② 保留 max(1, due) 张（JIT 前沿需求，不是总需求——否则箱满时
+          一张不敢卖，腾位形同虚设）；卖超的卡同步回减 plan["bought"]
+          （计划去重账），后续需求增长可经计划 op / 应急买重新拉起；
+        ③ 挪箱只挪「超出未发 op 喂料需求」的合成卡，目标箱要有空位
+          （预测 sim 的首空位规则，同步修 avail_slots 防悬空槽位）。
+        每次腾箱记 1 点 discrepancy（计划与现实偏差信号 → disc_over 重解）。
+        """
+        if not (ws.change_free <= 2 or ws.box_free <= 4):
+            return 0
+        n_sold = n_moved = 0
+        # ---- 1) 卖多余 10 面底卡（换卡箱 + 保险箱；保留 due）----
+        # total_of[cid] = 双箱合计张数；每卖 1 张递减， remainder>keep 才卖
+        total_of: Dict[int, int] = {}
+        for cid, _s, _st in ws.slots:
+            if cid > 0:
+                total_of[cid] = total_of.get(cid, 0) + 1
+        for cid, slot, slottype in list(ws.slots):
+            if cid <= 0:
+                continue
+            m0 = self._owner.get(cid)
+            if m0 is None or not m0.is_base(cid) or m0.price(cid) != 10:
+                continue                    # 只卖 10 面底卡（铁律）
+            keep = max(1, due.get(cid, 0))
+            if total_of.get(cid, 0) <= keep:
+                continue                    # 已降到保留量 → 不再卖
+            actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                  slottype=slottype,
+                                  note=f"DP腾箱卖10面底卡{cid}"))
+            lst = avail_slots.get(cid)
+            if lst and (slot, slottype) in lst:
+                lst.remove((slot, slottype))
+            if plan["bought"][cid] > 0:
+                plan["bought"][cid] -= 1     # 去重账回减（需求增长可再买）
+            total_of[cid] -= 1
+            n_sold += 1
+        # ---- 2) 挪多余合成卡进保险箱（保留未发 op 的喂料需求）----
+        if ws.store_free > 0 and ws.change_free <= 2:
+            need: Dict[int, int] = {}
+            for j, op in enumerate(plan["ops"]):
+                if plan["issued"][j] or op["kind"] != "refine":
+                    continue
+                for f in self._owner[op["cid"]].feeders(op["cid"]):
+                    need[f] = need.get(f, 0) + 1
+            change_of: Dict[int, int] = {}
+            for cid, _s, st in ws.slots:
+                if cid > 0 and st == 0:
+                    change_of[cid] = change_of.get(cid, 0) + 1
+            store_used = {s for (_c, s, st) in ws.slots if st == 1}
+            store_free_local = ws.store_free
+            for cid, slot, slottype in list(ws.slots):
+                if cid <= 0 or slottype != 0 or store_free_local <= 0:
+                    continue
+                m0 = self._owner.get(cid)
+                if m0 is None or m0.is_base(cid):
+                    continue                    # 底卡已在上面处理
+                keep = max(1, need.get(cid, 0))
+                if change_of.get(cid, 0) <= keep:
+                    continue
+                dest = next((s for s in range(1, ws.store_cur + 1)
+                             if s not in store_used), None)
+                if dest is None:
+                    break
+                actions.append(Action(kind="move", cid=cid, slot=slot,
+                                      slottype=0,
+                                      note=f"DP腾箱挪保险箱{cid}"))
+                lst = avail_slots.get(cid)
+                if lst and (slot, 0) in lst:
+                    lst.remove((slot, 0))
+                store_used.add(dest)
+                store_free_local -= 1
+                change_of[cid] -= 1
+                n_moved += 1
+        if n_sold or n_moved:
+            self.compact_sold += n_sold
+            self.compact_moved += n_moved
+            plan["discrepancy"] += 1       # 腾箱 = 计划与现实偏差信号
+        return n_sold
 
     @staticmethod
     def _box_peak(inst, sched, init_sum):
@@ -329,10 +507,10 @@ class DPTickController:
 
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
-                  box_stock, pending):
-        """有限偏差列表调度（两趟：买卡 reactive + 精炼时序门）。
+                  box_stock, pending, active=None):
+        """有限偏差列表调度（两趟：买卡 reactive + JIT 门 + 精炼时序门）。
 
-        pass 1 — 买卡（reactive，不过时序门）：
+        pass 1 — 买卡（reactive + JIT 门，不过 start 时序门）：
           每 tick 扫描全部买卡 op、按 DP 顺序发；箱预算闸 + 每 tick 速率闸兜底。
           实测（tid=59）：JIT 买卡严守 start 门时，消费者到点常差 1~2 tick 才
           等到落箱卡 → 空转 + streak 假过时 → 重解级联（75.49h）；买卡与精炼
@@ -340,9 +518,14 @@ class DPTickController:
           纪律：① 按 DP 顺序发（DP 已平衡关键路与箱压，不轮转打乱其决策）；
           ② 箱预算 = box_free + collect 释放 - 专辑预扣 - 在炉落位保留；
           ③ 每 tick 速率闸同贪心口径（在炉数×3+6，专辑预买计入额度）；
-          ④ 与计划去重（plan["bought"] 已含专辑预买）→ 绝不超买。
+          ④ 与计划去重（plan["bought"] 已含专辑预买）→ 绝不超买；
+          ⑤ ★ JIT 门（2026-10-25）：喂料底卡只买到 due（可炼前沿需求），
+             即买即用不囤货（旧版无门 → 紧箱 60 格箱囤满 → 买卡闸吃光 →
+             头 op 永发不出 → cursor 冻结饿死 done=0/4）。
         pass 2 — 精炼（时序门）：到期门 + 头动作提前发 + 阻塞保护 + 窗口扫描；
           买卡 op 在此趟透明跳过（pass 1 已处理）。
+        腾箱（_box_compaction）：箱紧时卖多余 10 面底卡 + 挪多余合成卡，腾出
+          的位当 tick 即可被 pass 1 买卡用上（sell/move 先于 buy 执行）。
         """
         ops = plan["ops"]
         issued = plan["issued"]
@@ -352,6 +535,14 @@ class DPTickController:
             if cid > 0:
                 avail_slots.setdefault(cid, []).append((slot, slottype))
         taken: set = set()
+        # ---- JIT 需求（due，窗口化）+ 腾箱（2026-10-25 紧箱根治）----
+        # due = 可炼前沿的底卡需求（_jit_due，只计接下来 2 波炉次工作量）；
+        # 腾箱在箱紧时卖多余 10 面底卡 / 挪合成卡（_box_compaction），腾出
+        # 的位当 tick 即可被 pass 1 买卡用上（sell/move 动作排在 buy 前，
+        # executor 按序执行）。
+        due_window = 2 * (self.machines + (1 if self.steal_enabled else 0)) + 2
+        due = self._jit_due(ws, plan, box_stock, pending, due_window, active)
+        freed = self._box_compaction(ws, plan, due, actions, avail_slots)
 
         def take_slot(cid: int):
             lst = avail_slots.get(cid)
@@ -380,14 +571,22 @@ class DPTickController:
         soon = sum(1 for f in ws.furnaces
                    if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
         reserve = soon + 2
-        box_free_local = max(0, ws.box_free + collect_freed
+        box_free_local = max(0, ws.box_free + collect_freed + freed
                              - album_bought - reserve)
         used_main = 0
         steal_avail = ws.steal_free
         n_ref = n_buy = n_emerg = n_early = 0
         disc0 = plan["discrepancy"]
 
-        # ============ pass 1: 买卡 reactive（扫描到就买，不等计划时刻）============
+        # ============ pass 1: 买卡 reactive + JIT 门（扫描到就买，不等计划时刻）============
+        # ★ JIT 门（2026-10-25 紧箱根治）：喂料底卡只买到 due（可炼前沿需求）
+        # ——旧版无门按箱预算把整套 buy op 一次性买齐 → 囤货（4★ 峰值 201/218、
+        # 94% 底卡）→ 紧箱 60 格箱被囤到 60/60 → 买卡闸 box_free-reserve 吃光
+        # → 头 op（buy）永发不出 → cursor 冻结饿死（done=0/4、槽占 21.5%，
+        # 同代码两轨迹分化 93.6%/21.5%）。in_sys = 箱内 + 炉内 + 本 tick 在途；
+        # < due 才买（即买即用）。纯收藏底卡（非喂料卡）无门——无精炼消费者，
+        # 由专辑预买/计划终局 op 按 collect 在即拉起。op 不标记 issued：
+        # 前沿需求后续增长（上层随中间卡落箱逐层获得）时再放行。
         buy_cap = max(0, len(ws.furnaces) * 3 + 6 - album_bought)
         for i, op in enumerate(ops):
             if n_buy >= buy_cap or box_free_local <= 0:
@@ -398,10 +597,16 @@ class DPTickController:
             if plan["bought"][cid] >= plan["planned_buy"][cid]:
                 issued[i] = True        # 专辑预买/应急买已买到 → 去重跳过
                 continue
+            if cid in self._feeder_cids:
+                in_sys = (box_stock.get(cid, 0) + pending.get(cid, 0)
+                          + bought_this_tick.get(cid, 0))
+                if in_sys >= due.get(cid, 0):
+                    self.jit_blocked += 1
+                    continue            # 前沿用量已够 → 不超买（op 保留）
             actions.append(Action(kind="buy", cid=cid, n=1,
                                  note=f"DP骨架买底料 {cid}"))
             plan["bought"][cid] += 1
-            bought_this_tick.add(cid)
+            bought_this_tick[cid] += 1
             box_free_local -= 1
             issued[i] = True
             n_buy += 1
@@ -535,7 +740,7 @@ class DPTickController:
                 for f in miss_buy:
                     actions.append(Action(kind="buy", cid=f, n=1,
                                          note=f"DP应急买底料 {f}"))
-                    bought_this_tick.add(f)
+                    bought_this_tick[f] += 1
                     box_free_local -= 1
                     plan["bought"][f] += 1
                 n_emerg += len(miss_buy)
@@ -664,7 +869,7 @@ class DPTickController:
                 collect_freed += len(m.ids)
 
         # ---- 1b) 专辑底卡预买（collect 优先级策略；执行层按计划去重）----
-        bought_this_tick: set = set()
+        bought_this_tick: Counter = Counter()   # cid -> 本 tick 已买（含在途）
         self._album_prebuy(ws, active, box_stock, pending, actions,
                            bought_this_tick, extra_free=collect_freed)
 
@@ -705,8 +910,9 @@ class DPTickController:
 
         # ---- 4) 有限偏差列表调度（两趟：买卡 reactive + 精炼时序门）----
         run_stats = self._run_plan(ws, plan, self._skel, actions,
-                                   bought_this_tick, len(bought_this_tick),
-                                   collect_freed, box_stock, pending)
+                                   bought_this_tick,
+                                   sum(bought_this_tick.values()),
+                                   collect_freed, box_stock, pending, active)
         # 真实进展 = 本 tick 有真实精炼产出（n_ref>0）。**买卡/应急不算**——
         # 紧箱场景几乎每 tick 都有零星 reactive 买卡，若据此清零退避等于没
         # 退避（实测 500tick streak 重解 66 次 > cap 16）；**cursor 微推进
@@ -722,5 +928,8 @@ class DPTickController:
                       "bought_now": run_stats["bought"],
                       "emergency_now": run_stats["emergency"],
                       "early_now": run_stats["early"],
+                      "jit_blocked_total": self.jit_blocked,
+                      "compact_sold_total": self.compact_sold,
+                      "compact_moved_total": self.compact_moved,
                       "box_relaxed": plan["box_relaxed"]})
         return actions, stats
