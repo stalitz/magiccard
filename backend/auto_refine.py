@@ -1196,6 +1196,12 @@ class AutoRefine:
             from .engine_v2.dp_controller import DPTickController
             self._dp_ctrl = DPTickController(
                 {t: self._dp_model(t) for t in self.queue}, machines=3,
+                # ★ 生产固定 2s 全程（不做快速分层降级）：生产是真实操作、
+                # 真卡真炉，且 decide 每 tick 只调一次，2s 可接受；而分层快
+                # 路径的 0.1s 在「重解稀疏」实例上会让 makespan 差 1~2h
+                # （2★ 23.10→25.07h，见 dp_controller「自适应分层预算」注释）。
+                # 仿真/bench 走默认（warm=8 后 0.1s），不受此处影响。
+                time_budget=2.0, time_budget_cold=2.0, warm_solves=10**9,
                 steal_enabled=bool(self.steal_enabled))
             self._dp_sig = sig
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
