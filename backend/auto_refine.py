@@ -1239,6 +1239,32 @@ class AutoRefine:
         for a in actions:
             if a.kind == "collect":
                 continue              # 上交已在 tick 第 3 步做过（DP 看到的是上交后状态）
+            if a.kind in ("sell", "move"):
+                # ★ DP 腾箱（2026-10-26 补执行）：控制器 `_box_compaction` 一直在发
+                # sell/move（只卖 10 面底卡、只把多余合成卡挪保险箱，铁律已在控制器里
+                # 过滤），但这里旧版写着「move/sell 当前 DP 不产出」直接 continue ——
+                # 结果是换卡箱 18/18 满时永远腾不出位：买卡进不来、精炼喂料被幽灵
+                # 买卡挡住，1★ 实测 800 tick 零进展。仿真/生产统一后立刻暴露。
+                # 卖/挪之后卡箱 slot 会重排，必须重读状态再继续（同贪心 _make_room）。
+                if a.kind == "sell":
+                    r = await self.s.sell_card(
+                        a.slot, a.cid, box_type=(1 if a.slottype == 0 else 2))
+                    how = "卖10面底卡"
+                else:
+                    r = await self.s.move_card(a.cid, a.slot, from_box=0)
+                    how = "挪保险箱"
+                ok = bool(r.get("ok"))
+                msg = r.get("message") or ""
+                self._log("腾位", ok, f"{card_name(a.cid)}（DP腾箱·{how}） {msg}")
+                steps.append({"action": "腾位", "ok": ok,
+                              "detail": f"{card_name(a.cid)}（DP腾箱·{how}） {msg}"})
+                if ok:
+                    rd = await self._read_state()
+                    if rd is not None:
+                        st, stock, slots, pending = rd
+                        slot2cid = {(sl[0], sl[1]): c
+                                    for c, lst in slots.items() for sl in lst}
+                continue
             if a.kind == "buy":
                 tid_c = owner.get(a.cid) or self.queue[0]
                 for _ in range(max(1, a.n)):
@@ -1260,7 +1286,7 @@ class AutoRefine:
                         break
                 continue
             if a.kind != "refine":
-                continue              # move/sell 当前 DP 不产出；出了也跳过（保底不执行）
+                continue              # 其余未知动作不执行（保底）
             target = a.target
             tid_c = owner.get(target) or self.queue[0]
             plan = self.plans[tid_c]

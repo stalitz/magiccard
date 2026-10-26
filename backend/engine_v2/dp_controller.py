@@ -663,8 +663,21 @@ class DPTickController:
         # 箱有位；长时炉的产物远未到收卡时刻，提前几十 tick 占位纯属过虑。
         soon = sum(1 for f in ws.furnaces
                    if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
-        reserve = soon + 2
-        box_free_local = max(0, ws.box_free + collect_freed + freed
+        # 落箱预留：只给「炉里有活」时留 2 格（炉空着就没有卡会落箱）。
+        # ★ 2026-10-26：旧版无条件 +2。换成换卡箱口径后这是死锁点——1★ 实测
+        # change_free=1、炉全空（soon=0），reserve 仍吃 2 格 → 买卡预算 0 →
+        # 计划头部的 buy(685) 永发不出 → 依赖 685 的精炼也被喂料不足挡住 →
+        # 箱内 17 张一张不动、refined 停在 14、800+ tick 零进展。
+        reserve = soon + (2 if ws.furnaces else 0)
+        # ★ 买卡闸必须用**换卡箱**空位（2026-10-26，仿真/生产统一后实测发现）：
+        # 买卡只能落到换卡箱（硬顶 18 格），保险箱不能收买卡。旧版用双箱合计
+        # （ws.box_free = change_free + store_free）→ 保险箱还剩 199 格时仍判「有位」，
+        # 于是每 tick 发 6 张买卡，执行层 `_free_change(st) <= 0` 全部失败；
+        # 更糟的是这些**幽灵买卡**已计入 bought_this_tick，pass 2 判喂料
+        # 「本 tick 已被占用」→ 所有精炼被 blocked → 一张都不炼 → 换卡箱永久 18/18、
+        # cursor 冻结（生产路径实测 1★/2★ 在 900 tick 内零进展，resolves=63 反复重解）。
+        # reserve 同理按换卡箱算：炼成卡也落换卡箱。
+        box_free_local = max(0, ws.change_free + collect_freed + freed
                              - album_bought - reserve)
         used_main = 0
         steal_avail = ws.steal_free

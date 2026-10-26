@@ -1,175 +1,167 @@
-"""编排层：Engine 对外门面 + 忠实仿真循环（run_sim）。
+"""编排层：Engine = 生产代码的仿真驱动器（单一实现，2026-10-26 用户定调）。
 
-run_sim 复用 _sim_faithful.VirtualSession 作忠实游戏后端（不联网、状态真解析），
-每个 tick：推进虚拟时钟 → 收回到时卡炉 → 解析成 WorldState → Planner.decide →
-Executor.execute → 统计。这正是「新引擎能否正确调度」的闭环验证。
+铁律（用户原话）：
+  「仿真就是要模拟生产环境，真实 API 中的各种细节在仿真中也要模拟，
+    引擎决策层和执行层就是同一套，不要分开写，要接就一起接。」
 
-接真机时：把 GameClient 换成对接 mc_api.Session 的适配器（本次不接），
-run_sim 换成 run_live（每 45s 真实 tick + 重登/重读），Engine 本体不变。
+因此 Engine 不再自带 Planner / Executor —— 那两份是 engine_v2 早期把生产逻辑
+**重写了一遍**的并行实现（贪心 planner.py 393 行、执行 executor.py 90 行），
+导致「bench 数字」和「生产行为」是两条代码路径，grep 一次就能看出两边都在改。
+
+现在的结构（仿真 = 生产，只有一层被替换）：
+    VirtualSession（假的网络层：post(endpoint, **kw) 与 mc_api.Session 同签名
+                    + 虚拟时钟）
+  + AutoRefine.tick()（生产同一个 tick 流程：收卡/翻牌/变卡/上交/炼卡/买卡/偷炉）
+  + DPTickController（勾选 DP 时，生产同一个决策器；不勾走 _refine_all 生产贪心）
+
+即：**唯一被替换的是「网络 + 时钟」**（VirtualSession），决策与执行不重写。
+所有真实 API 的坑（买卡逐张过容量、偷炉挑好友+冷却+拉黑、槽位失效重校验、
+本地库存同步、collect 在 tick 第 3 步）都跟着生产代码一起被跑到。
+
+代价与有意取舍：
+  · bench 绝对值会变（旧 Engine 的贪心是 planner.py，生产贪心是 _refine_all；
+    旧 Engine 还不刷新虚拟时钟 → 贪心永远不偷炉）。这是校正，不是回归。
+  · 场景旋钮保持不变（空箱起步 / 箱容 / max_rounds / 是否偷炉 / 是否 DP），
+    这样与 sched_cmp 的 from-scratch 实例口径仍然可比。
 """
 from __future__ import annotations
 
-import re
 from collections import Counter
+from typing import List
 
-from .executor import Executor
 from .model import ThemeModel
-from .planner import Planner
-from .world import WorldState
+
+# 生产日志里「投炉成功」的动作名（_refine_all 的 tag / DP 的专用 tag）
+_REFINE_TAGS = {"合成", "炼卡", "偷炉", "DP炼卡"}
+_COLLECT_TAGS = {"上交"}
+_BUY_TAG = "买卡"
 
 
 class Engine:
+    """仿真驱动器：把 AutoRefine 原封不动地跑在一个虚拟 Session 上。
+
+    对外接口保持与旧 Engine 兼容（探针/bench 依赖）：
+      · run_sim(...) -> (vs, ticks)
+      · stats / completed_rounds / dp_ctrl / queue / plans / max_rounds
+    已删除的实现：planner.py / executor.py / dp_adapter.py（见模块 docstring）。
+    """
+
     def __init__(self, tids, buy: bool = True, surplus_sets: int = 0,
                  max_rounds: int = 0, steal_enabled: bool = True,
-                 dp_single: bool = True, use_dp: bool = False):
-        self.models = {int(t): ThemeModel(t) for t in tids}
-        self.queue = [int(t) for t in tids]
+                 dp_single=None, use_dp: bool = False):
+        self.queue: List[int] = [int(t) for t in tids]
+        # ThemeModel 保留：它与生产共用同一份静态知识（dp_controller 也用）
+        self.models = {t: ThemeModel(t) for t in self.queue}
         self.buy = buy
         self.surplus_sets = surplus_sets
         self.max_rounds = max_rounds
-        self.completed_rounds: Counter = Counter()
-        self.planner = Planner(steal_enabled=steal_enabled)
-        self.executor = Executor()
-        # DP 控制器开关（2026-10-24 重构为「骨架 + 有限偏差」）：承诺点才解算
-        # 骨架（带 start 的动作表，买卡入状态、偷炉可规划），tick 内只做列表调度；
-        # 贪心路径完全不动。
+        self.steal_enabled = steal_enabled
         self.use_dp = use_dp
-        self.dp_ctrl = None
-        if use_dp:
-            from .dp_controller import DPTickController
-            # 骨架+有限偏差架构：承诺点才解算（首次/active变/轮界/耗尽/偏差超限/
-            # streak）。预算策略见 DPTickController 注释「自适应分层预算」：
-            # 前 warm_solves 次给 2s（保重解触发链/骨架质量），之后 0.1s
-            # （高频重解的大实例自动切快路径，4★ 墙钟 237s → 28s 且 makespan 不变）。
-            self.dp_ctrl = DPTickController(self.models, machines=3,
-                                           steal_enabled=steal_enabled)
-        # DP 开关：单套高星（star>=3）走 DP 最优调度；多套走联合 DP（2026-10-23）；
-        # 低星单套 / 无限炼仍走贪心。
-        self.dp_single = dp_single
-        self._dp_sched = None          # DP 精炼优先序（单套或联合，全局 cid 列表）
-        self._dp_round = -1            # 已解算对应的轮次（滚动重规划：轮变重解）
-        self._dp_stats = None          # 最近一次 sched_dp 统计
-        self._dp_stats_last = None     # DP 控制器最近一次 decide 统计（含 solve_ms）
+        if dp_single is not None:
+            # 旧的「静态 DP 序」分支（dp_adapter.dp_order）在生产里没有对应物，
+            # 已随 dp_adapter.py 一起删除。传 True 会被忽略 —— 显式喊一声，
+            # 免得探针悄悄测成贪心还以为在测 DP。
+            print("[Engine] 警告：dp_single 已废弃（生产无此路径），"
+                  "改用 use_dp=True 走生产 DPTickController", flush=True)
+        self.dp_single = bool(dp_single)
+        self.completed_rounds: Counter = Counter()
         self.stats = {"refined": 0, "bought": 0, "buy_fail": 0,
-                      "collected": 0, "errors": 0, "busy_ticks": 0, "total_ticks": 0,
-                      "slot_busy_ticks": 0, "slot_total_ticks": 0,
-                      "peak_change_used": 0, "peak_store_used": 0,
-                      "peak_box_used": 0}
-        # VirtualSession 的 EP_COLLECTION_ADD 需要 ar.plans[tid].ids / .giftid
-        self.plans = {t: m.tp for t, m in self.models.items()}
+                      "collected": 0, "errors": 0, "busy_ticks": 0,
+                      "total_ticks": 0, "slot_busy_ticks": 0,
+                      "slot_total_ticks": 0, "peak_change_used": 0,
+                      "peak_store_used": 0, "peak_box_used": 0}
+        self.ar = None              # 生产 AutoRefine 实例（run_sim 里建）
+        self.plans = {t: m.tp for t, m in self.models.items()}   # 兼容旧探针
+        self._vs = None
 
-    def decide(self, ws: WorldState, dp_plan: list = None, queue: list = None):
-        q = self.queue if queue is None else queue
-        plan = self.planner.decide(ws, self.models, q,
-                                   self.completed_rounds, self.surplus_sets,
-                                   dp_plan=dp_plan)
-        if not self.buy:                      # 不允许买 → 剥离买卡动作
-            plan = [a for a in plan if a.kind != "buy"]
-        return plan
+    # ---------------- 统计：从生产自己的 _log 派生（与面板同一份流水） ----------------
+    def _tally(self, action: str, ok: bool, detail: str) -> None:
+        st = self.stats
+        if action == _BUY_TAG:
+            if ok:
+                st["bought"] += 1
+            else:
+                st["buy_fail"] += 1
+                st["errors"] += 1
+            return
+        if action in _REFINE_TAGS:
+            if ok:
+                st["refined"] += 1
+            else:
+                st["errors"] += 1
+            return
+        if action in _COLLECT_TAGS and ok:
+            st["collected"] += 1
+
+    # ---------------- DP 控制器对外暴露（探针取 solve_count / solve_ms） ----------------
+    @property
+    def dp_ctrl(self):
+        return getattr(self.ar, "_dp_ctrl", None) if self.ar is not None else None
+
+    def _sync_peaks(self, vs) -> None:
+        st = self.stats
+        cu = len(vs.change)
+        su = len(vs.store)
+        st["peak_change_used"] = max(st["peak_change_used"], cu)
+        st["peak_store_used"] = max(st["peak_store_used"], su)
+        st["peak_box_used"] = max(st["peak_box_used"], cu + su)
+        occ = len(vs.stoves)
+        st["total_ticks"] += 1
+        if occ:
+            st["busy_ticks"] += 1
+        st["slot_busy_ticks"] += occ
+        st["slot_total_ticks"] += (len(vs.MAIN_SLOTS) + 1)
 
     async def run_sim(self, change_cur: int = 18, store_cur: int = 200,
-                     max_ticks: int = 20000, interval: int = 45):
-        from backend._sim_faithful import VirtualSession
-        from backend.auto_refine import parse_full
+                     max_ticks: int = 20000, interval: int = 45,
+                     gift: int = 0):
+        """跑一遍仿真。返回 (VirtualSession, 实际 tick 数)。
 
-        vs = VirtualSession(change_cur=change_cur, store_cur=store_cur)
-        vs.ar = self
-        import sys as _sys
+        gift > 0 时先往换卡箱塞 N 张礼物卡（48 面）——生产环境箱里本来就有累计的
+        礼物卡，变卡由此供给 40 面素材。bench 默认 0 保持「空箱起步」的可比口径。
+        """
+        from backend import _sim_faithful as sim      # 导入即把 time.time 接到虚拟时钟
+        from backend.auto_refine import AutoRefine
+
+        vs = sim.VirtualSession(change_cur=change_cur, store_cur=store_cur)
+        self._vs = vs
+        if gift > 0:
+            gids = sorted(sim.gf._face48_ids())
+            gid = gids[0] if gids else 7773
+            for _ in range(gift):
+                s = vs._free_change_slot()
+                if s is None:
+                    break
+                vs.change[s] = gid
+
+        ar = AutoRefine(vs, self.queue, buy=self.buy, max_rounds=self.max_rounds)
+        if self.surplus_sets:
+            ar.surplus_sets = int(self.surplus_sets)
+        ar.steal_enabled = bool(self.steal_enabled)
+        ar.dp_mode = bool(self.use_dp)      # ★ 生产同一个开关
+        vs.ar = ar
+        self.ar = ar
+
+        # 统计旁路：包一层生产自己的 _log，不改它的行为
+        _orig_log = ar._log
+
+        def _spy(action, ok, detail):
+            self._tally(action, ok, detail)
+            _orig_log(action, ok, detail)
+        ar._log = _spy
+
+        n = 0
         for n in range(max_ticks):
-            if n and n % 5000 == 0:
-                print(f"  …tick {n}/{max_ticks} "
-                      f"({round(n*45/3600,1)}h) done={dict(self.completed_rounds)}",
-                      file=_sys.stderr, flush=True)
-            vs.now += interval
-            # 收卡：把到时的炉内卡取回箱（与真机「每 tick 收卡」一致）
-            for slot, stt in list(vs.stoves.items()):
-                if vs.now >= stt["endtime"]:
-                    await vs.get_refined_card(slot)
-            st = parse_full(vs._serialize())
-            ws = WorldState.from_parsed(st, now=vs.now)
-            # 峰值箱位占用（验证不溢出 / Ⅴ 类约束）
-            cu = sum(ws.change.values())
-            su = sum(ws.store.values())
-            self.stats["peak_change_used"] = max(self.stats["peak_change_used"], cu)
-            self.stats["peak_store_used"] = max(self.stats["peak_store_used"], su)
-            self.stats["peak_box_used"] = max(self.stats["peak_box_used"], cu + su)
-            # ---- 单套已达标的套退出调度（2026-10-22 修）：旧版只查「全部达标」才停，
-            #      已达标的套会继续炼下一轮 → 占炉/囤箱、拖慢未达标套，还虚增
-            #      bought/refined 统计（实测 2套·各3轮：4★ 被多炼 40 次 = 部分第4轮）----
-            active = [t for t in self.queue
-                      if not (self.max_rounds and
-                              self.completed_rounds.get(t, 0) >= self.max_rounds)]
-            if not active:
-                return vs, n + 1
-            # ---- 调度决策：DP 控制器 vs 贪心 ----
-            if self.use_dp and self.dp_ctrl is not None:
-                # DP 每 tick 控制器：用真实状态重解，取最优 t=0 动作
-                plan, dpstats = self.dp_ctrl.decide(
-                    ws, active, self.completed_rounds, self.max_rounds)
-                self._dp_stats_last = dpstats
-            else:
-                # ---- 单套高星：DP 精炼顺序。滚动重规划（2026-10-22）：轮次边界
-                #      （completed_rounds 变化 = 库存已变）带真实持有量重解；轮内不重解
-                #      （每 tick 重解 2s 太贵；列表调度对静态序已近优）。
-                #      多套联合 DP 接线实验（2026-10-23，回应「你是不是在反对 DP」）：
-                #      先重做了被推翻两条论证的公平对比——同 3 炉（禁偷炉）下联合 DP
-                #      静态解 2套 532.7h / 3套 595.7h（均证完最优，253/315 节点 0.1/0.3s），
-                #      比同炉数引擎（540.9/602.9）快 7~8h。旧 reject 论证①「3 炉 DP 界
-                #      595.7h > 4 槽引擎 467.8h」是拿被砍偷炉的 DP 跟完整引擎赛跑，不公
-                #      平；②「56+ 类型 2s 解不动」是事实错误。但接线实测：滚动引擎全面
-                #      变慢（2套 411.5→433.6h、3套 459.9→500.2h，炉占 -5~8pt、峰值箱
-                #      +35~56）——DP 的 8h 静态优势是全知假设换的，滚动现实（JIT 物流
-                #      延迟、跨套料争抢、轮内序过时）把它放大成 22~40h 劣势。已回退，
-                #      联合序代码与探针留在 dp_adapter.joint_dp_order / probe_fair_dp.py，
-                #      后续可试「更频重解 / DP 序仅作 tie-break / 物流延迟建进 DP 模型」。
-                dp_plan = None
-                if self.dp_single and len(active) == 1:
-                    tid = active[0]
-                    if self.models[tid].star >= 3:
-                        cr = self.completed_rounds.get(tid, 0)
-                        if self._dp_sched is None or cr != self._dp_round:
-                            self._dp_round = cr
-                            from .dp_adapter import dp_order
-                            self._dp_sched, self._dp_stats = dp_order(
-                                self.models[tid], sets=1, machines=3,
-                                stock=dict(ws.stock), pending=dict(ws.pending))
-                        dp_plan = self._dp_sched
-                plan = self.decide(ws, dp_plan=dp_plan, queue=active)
-            if not self.buy:                      # 不允许买 → 剥离买卡动作
-                plan = [a for a in plan if a.kind != "buy"]
-            results = await self.executor.execute(plan, vs)
-            self._tally(results)
-            # 炉利用率抽样：
-            #  · busy_ticks/total_ticks = 本 tick 是否有≥1 炉在炼（非槽填满率）
-            #  · slot_busy/slot_total  = 真实炉位填满率（按建模的 3主+1偷=4 槽）
-            occ = len(vs.stoves)
-            self.stats["total_ticks"] += 1
-            if occ > 0:
-                self.stats["busy_ticks"] += 1
-            self.stats["slot_busy_ticks"] += occ
-            self.stats["slot_total_ticks"] += (len(vs.MAIN_SLOTS) + 1)
-            if self.max_rounds and all(
-                    self.completed_rounds.get(t, 0) >= self.max_rounds
-                    for t in self.queue):
-                return vs, n + 1
-        return vs, max_ticks
-
-    def _tally(self, results):
-        for a, ok, detail in results:
-            if a.kind == "refine":
-                self.stats["refined"] += 1
-                if not ok:
-                    self.stats["errors"] += 1
-            elif a.kind == "collect":
-                if ok:
-                    self.completed_rounds[a.tid] += 1
-                    self.stats["collected"] += 1
-                else:
-                    self.stats["errors"] += 1
-            elif a.kind == "buy":
-                mm = re.search(r"成功(\d+)", detail)
-                succ = int(mm.group(1)) if mm else 0
-                mf = re.search(r"失败(\d+)", detail)
-                fail = int(mf.group(1)) if mf else 0
-                self.stats["bought"] += succ
-                self.stats["buy_fail"] += fail
+            vs.now += int(interval)
+            sim._VT["now"] = vs.now          # ★ 虚拟时钟必须推进：否则 time.time()
+            #   永远 0，生产里的偷炉冷却 / 缓存刷新逻辑全部失真
+            await ar.tick()
+            self.completed_rounds = Counter({t: ar.plans[t].rounds for t in self.plans})
+            self._sync_peaks(vs)
+            if n and n % 200 == 0:           # 心跳：长跑时给外部一个进度（也防静默被回收）
+                print(f"  …tick {n} ({round(n * interval / 3600, 1)}h) "
+                      f"done={dict(self.completed_rounds)} box={len(vs.change)}"
+                      f"+{len(vs.store)} stoves={len(vs.stoves)}", flush=True)
+            if not ar.queue:
+                break
+        return vs, n + 1
