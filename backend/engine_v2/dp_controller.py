@@ -262,8 +262,15 @@ class DPTickController:
         这一点，轮转买计划暴露（4★ 尾部 371→1439 tick、makespan +6h）。
         bought: Counter（cid -> 本 tick 已买张数，含在途未落箱）。
         """
-        reserve = len(ws.furnaces) + 2
-        free = max(0, ws.box_free + extra_free - reserve)
+        # ★ 箱预算必须用**换卡箱**空位（2026-10-26，与 _run_plan 买卡闸同一个坑）：
+        # 买卡只能落换卡箱（硬顶 18 格），保险箱不能收买卡。旧版用双箱合计
+        # （ws.box_free）→ 保险箱剩 199 格时判「有位」，把整套专辑底卡全买一遍，
+        # 执行层 `_free_change <= 0` 逐张失败（4★ 实测 220 次「卡箱 0 空位」）。
+        # reserve 同 _run_plan：只给「炉里有活」留落位。
+        reserve = sum(1 for f in ws.furnaces
+                      if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
+        reserve += 2 if ws.furnaces else 0
+        free = max(0, ws.change_free + extra_free - reserve)
         for t in active:
             m = self.models[t]
             if not all(box_stock.get(c, 0) + pending.get(c, 0) >= 1
@@ -344,8 +351,14 @@ class DPTickController:
 
     def _box_compaction(self, ws, plan, due, actions, avail_slots):
         """腾箱（BoxCompaction，同贪心 Step4 口径）：箱紧时卖多余 10 面底卡
-        + 挪多余合成卡进保险箱，给 JIT 买卡 / 落箱腾位。返回卖卡腾出的
-        双箱合计空位（挪箱不改变合计，只腾换卡箱位）。
+        + 挪多余合成卡进保险箱，给 JIT 买卡 / 落箱腾位。
+
+        ★ 返回值 = **换卡箱**净腾出的空位数（2026-10-26 校正）。
+        买卡只能落换卡箱（硬顶 18 格），所以调用方 `_run_plan` 把它加进
+        `change_free` 预算。旧版返回 `n_sold`（**全部**卖出张数），其中
+        「卖保险箱里的卡」腾的是保险箱位、对换卡箱毫无帮助 → 预算虚高 →
+        每 tick 发出换卡箱装不下的买卡 → 执行层逐张失败。同理「挪保险箱」
+        确实腾出换卡箱位，旧版却没算进去（保守方向，一并修正）。
 
         触发：change_free <= 2 或 box_free <= 4（同贪心）。安全边界：
         ① 只卖 is_base 且 price==10 的底卡（铁律：高面值卡永不自动卖；
@@ -361,7 +374,20 @@ class DPTickController:
         if not (ws.change_free <= 2 or ws.box_free <= 4):
             return 0
         n_sold = n_moved = 0
-        # ---- 1) 卖多余 10 面底卡（换卡箱 + 保险箱；保留 due）----
+        n_free_change = 0        # 换卡箱净腾位：卖换卡箱的卡 + 挪箱
+        # 未发 refine op 的喂料毛需求（3 合 1 需要 3 张同类！）。
+        # ★ 卖卡必须按它兜底，不能只看 due（2026-10-26 实锤）：due 是「前沿
+        # 还差多少」的口径，重复张达到 due 就判「不欠」→ 旧规则 keep=max(1,due)
+        # 把 3 张同款卖到只剩 1 张 → trio 永远凑不齐 → 买回 2 张又在下个 tick
+        # 被卖 → 活锁。4★ 实测 refined 卡在 83/144、箱 18/18、炉全空（62~87h
+        # 零进展）。need 来自未发 op 的 feeders，正是「凑齐这一炉要几张」。
+        need: Dict[int, int] = {}
+        for j, op in enumerate(plan["ops"]):
+            if plan["issued"][j] or op["kind"] != "refine":
+                continue
+            for f in self._owner[op["cid"]].feeders(op["cid"]):
+                need[f] = need.get(f, 0) + 1
+        # ---- 1) 卖多余 10 面底卡（换卡箱 + 保险箱；保留 due / need）----
         # total_of[cid] = 双箱合计张数；每卖 1 张递减， remainder>keep 才卖
         total_of: Dict[int, int] = {}
         for cid, _s, _st in ws.slots:
@@ -373,7 +399,7 @@ class DPTickController:
             m0 = self._owner.get(cid)
             if m0 is None or not m0.is_base(cid) or m0.price(cid) != 10:
                 continue                    # 只卖 10 面底卡（铁律）
-            keep = max(1, due.get(cid, 0))
+            keep = max(1, due.get(cid, 0), need.get(cid, 0))
             if total_of.get(cid, 0) <= keep:
                 continue                    # 已降到保留量 → 不再卖
             actions.append(Action(kind="sell", cid=cid, slot=slot,
@@ -386,14 +412,10 @@ class DPTickController:
                 plan["bought"][cid] -= 1     # 去重账回减（需求增长可再买）
             total_of[cid] -= 1
             n_sold += 1
+            if slottype == 0:
+                n_free_change += 1       # 只有卖换卡箱的卡才腾出买卡可用的位
         # ---- 2) 挪多余合成卡进保险箱（保留未发 op 的喂料需求）----
         if ws.store_free > 0 and ws.change_free <= 2:
-            need: Dict[int, int] = {}
-            for j, op in enumerate(plan["ops"]):
-                if plan["issued"][j] or op["kind"] != "refine":
-                    continue
-                for f in self._owner[op["cid"]].feeders(op["cid"]):
-                    need[f] = need.get(f, 0) + 1
             change_of: Dict[int, int] = {}
             for cid, _s, st in ws.slots:
                 if cid > 0 and st == 0:
@@ -423,11 +445,12 @@ class DPTickController:
                 store_free_local -= 1
                 change_of[cid] -= 1
                 n_moved += 1
+                n_free_change += 1       # 挪箱把卡从换卡箱搬走，腾出买卡位
         if n_sold or n_moved:
             self.compact_sold += n_sold
             self.compact_moved += n_moved
             plan["discrepancy"] += 1       # 腾箱 = 计划与现实偏差信号
-        return n_sold
+        return n_free_change
 
     @staticmethod
     def _box_peak(inst, sched, init_sum):
@@ -965,14 +988,20 @@ class DPTickController:
                                                 completed_rounds, max_rounds)
 
         # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
-        # 上交整套 = 箱位释放（同贪心 Step5 口径：collect_freed 计入买卡预算）
-        collect_freed = 0
+        # ★ collect_freed 只做统计，**不进买卡预算**（2026-10-26）：
+        # 生产链路上交是 tick 第 3 步做的，`_dp_refine_all` 对 DP 返回的
+        # collect 直接 continue（见 auto_refine.py:1241）。所以“这里存在一个
+        # 可上交的整套” ≠ “本 tick 能腾出 N 格”——那些卡还实实在在占着箱位，
+        # 把 len(m.ids) 记进预算就是幽灵空位，买卡必失败（4★ 实测 220 次
+        # 「卡箱 0 空位」）。真正的释放量已体现在 ws.change_free 里。
+        collect_freed = 0      # 进买卡预算的可释放量（见上：生产不能本 tick 上交 → 恒 0）
+        collect_n = 0          # 本 tick「整套已在箱」的张数，仅作统计/日志
         for t in active:
             m = self.models[t]
             if m.complete_in_stock(box_stock):
                 actions.append(Action(kind="collect", tid=t, target=m.top_cid,
                                      giftid=m.giftid, note="DP:凑齐整套→上交"))
-                collect_freed += len(m.ids)
+                collect_n += len(m.ids)
 
         # ---- 1b) 专辑底卡预买（collect 优先级策略；执行层按计划去重）----
         bought_this_tick: Counter = Counter()   # cid -> 本 tick 已买（含在途）
@@ -1038,5 +1067,6 @@ class DPTickController:
                       "jit_blocked_total": self.jit_blocked,
                       "compact_sold_total": self.compact_sold,
                       "compact_moved_total": self.compact_moved,
+                      "collect_in_stock_n": collect_n,
                       "box_relaxed": plan["box_relaxed"]})
         return actions, stats

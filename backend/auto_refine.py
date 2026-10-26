@@ -1204,6 +1204,15 @@ class AutoRefine:
                 time_budget=2.0, time_budget_cold=2.0, warm_solves=10**9,
                 steal_enabled=bool(self.steal_enabled))
             self._dp_sig = sig
+        # ★ 决策前重读真实状态（2026-10-26，仿真=生产统一后实测出的坑）：
+        # tick 早段（收礼/翻牌/变卡/上交后续炼）会把新卡落进换卡箱，而传进来的
+        # st/slots 是那一刻的快照 → DP 拿着**过期的 change_free** 排买卡：
+        # 4★ 实测 tick687 DP 以为还剩 2 格、真实箱 18/18，于是发出 4 张买卡
+        # （k=2,3 全部「卡箱 0 空位」）；后续 tick 靠腾箱 freed 继续发，累计
+        # 220 次失败买卡。多一次 GET 换决策输入正确，45s 周期下成本可忽略。
+        rd = await self._read_state()
+        if rd is not None:
+            st, stock, slots, pending = rd
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
         if not self.steal_enabled:
             ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）

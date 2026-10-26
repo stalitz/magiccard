@@ -274,8 +274,16 @@ class VirtualSession:
 
     # 腾位路径（BoxCompaction 触发）
     async def sell_card(self, slot, cid, box_type=1):
-        """卖卡：从指定箱移除一张卡（仅用于多余 10 面底卡，绝不卖高值）。"""
-        box = self.store if box_type == 1 else self.change
+        """卖卡：从指定箱移除一张卡（仅用于多余 10 面底卡，绝不卖高值）。
+
+        ★ box_type 语义必须与真实 API 一致（2026-10-26 修正）：mc_api.sell_card
+        注释与调用点都是 `type = 1 换卡箱 / 2 保险箱`。旧版虚拟层写反
+        （1 → self.store），于是**换卡箱里卖卡一律「槽位不匹配」**：DP 腾箱
+        705 次全部失败、greedy `_make_room` 卖不出卡 → 箱满后整条链路死锁
+        （4★ DP 实测 220 次「卡箱 0 空位」买不进，就是 705 次假腾箱造成的
+        幽灵空位）。仿真要能暴露真机的坑，不能自己造一个反的语义。
+        """
+        box = self.change if box_type == 1 else self.store
         if slot in box and box[slot] == cid:
             box.pop(slot)
             return {"ok": True, "message": "ok"}
