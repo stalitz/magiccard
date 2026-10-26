@@ -59,14 +59,39 @@ EPS = 1e-9
 
 class DPTickController:
     def __init__(self, models: Dict[int, ThemeModel], machines: int = 3,
-                 time_budget: float = 2.0, node_budget: int = 8_000_000,
+                 time_budget: float = 0.1, time_budget_cold: float = 2.0,
+                 warm_solves: int = 8, node_budget: int = 8_000_000,
                  lag_secs: float = TICK_SECS, shop_cap: int = 15,
                  streak_limit: int = 4, scan_window: int = 6,
                  steal_enabled: bool = True,
                  cp_first: bool = False, cp_budget: float = 120.0):
         self.models = models
         self.machines = machines
-        self.time_budget = time_budget
+        # ★ 自适应分层预算（2026-10-26，用户定调「每 tick 快速出相对优的解」）：
+        # 实测（_probe_speed.py / _probe_fast.py）：
+        #  · iso 单次解算质量**与预算无关**——2★/3★/5★ 在 50ms 与 2s 的
+        #    incumbent **完全相同**，4★ 仅差 0.68h（80.69 vs 80.01h）。
+        #  · 但引擎级对「同值不同解」敏感：2★ 稳态 0.1s → 25.07h vs 2.0s
+        #    → 23.10h（iso 同为 26.02h）。根因是「解算次数」这条链：2★ 全程
+        #    只重解 5 次，某次降预算 → 轨迹分叉 → 后续不再触发（5→2 次）
+        #    → 少掉滚动纠错 → +1.97h。注意 0.5/0.3/0.2/0.1s 结果全同，
+        #    故这不是「预算大小」问题，而是「解的具体形状 → 触发链」问题。
+        #  · 4★ 全程重解 **119 次**，2s×119=236s 占墙钟 99.6%；降到 0.1s
+        #    后 makespan **一字不差**（77.45h），墙钟 237s → 28s。
+        # ⇒ 按「解算次数」自适应：前 warm_solves 次给足预算（保触发链与骨架
+        #   质量），之后（说明这是高频重解的大实例）自动切快预算。成本上界
+        #   = warm×cold + 其余×steady；重解少的低星全程 cold（行为=旧版）。
+        # 环境变量：MC_SOLVE_BUDGET（steady）/ MC_SOLVE_BUDGET_FIRST（cold）
+        #           / MC_WARM_SOLVES（warm 次数）/ MC_MAXVECS（向量截断上限）
+        self.time_budget = float(os.environ.get("MC_SOLVE_BUDGET") or time_budget)
+        self.time_budget_cold = float(
+            os.environ.get("MC_SOLVE_BUDGET_FIRST") or time_budget_cold)
+        self.warm_solves = int(os.environ.get("MC_WARM_SOLVES") or warm_solves)
+        self.max_vecs = int(os.environ.get("MC_MAXVECS") or 96)
+        # 每 tick 都重解（默认关，仅实验入口）：实测 4★ 5767 次 → 82.72h
+        # （+5.27h）——破坏 plan 连续性（cursor/买卡去重/精炼时序门都以
+        # 「一份持续的计划」为前提），故**默认绝不开**。
+        self.solve_every_tick = os.environ.get("MC_SOLVE_EVERY") == "1"
         self.node_budget = node_budget
         # ★ CP-SAT 冷启骨架（2026-10-25，A 步实验开关）：
         # sched_dp 实测差真最优 2★ 18% / 3★ 7.9% / 4★ 7.3%（CP-SAT 对照），
@@ -96,8 +121,8 @@ class DPTickController:
         # （喂料在炉即将落箱/本 tick 已买 = JIT 物流等待，不累积），4 tick
         # 足够灵敏——2026-10-24 前无过滤版在紧箱 60 格把等料当过时触发重解
         # 级联（500tick solves 69 次）。
-        self.streak_limit = streak_limit
-        self.scan_window = scan_window      # 有限偏差向后扫描窗口
+        self.streak_limit = int(os.environ.get("MC_STREAK") or streak_limit)
+        self.scan_window = int(os.environ.get("MC_SCAN") or scan_window)
         self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
         self._memo: dict = {}
         self._skel_sig: tuple = None
@@ -487,6 +512,9 @@ class DPTickController:
             inst["tb"] = None
         t0 = _t.perf_counter()
         mk = sched = stats = None
+        # 分层预算：首解决定整条执行轨迹（必须给足），后续重解只做纠错。
+        _tb = (self.time_budget_cold if self.solve_count < self.warm_solves
+               else self.time_budget)
         # ---- ★ CP-SAT 冷启骨架（2026-10-25，实验开关 MC_CP_FIRST=1）----
         # 条件：仅第一个承诺点 + 空箱空炉空 memo（CP 模型只支持冷启）
         #     + 箱容不瓶颈（Σneed0 ≤ box_cap：CP 不建模箱容，峰值上限=总张数）。
@@ -516,10 +544,10 @@ class DPTickController:
             else:
                 self.cp_stats = self.cp_stats or dict(stats or {})
         if sched is None:
-            mk, sched, stats = solve(inst, time_budget=self.time_budget,
+            mk, sched, stats = solve(inst, time_budget=_tb,
                                      node_budget=self.node_budget,
                                      init_stock=init_stockL, init_running=running,
-                                     memo=self._memo)
+                                     memo=self._memo, max_vecs=self.max_vecs)
         # 箱容兜底：回退 UB 可能超容（DP 搜不到可行解）→ relax 重解。
         # ⚠️ relax 必须用全新 memo：箱容约束下的 INF/有限值会毒化无约束重解
         # （LB 剪枝与箱容无关仍有效，但「落箱超容」分支在 relax 后变可行）。
@@ -529,10 +557,10 @@ class DPTickController:
         # 139s；relax 半秒后 incumbent 不变（UB 兜底），墙钟对半砍。
         if self._box_peak(inst, sched, sum(init_stockL)) > box_cap + EPS:
             inst["box_cap"] = None
-            mk, sched, stats = solve(inst, time_budget=min(0.5, self.time_budget),
+            mk, sched, stats = solve(inst, time_budget=min(0.5, _tb),
                                      node_budget=self.node_budget,
                                      init_stock=init_stockL, init_running=running,
-                                     memo=None)
+                                     memo=None, max_vecs=self.max_vecs)
             stats["box_relaxed"] = True
         dt_ms = (_t.perf_counter() - t0) * 1000.0
         self.solve_count += 1
@@ -956,7 +984,8 @@ class DPTickController:
         by_streak = plan is not None and plan["streak"] >= self.streak_limit
         streak_over = by_streak and self._no_progress_resolves < self.streak_resolve_cap
         if (plan is None or self._plan_rounds_sig != rounds_sig
-                or exhausted or disc_over or streak_over):
+                or exhausted or disc_over or streak_over
+                or self.solve_every_tick):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
                                            box_cap, self._skel, rounds_sig)
             self._plan = plan

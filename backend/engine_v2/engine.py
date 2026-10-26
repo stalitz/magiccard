@@ -38,9 +38,10 @@ class Engine:
         if use_dp:
             from .dp_controller import DPTickController
             # 骨架+有限偏差架构：承诺点才解算（首次/active变/轮界/耗尽/偏差超限/
-            # streak），一局通常只解 2~5 次 → 每次可给大预算（2s）求更紧的 UB
+            # streak）。预算策略见 DPTickController 注释「自适应分层预算」：
+            # 前 warm_solves 次给 2s（保重解触发链/骨架质量），之后 0.1s
+            # （高频重解的大实例自动切快路径，4★ 墙钟 237s → 28s 且 makespan 不变）。
             self.dp_ctrl = DPTickController(self.models, machines=3,
-                                           time_budget=2.0,
                                            steal_enabled=steal_enabled)
         # DP 开关：单套高星（star>=3）走 DP 最优调度；多套走联合 DP（2026-10-23）；
         # 低星单套 / 无限炼仍走贪心。

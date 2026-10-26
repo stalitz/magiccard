@@ -1196,7 +1196,7 @@ class AutoRefine:
             from .engine_v2.dp_controller import DPTickController
             self._dp_ctrl = DPTickController(
                 {t: self._dp_model(t) for t in self.queue}, machines=3,
-                time_budget=2.0, steal_enabled=bool(self.steal_enabled))
+                steal_enabled=bool(self.steal_enabled))
             self._dp_sig = sig
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
         if not self.steal_enabled:
