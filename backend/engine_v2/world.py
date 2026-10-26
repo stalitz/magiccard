@@ -80,11 +80,53 @@ class WorldState:
         for c in st.get("store", []):
             if c.get("id", 0) > 0:
                 slots.append((c["id"], c.get("slot", 0), 1))
+        # ★ 炉位一律以 stovebox 的 <card> 为准（2026-10-26 真机实测纠正）。
+        # 旧实现遍历 st["stoves"]（<stove> 节点）并把节点的 id 当卡 id——
+        # 那是**仿真自己造的格式**：`_sim_faithful._serialize` 写
+        # `<stove id="{card_id}">`，而真机写的是**炉序号**（id="0"/"1"/"2"，
+        # 见 `<stovebox cur="7" stovenum="3">` 下的 `<stove id="0" endtime=… lv=9>`）。
+        # 生产后果（1★ 真机实测，2026-10-26）：
+        #   ① pending 变成 {1:1, 2:1} 幽灵在制卡（卡 id 是 684~696 这种量级）；
+        #   ② `ws.furnaces` 永远非空 → `_run_plan` 的 `reserve = soon + (2 if
+        #      ws.furnaces else 0)` 恒吃 2 格 → 换卡箱只剩 2 空位时买卡预算 = 0，
+        #      计划头部的 buy op 永不发出（这正是代码注释里描述的那个 1★ 死锁，
+        #      但注释里的修法 `2 if ws.furnaces else 0` 在真机永远生效不了）；
+        #   ③ buy_cap = len(furnaces)*3+6 用的是炉位数而非在炼数（影响小）。
+        # 真机 <stove> 节点的 endtime 仍要用：卡片属性里只有 btime+locktime
+        # （locktime=炼制总秒数），没有 endtime/left。
+        node_end: dict = {}
+        for sv in st.get("stoves", []):
+            try:
+                node_end[int(sv.get("id", -1))] = int(sv.get("endtime", 0) or 0)
+            except (TypeError, ValueError):
+                continue
         furnaces: list = []
-        for i, sv in enumerate(st.get("stoves", [])):
-            furnaces.append(Furnace(slot=i, cid=int(sv.get("id", 0)),
-                                    endtime=int(sv.get("endtime", 0)),
-                                    steal=bool(sv.get("steal"))))
+        for c in st.get("stove", []):
+            cid = int(c.get("id", 0) or 0)
+            if cid <= 0:
+                continue
+            slot = c.get("slot", -1)
+            try:
+                slot = int(slot)
+            except (TypeError, ValueError):
+                slot = -1
+            end = 0
+            for key in (cid, slot):        # 仿真按卡 id 对齐、真机按炉序号对齐
+                if node_end.get(key):
+                    end = node_end[key]
+                    break
+            if not end:                    # 真机回退：btime + locktime
+                try:
+                    end = int(c.get("btime") or 0) + int(c.get("locktime") or 0)
+                except (TypeError, ValueError):
+                    end = 0
+            if not end and now:
+                try:
+                    end = now + int(c.get("left") or 0)
+                except (TypeError, ValueError):
+                    end = 0
+            furnaces.append(Furnace(slot=slot, cid=cid, endtime=end,
+                                    steal=str(c.get("slottype") or "") == "steal"))
         return cls(
             now=now,
             change=change, store=store,
