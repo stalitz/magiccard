@@ -17,7 +17,10 @@
                      配合 --rounds N 可精确复刻 sched_cmp 的 sets=N 实例：
                      自动模式每上交 1 轮未收集数 -1，排产目标自动收缩，不超产）
   --rounds N       （max_rounds：每套上交 N 轮后停，默认 1）
-  --random         变卡按 50% 概率（默认确定性 100% 成功，便于看逻辑）
+  --steady         关掉所有扰动（变卡必成功），复现旧 bench 数字用
+                   默认档 = SAFE：变卡约 50% 失败（真机实测），失败也烧源卡
+                   环境变量 MC_SIM_CHAOS=1 = 压力档（网络失败/提前收卡/
+                   偷炉卡被好友收走/箱卡被换走），非实测值，只作鲁棒性验证
   --seed 0         随机种子
 跑法：python -m backend._sim_faithful
 
@@ -30,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
 import time
 from collections import Counter
@@ -60,12 +64,37 @@ def _load_card_lib():
 LIB = _load_card_lib()
 # 卡 id -> 炼制秒数（来自 theme_compose_list[c][6]，与真实 net_plan/plan_summary 同口径）
 SECS = {}
+# 卡 id -> 面额（card_list[c][3]，与 ThemePlan.cards[cid][3] / cards_price 同源）
+FACE = {}
+# 卡 id -> 3 张配方素材（theme_compose_list[c][3..5]），真实服务端会校验
+COMPOSE = {}
 for c in LIB["theme_compose_list"]:
     SECS[int(c[2])] = int(c[6])
+    COMPOSE[int(c[2])] = (int(c[3]), int(c[4]), int(c[5]))
+for _c in LIB["card_list"]:
+    FACE[int(_c[0])] = int(_c[3] or 0)
 
 
 def secs_of(cid: int) -> int:
     return SECS.get(int(cid), 3600)
+
+
+def face_of(cid: int) -> int:
+    return FACE.get(int(cid), 0)
+
+
+# ---- 扰动档位（仿真要复现真机的坑，不是复现「理想服务端」）----
+# SAFE：只含**有据可依**的真实行为——变卡成功率约 50%（gift.py:change_card 注释
+#   「成功 = code=0 且 result="1"；成功率约 50%」），失败也烧源卡。
+# STRESS：其余扰动**没有实测依据**，只作鲁棒性压力档（MC_SIM_CHAOS=1 打开），
+#   绝不当真实概率外推（禁把推测写成常量）。
+#   buy_net_fail 买卡网络失败 / mainpage_fail 主页面读抖动 /
+#   early_collect 用户抢先手动收卡 / steal_taken 偷炉产物被好友收走 /
+#   box_lost 换卡箱里的卡被换走（好友换卡·系统回收）。
+CHAOS_SAFE = {"change_fail": 0.5, "buy_net_fail": 0.0, "mainpage_fail": 0.0,
+              "early_collect": 0.0, "steal_taken": 0.0, "box_lost": 0.0}
+CHAOS_STRESS = {"change_fail": 0.5, "buy_net_fail": 0.03, "mainpage_fail": 0.01,
+                "early_collect": 0.02, "steal_taken": 0.01, "box_lost": 0.002}
 
 
 # ---- 虚拟服务端 ----
@@ -73,7 +102,8 @@ class VirtualSession:
     MAIN_SLOTS = [1, 2, 3]          # 主炉 3 个（与用户心智一致）
     STEAL_SLOT = 9                  # 偷炉 1 个
 
-    def __init__(self, uin: int = 123456, change_cur: int = 80, store_cur: int = 80):
+    def __init__(self, uin: int = 123456, change_cur: int = 80, store_cur: int = 80,
+                 chaos: dict | None = None, seed: int = 0):
         self.uin = uin
         self.now = 0
         self.change = {}            # slot -> cid  (slottype 0)
@@ -83,10 +113,17 @@ class VirtualSession:
         self.stoves = {}            # slot -> {"cid","opuin","endtime","steal"}
         self.friend_uin = "999000001"
         self.ar = None              # 运行期注入
-        self.rng = random.Random(0)
+        self.rng = random.Random(seed)
         self.change_rng = False
+        # 扰动档位：默认 SAFE（含真实的变卡 50% 失败）；MC_SIM_CHAOS=1 走压力档
+        base = dict(CHAOS_STRESS if os.environ.get("MC_SIM_CHAOS") == "1"
+                    else CHAOS_SAFE)
+        if chaos:
+            base.update(chaos)
+        self.chaos = base
         self.collected: dict[int, set] = {}   # tid -> 已收集 qq秀 实例 id（模拟真实上交反馈）
         self.completions: list[tuple] = []    # (完工时刻endtime, cid, 是否偷炉)——精确完工记录
+        self.perturb_log: list[tuple] = []    # (时刻, 类型, 细节) —— 外部扰动留痕
 
     # ---- 槽位分配 ----
     def _free_change_slot(self):
@@ -176,12 +213,31 @@ class VirtualSession:
     # ---- 端点 ----
     async def post(self, endpoint: str, **kw):
         if endpoint == EP_MAINPAGE:
+            # 读好友主页（偷炉前探测空炉）：必须返回**对方**的炉况，不能返回自己的。
+            # 旧版忽略 opuin 一律返回自己 → `_friend_stove_empty` 读到的是自己的
+            # free_main，好友永远「有空炉」、偷炉永不 -33084（假顺利）。
+            opu = str(kw.get("opuin") or "")
+            if opu and opu != str(self.uin):
+                if self._rand("mainpage_fail"):
+                    return {"code": -1, "message": "网络超时"}
+                empty = len(self.MAIN_SLOTS)        # 好友 3 个主炉都空着
+                cards = "".join(f'<card slot="{s}" id="0"/>'
+                                for s in self.MAIN_SLOTS)
+                return {"code": 0, "raw":
+                        f'<user randchance="0"><changebox cur="18" max="36"/>'
+                        f'<storebox cur="200" max="400"/>'
+                        f'<stovebox cur="3" max="6">{cards}</stovebox>'
+                        f'<cap><stove free_main="{empty}"/></cap></user>'}
+            if self._rand("mainpage_fail"):
+                return {"code": -1, "message": "网络超时"}
             return {"code": 0, "raw": self._serialize()}
         if endpoint == EP_REFINE:
             return self._do_refine(kw, steal=False)
         if endpoint == EP_STEAL:
             return self._do_refine(kw, steal=True)
         if endpoint == EP_BUY:
+            if self._rand("buy_net_fail"):
+                return {"code": -1, "message": "网络超时（买卡未到账）"}
             cid = int(kw.get("card_id") or 0)
             ok = self._add_to_box(cid)
             return {"code": 0 if ok else -1, "message": "ok" if ok else "箱满"}
@@ -189,6 +245,14 @@ class VirtualSession:
             tid = int(kw.get("theme") or 0)
             plan = self.ar.plans.get(tid) if self.ar else None
             if plan:
+                # 真实服务端会校验「整套是否真在箱」：每种至少 1 张。
+                # 旧版无条件删卡并返回成功 → 引擎误判集齐时也"成功"，
+                # 把「其实没集齐」掩盖成「上交通过」。
+                stock = Counter(self.change.values()) + Counter(self.store.values())
+                lack = [c for c in plan.ids if stock.get(c, 0) < 1]
+                if lack:
+                    return {"code": -1, "raw": "",
+                            "message": f"卡未集齐（缺 {len(lack)} 种）"}
                 for cid in plan.ids:
                     # 从卡箱每种去掉 1 张（上交消耗整套）
                     for box in (self.change, self.store):
@@ -217,14 +281,64 @@ class VirtualSession:
                            f'</users></user>'}
         return {"code": 0, "raw": ""}
 
+    def _rand(self, key: str) -> bool:
+        """按 chaos 概率抛一次判定（概率 0 时零开销）。"""
+        p = self.chaos.get(key, 0.0)
+        return bool(p) and self.rng.random() < p
+
+    def external_tick(self) -> None:
+        """人工/外部扰动：每个 tick 推进后由驱动器调用（仿真 = 生产的一部分）。
+
+        真实账号在 45s 的 tick 之间会发生用户手点、好友动作，引擎看不见过程，
+        只看到结果。三类：
+          · early_collect：用户抢在引擎前手动收了已完成的炉 → 卡直接进箱，
+            引擎下一 tick 看到空炉（refined 少记一次，进度不变）；
+          · steal_taken：偷炉产物被好友收走 → 卡丢失，引擎取卡失败；
+          · box_lost：换卡箱里的卡被换走/回收 → 随机消失一张。
+        默认全 0（无实测依据，见 CHAOS_STRESS 注释）；MC_SIM_CHAOS=1 走压力档。
+        """
+        if self._rand("early_collect"):
+            done = [s for s, v in self.stoves.items()
+                    if self.now >= v["endtime"] and not v["steal"]]
+            if done:
+                s = self.rng.choice(done)
+                v = self.stoves.pop(s)
+                self._add_to_box(v["cid"])
+                self.perturb_log.append((self.now, "提前收卡", v["cid"]))
+        if self._rand("steal_taken"):
+            done = [s for s, v in self.stoves.items()
+                    if self.now >= v["endtime"] and v["steal"]]
+            if done:
+                s = self.rng.choice(done)
+                v = self.stoves.pop(s)
+                self.perturb_log.append((self.now, "偷炉卡被好友收走", v["cid"]))
+        if self._rand("box_lost") and self.change:
+            s = self.rng.choice(list(self.change))
+            cid = self.change.pop(s)
+            self.perturb_log.append((self.now, "换卡箱卡被换走", cid))
+
     def _do_refine(self, kw, steal: bool):
         target = int(kw.get("targetid") or 0)
-        # 消耗素材（与引擎 _payload 选的 slot/slottype 对应）
+        # ---- 先校验、再判炉位、最后才扣素材（真实服务端拒绝时不消耗）----
+        mats = []
         for i in range(1, 4):
             sk = kw.get(f"slot{i}")
             if sk is None:
                 continue
-            self._remove_mat(int(sk), int(kw.get(f"slottype{i}", 0)))
+            st = int(kw.get(f"slottype{i}", 0))
+            box = self.change if st == 0 else self.store
+            cid = box.get(int(sk))
+            if cid is None:
+                return {"code": -32002, "message": "找不到相应的记录（素材槽位失效）"}
+            mats.append((cid, int(sk), st))
+        # 配方校验：投入的 3 张必须与 theme_compose_list 的 feeders 完全一致
+        # （旧版随便 3 张都能炼出 target → 引擎参数错也被判成功）
+        need = list(COMPOSE.get(target, ()))
+        if need and sorted(c for c, _s, _st in mats) != sorted(need):
+            return {"code": -1, "message": "素材不匹配配方"}
+        # 偷炉只能炼 40 面卡（真实限制）
+        if steal and face_of(target) != CHANGE_FACE:
+            return {"code": -1, "message": "偷炉只能炼40面卡"}
         if steal:
             slot = self._free_steal_stove()
             opuin = str(kw.get("opuin") or self.friend_uin)
@@ -233,41 +347,57 @@ class VirtualSession:
             opuin = str(self.uin)
         if slot is None:
             return {"code": -33003, "message": "炉满"}
+        for _cid, s, st in mats:          # 校验 + 炉位都通过才扣素材
+            self._remove_mat(s, st)
         self.stoves[slot] = {"cid": target, "opuin": opuin,
                              "endtime": self.now + secs_of(target), "steal": steal}
         return {"code": 0, "message": "ok"}
 
     async def qzone(self, method: str, endpoint: str, **kw):
-        # 变卡（card_user_transfer_card）：消耗源卡 -> 产出目标 40 面卡
+        # 变卡（card_user_transfer_card）：消耗源卡 -> 产出目标卡
         if endpoint == EP_TRANSFER:
+            src_id = int(kw.get("srcid") or 0)
             src_slot = int(kw.get("slotid") or 0)
             src_st = int(kw.get("slottype") or 0)
-            self._remove_mat(src_slot, src_st)
             dst = int(kw.get("dstid") or 0)
-            self._add_to_box(dst)
-            if self.change_rng and self.rng.random() < 0.5:
-                # 50% 失败：源卡仍被烧掉（上面已删），目标不产出（已在 add 前返回）
-                # —— 为忠实「失败也烧源卡」，这里目标不进箱
-                self.store.pop(max(self.store), None) if False else None
+            # ① 源卡必须真在该槽（否则 -32002，不烧卡）
+            box = self.change if src_st == 0 else self.store
+            if box.get(src_slot) != src_id:
+                return {"code": -32002, "raw": "",
+                        "message": "找不到相应的记录（源卡槽位失效）"}
+            # ② 面额规则：材料卡面额 >= 目标面额；百变卡 1162 万能
+            if src_id != 1162 and face_of(src_id) < face_of(dst):
+                return {"code": -1, "raw": "",
+                        "message": "材料卡面额不足"}
+            box.pop(src_slot)               # ③ 源卡先烧（失败也不退，真机行为）
+            # ④ 概率失败：不产出目标
+            if self._rand("change_fail"):
                 return {"code": 0, "raw": '<QQHOME code="0" result="0">'}
+            self._add_to_box(dst)           # ⑤ 成功：目标进箱（箱满即丢，真机同）
             return {"code": 0, "raw": '<QQHOME code="0" result="1">'}
         return {"code": 0, "raw": ""}
 
     async def get_refined_card(self, slot):
-        st = self.stoves.pop(int(slot), None)
-        if st:
-            self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
-            self._add_to_box(st["cid"])
-            return {"ok": True, "message": "成功"}
-        return {"ok": False, "message": "无此炉"}
+        st = self.stoves.get(int(slot))
+        if not st:
+            return {"ok": False, "message": "无此炉"}
+        if self.now < st["endtime"]:        # 未到点（flag=1）取卡必失败
+            return {"ok": False, "code": -32001, "message": "卡还没炼好"}
+        self.stoves.pop(int(slot))
+        self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
+        self._add_to_box(st["cid"])
+        return {"ok": True, "message": "成功"}
 
     async def get_steal_card(self, slot, opuin):
-        st = self.stoves.pop(int(slot), None)
-        if st:
-            self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
-            self._add_to_box(st["cid"])
-            return {"ok": True, "message": "成功"}
-        return {"ok": False, "message": "无此炉"}
+        st = self.stoves.get(int(slot))
+        if not st:
+            return {"ok": False, "message": "无此炉"}
+        if self.now < st["endtime"]:
+            return {"ok": False, "code": -32001, "message": "卡还没炼好"}
+        self.stoves.pop(int(slot))
+        self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
+        self._add_to_box(st["cid"])
+        return {"ok": True, "message": "成功"}
 
     async def open_pai(self):
         return {"ok": True, "message": "ok", "raw": "", "items": []}
@@ -356,17 +486,18 @@ async def main():
     ap.add_argument("--uncollected", type=int, default=0,
                     help="seed 已收集 qq秀，使自动模式只剩 N 个未收集；0=不seed")
     ap.add_argument("--rounds", type=int, default=1, help="max_rounds：每套上交 N 轮后停")
-    ap.add_argument("--random", action="store_true")
+    ap.add_argument("--random", action="store_true",
+                    help="（兼容旧参数，现已默认）变卡 50% 概率；默认档已含")
+    ap.add_argument("--steady", action="store_true",
+                    help="关掉所有扰动（变卡必成功），复现旧 bench 数字用")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dp", default="off",
                     help="on = 炼卡环节走 engine_v2 DPTickController（DP 调度）")
     args = ap.parse_args()
 
-    if args.random:
-        random.seed(args.seed)
-
-    vs = VirtualSession()
-    vs.change_rng = args.random
+    vs = VirtualSession(chaos=({"change_fail": 0.0} if args.steady else None),
+                        seed=args.seed)
+    vs.change_rng = args.random       # 兼容旧字段：现由 chaos["change_fail"] 决定
     # 初始塞礼物卡（48 面，theme=487），用于触发 box_gift_change 分布变卡
     gift_ids = sorted(gf._face48_ids())
     gid = gift_ids[0] if gift_ids else 7773
@@ -407,7 +538,7 @@ async def main():
     ar._log = _wrap_log
 
     print(f"=== 忠实 tick 仿真：tid={args.tid} {ar.plans[args.tid].name} "
-          f"初始礼物卡{args.gift}张 变卡{'随机50%' if args.random else '确定性100%'} "
+          f"初始礼物卡{args.gift}张 变卡{'关闭(steady)' if args.steady else '约50%失败(真实)'} "
           f"偷炉={'开' if ar.steal_enabled else '关'} "
           f"调度={'DP' if ar.dp_mode else '贪心轮转'} ===")
     print(f"主炉={vs.MAIN_SLOTS.__len__()}个 偷炉={'1个' if ar.steal_enabled else '0个'} "
@@ -429,6 +560,7 @@ async def main():
         vs.now += int(INTERVAL)
         _VT["now"] = vs.now            # 让 time.time 走虚拟时钟（刷新 _collected_shows 缓存）
         now_to_tick[vs.now] = tick_n + 1     # 第 1 个 tick 对应 now=45s
+        vs.external_tick()              # 人工/外部扰动（与 Engine.run_sim 同一口径）
         await ar.tick()
         if not ar.queue and done_hh is None:
             done_hh = vs.now // 3600
@@ -445,7 +577,7 @@ async def main():
 
     out = []
     out.append(f"=== 有操作的 tick 流水：tid={args.tid} {ar.plans[args.tid].name} "
-               f"初始礼物卡{args.gift}张 变卡{'随机' if args.random else '确定'} "
+               f"初始礼物卡{args.gift}张 变卡{'关' if args.steady else '50%失败'} "
                f"偷炉={'开' if ar.steal_enabled else '关'} ===")
     out.append(f"主炉={vs.MAIN_SLOTS.__len__()} 偷炉={'1' if ar.steal_enabled else '0'} "
                f"interval=45s 卡炉秒数来自 theme_compose_list[6]（真实）")

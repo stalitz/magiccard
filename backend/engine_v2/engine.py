@@ -114,16 +114,22 @@ class Engine:
 
     async def run_sim(self, change_cur: int = 18, store_cur: int = 200,
                      max_ticks: int = 20000, interval: int = 45,
-                     gift: int = 0):
+                     gift: int = 0, chaos: dict | None = None,
+                     seed: int = 0):
         """跑一遍仿真。返回 (VirtualSession, 实际 tick 数)。
 
         gift > 0 时先往换卡箱塞 N 张礼物卡（48 面）——生产环境箱里本来就有累计的
         礼物卡，变卡由此供给 40 面素材。bench 默认 0 保持「空箱起步」的可比口径。
+
+        chaos：扰动覆盖（见 `_sim_faithful.CHAOS_SAFE/CHAOS_STRESS`）。默认走
+        SAFE 档——含**真实**的变卡约 50% 失败（失败也烧源卡）。环境变量
+        `MC_SIM_CHAOS=1` 切压力档（网络失败/提前收卡/被好友收走/卡被换走）。
         """
         from backend import _sim_faithful as sim      # 导入即把 time.time 接到虚拟时钟
         from backend.auto_refine import AutoRefine
 
-        vs = sim.VirtualSession(change_cur=change_cur, store_cur=store_cur)
+        vs = sim.VirtualSession(change_cur=change_cur, store_cur=store_cur,
+                                chaos=chaos, seed=seed)
         self._vs = vs
         if gift > 0:
             gids = sorted(sim.gf._face48_ids())
@@ -155,6 +161,7 @@ class Engine:
             vs.now += int(interval)
             sim._VT["now"] = vs.now          # ★ 虚拟时钟必须推进：否则 time.time()
             #   永远 0，生产里的偷炉冷却 / 缓存刷新逻辑全部失真
+            vs.external_tick()               # 人工/外部扰动（提前收卡、被好友收走、卡被换走）
             await ar.tick()
             self.completed_rounds = Counter({t: ar.plans[t].rounds for t in self.plans})
             self._sync_peaks(vs)

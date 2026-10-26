@@ -11,8 +11,10 @@ from backend.engine_v2.engine import Engine
 
 
 async def one(tid, dp_single, max_rounds, max_ticks):
+    # ★ dp_single（静态 DP 序）已随 dp_adapter.py 删除，Engine 只认 use_dp；
+    # 旧版这里传 dp_single → 被忽略 → 「DP」列其实跑的是贪心。
     eng = Engine([tid], buy=True, max_rounds=max_rounds,
-                 steal_enabled=True, dp_single=dp_single)
+                 steal_enabled=True, use_dp=dp_single)
     vs, ticks = await eng.run_sim(change_cur=18, store_cur=200,
                                   max_ticks=max_ticks, interval=45)
     st = eng.stats
