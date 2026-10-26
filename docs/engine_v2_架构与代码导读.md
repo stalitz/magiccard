@@ -53,51 +53,52 @@ $PY -m backend.engine_v2.tests.bench_dp_greedy
 
 | 目录/文件 | 行数 | 职责 | 谁调用 |
 |---|---|---|---|
-| `backend/engine_v2/world.py` | 101 | `parse_full()` 结果 → 聚合 `WorldState` | 所有决策入口 |
-| `backend/engine_v2/model.py` | 107 | `ThemeModel` 包装 `ThemePlan`，纯静态查询 | planner / controller |
-| `backend/engine_v2/plan.py` | 28 | `Action` / `Plan` 契约 | planner ↔ executor |
-| `backend/engine_v2/planner.py` | 393 | **贪心**决策（默认路径，5 步流水线） | `engine.Engine.decide` |
-| `backend/engine_v2/dp_controller.py` | 1029 | **DP 控制器**：骨架 + 有限偏差 | `engine.run_sim` / `auto_refine._dp_refine_all` |
-| `backend/engine_v2/executor.py` | 90 | Plan → API 调用（**只给仿真用**） | `Engine.run_sim` |
-| `backend/engine_v2/engine.py` | 175 | 仿真编排 `run_sim` + 门面 | bench / tests |
-| `backend/engine_v2/dp_adapter.py` | 169 | `ThemeModel` → 老式实例（单套/联合序） | `engine.run_sim` 非 DP 分支 |
+| `backend/engine_v2/world.py` | 101 | `parse_full()` 结果 → 聚合 `WorldState` | 决策入口 |
+| `backend/engine_v2/model.py` | 107 | `ThemeModel` 包装 `ThemePlan`，纯静态查询 | controller |
+| `backend/engine_v2/plan.py` | 28 | `Action` / `Plan` 契约 | controller ↔ 生产执行层 |
+| `backend/engine_v2/dp_controller.py` | 1080 | **DP 控制器**：骨架 + 有限偏差 | 生产 `auto_refine._dp_refine_all` |
+| `backend/engine_v2/engine.py` | 190 | **仿真驱动器**：把生产 `AutoRefine.tick()` 跑在 `VirtualSession` 上 | bench / tests |
 | `backend/sched_cmp/sched_dp.py` | 1036 | **求解器**：UB + DFS/memo/LB + LDS | 上面所有 DP 路径 |
 | `backend/sched_cmp/cp_sat_plan.py` | 194 | CP-SAT 后端（同契约），标尺/冷启实验 | `_solve_plan` / 离线对照 |
-| `backend/sched_cmp/instance.py` `recipes.py` `executor.py` | 75/212/133 | 离线评测的实例构造与独立模拟器 | `sched_cmp` 离线工具 |
-| `backend/engine_v2/tests/` | — | 仿真 / 验证 / 探针（**不是单测框架**） | 手工执行 |
+| `backend/sched_cmp/instance.py` `recipes.py` `executor.py` | 75/212/133 | 离线评测的实例构造与独立模拟器（**不接 Session，只算物料/容量**） | `sched_cmp` 离线工具 |
+| `backend/auto_refine.py` | 2280 | **生产唯一的决策+执行实现**：`_refine_all`（贪心）/ `_dp_refine_all`（DP） | `AutoRefine.tick()` |
+| `backend/_sim_faithful.py` | 470 | `VirtualSession`：假网络（与 `mc_api.Session` 同签名）+ 虚拟时钟 | 仿真 / 生产共用 |
+
+> ⚠️ `planner.py` / `executor.py` / `dp_adapter.py` **已于 2026-10-26 删除**。它们是 engine_v2 早期把生产贪心与执行层**重写一遍**的并行实现，导致「bench 数字」和「生产行为」是两条代码路径（同一份逻辑改一处、另一边悄悄漂移）。现在决策与执行只有一份，见 §0。
 
 > ⚠️ `sched_cmp/` 其余文件（`sched_greedy.py` `sched_astar.py` `sched_ilp.py` `run_compare.py` …）是**离线评测历史遗留**，生产零引用。新人可以完全忽略，只在做算法调研时看。
 
 ---
 
-## 1. 数据流
+## 1. 数据流（仿真 = 生产，只换掉网络与时钟）
 
 ```
-真实游戏 ──HTTP──> mc_api.Session ──> parse_full(raw) ──┐
-                                                        ▼
-                                              WorldState (库存聚合快照)
-                                                        │
-                        ┌───────────────────────────────┴───────────────┐
-                        ▼                                               ▼
-              Planner.decide()  (贪心)                      DPTickController.decide()
-                5 步流水线，纯函数                           骨架缓存 → 承诺点? → sched_dp.solve
-                        │                                               │
-                        └──────────────┬────────────────────────────────┘
-                                       ▼
-                              Plan = List[Action]
-                                       │
-                  ┌────────────────────┴─────────────────────┐
-                  ▼                                          ▼
-        Executor.execute()  (仿真)              auto_refine._dp_refine_all (生产)
-        GameClient=VirtualSession                执行层在本引擎重写：买卡过容量、
-                                                  偷炉挑好友、槽位重校验、库存同步
+                     真实游戏 ──HTTP──> mc_api.Session ─┐
+                                                       │  同一个 post(endpoint, **kw)
+                     仿真 ───────> VirtualSession ──────┤  接口，二选一注入
+                                     (+ 虚拟时钟)       │
+                                                       ▼
+                                        AutoRefine.tick()   ← 生产唯一的 tick 流程
+                                        （收卡 / 翻牌 / 变卡 / 上交 / 炼卡 / 买卡 / 偷炉）
+                                                       │
+                                    ┌──────────────────┴──────────────────┐
+                            dp_mode=False                        dp_mode=True
+                                    ▼                                     ▼
+                        _refine_all（生产贪心）            _dp_refine_all → DPTickController
+                                    │                                     │
+                                    │                          sched_dp.solve（每承诺点）
+                                    └──────────────────┬──────────────────┘
+                                                       ▼
+                                          直接调 Session 的写接口（买/炼/偷/卖/挪）
 ```
 
-**两条路径共享的只有三样东西**：`WorldState`（状态）、`ThemeModel`（静态树）、`Action`（动作契约）。**决策逻辑完全独立**。
+**只有一层被替换**：`Session`（真实 HTTP ↔ 虚拟状态机 + 虚拟时钟）。决策、执行、兜底、日志全部是生产那一份代码，仿真不重写任何逻辑。
+
+> 这就是 `backend/_sim_faithful.py` 存在的意义：`AutoRefine.tick()` 原封不动跑在 `VirtualSession` 上。`engine_v2/engine.py` 现在只是给 bench/探针用的薄驱动（建 session、推进时钟、统计），**没有自己的决策或执行逻辑**。
 
 ---
 
-## 2. 两条决策路径（必须分清）
+## 2. 两条决策路径
 
 `auto_refine.py:1077` 是唯一的开关点：
 
@@ -105,53 +106,48 @@ $PY -m backend.engine_v2.tests.bench_dp_greedy
 if self.dp_mode:                                  # 前端「DP 调度」勾选
     await self._dp_refine_all(...)                # → DPTickController
 else:
-    await self._refine_all(...)                   # → 传统贪心（不走 engine_v2.Planner！）
+    await self._refine_all(...)                   # 生产贪心（5 步轮转）
 ```
 
-> ★ **易错点甲**：生产环境的贪心路径在 `auto_refine._refine_all`，**不是** `engine_v2/planner.py`。`planner.py` 只在仿真/bench 里用。两者都是"贪心 5 步"，但代码不同源，改动不会互相影响。
+> ★ **易错点甲（历史坑，2026-10-26 已清除）**：曾经 `engine_v2/planner.py` 是生产贪心的**另一份实现**，bench 用它当"贪心基线"。它比生产贪心更聪明（有 JIT 拉动的轮转买、box compaction），于是出现"bench 说 DP 只快 2~5h，生产实测快 15h"的错位。**现在基线与生产同一份代码。**
 
-> ★ **易错点乙**：`engine_v2/executor.py` 只被 `Engine.run_sim`（仿真）使用。生产执行在 `auto_refine._dp_refine_all` 里重新实现（要处理真实 API 的坑：买卡逐张过容量、偷炉挑好友+冷却+拉黑、槽位失效重校验、本地库存同步）。**改执行语义必须同时看这两处。**
+> ★ **易错点乙**：`collect`（上交整套）不由 DP 返回的 Action 执行——`auto_refine` 在 tick 第 3 步已经上交过，DP 看到的是"上交后状态"，所以 `_dp_refine_all` 对 `action.kind == "collect"` 直接 `continue`。仿真跑的是同一个 `tick()`，所以也一致。
 
-> ★ **易错点丙**：`collect`（上交整套）在生产链路上**不由 DP 返回的 Action 执行**——`auto_refine` 在 tick 第 3 步已经做过上交，DP 看到的是"上交后状态"，所以 `_dp_refine_all:1240` 对 `action.kind == "collect"` 直接 `continue`。仿真链路（`Engine.run_sim`）则真的执行它。**调试"为什么没上交"时先确认在哪条链路上。**
+> ★ **易错点丙**：动工前先看 `_dp_refine_all` 的 action 分发——它是 `Action` 契约的**唯一**消费者。控制器新增任何 `Action.kind`，必须在这里加执行分支，否则静默丢弃（曾经 `sell/move` 就是这样被丢的，见 §9.4）。
 
-### 2.1 贪心路径：`Planner.decide`（`planner.py:43`）
+### 2.1 贪心路径：`auto_refine._refine_all`（`auto_refine.py:1340`）
 
-> ★ **极易踩的坑：Step 编号 ≠ 执行顺序。** 代码里的执行顺序是：
+> 这一节讲的是**生产代码**。删掉的 `planner.py` 曾把同样的事写成另一份"5 步流水线"，不要再去找它。
+
+真实结构（按代码顺序）：
 
 ```
-Step1 PriorityResolver      定 P0 / defer
+空炉/偷炉位判定          free_main 与 free_steal 各自独立（主炉满也要试偷炉）
    ↓
-每套净需求 net_plan          runs / buy
+按套轮转 + 按炉次交错     _rr 轮转起点 → 每套各出一个炉次，轮流取（防一套吃光炉位）
    ↓
-Step2 AdmissionControl      哪些套准入（实际实现=有活即准入）
+变卡 credit              _face40_credit：变卡马上能产出的 40 面卡先当库存顶账
    ↓
-JIT 需求 due                 可炼前沿的底卡喂料 + collect 在即的收藏底卡
+套数                     _calc_sets：1★ 按囤量算能炼几套，其余按 1 套
    ↓
-Step4 BoxCompaction          腾箱（卖 10 面 / 挪保险箱）
+净需求                   plan.net_plan(stock, pending, credit, sets)
    ↓
-Step4a collect               整套在箱 → 上交（**确定性动作先于条件性买卡**）
+炉次排序                 _sort_time_aware：深度 + 炉时（150 的 4h 要早占炉，40 的 1h 补缝）
    ↓
-Step3 炉位分配 + 投炉         主炉填空 + 偷炉（只 40 面）
+投炉（合成 / 炼卡 / 偷炉）  _prepare_turn 挡掉素材不足的 target，再发 API
    ↓
-Step5 买卡                   JIT 拉动 + 轮转买 + 箱容闸 + 速率闸
+买卡                     末尾补底料（容量闸 + 速率闸）
+   ↓
+腾箱                     _make_room：优先挪保险箱（无损），10 面底卡可卖，高面额永不卖
 ```
 
-为什么是这个顺序（不要"顺手重排"）：
+必须记住的三条（都有实测事故）：
 
-1. **collect 必须在买卡之前**：上交整套会释放 N 格箱位，`collect_freed` 要计入买卡预算。反过来会出现"本该能买却因箱满买不进"。
-2. **腾箱必须在投炉之前**：投炉需要喂料在箱且有 slot；腾箱腾出的空间是给后续买卡用的。
-3. **买卡必须最后**：它是唯一"增加卡数"的动作，所有释放量的计算都要先结算完。
-4. **PriorityResolver 必须在 AdmissionControl 之前**：先定 P0 才知道给谁预留峰值。
-
-关键局部逻辑：
-
-| 位置 | 逻辑 | 为什么 |
+| 位置 | 规则 | 为什么 |
 |---|---|---|
-| `planner.py:65` Step2 | 有 `runs>0` 或可 collect 就准入，**不做** `sum(runs)` 静态预留 | 旧版静态预留造成 3 套全 defer 死锁（精炼净腾 2 格，根本不长期占箱） |
-| `planner.py:97` JIT due | 只买"非底卡喂料全在箱/炉"的合成卡的底卡 | 整套底卡囤齐是仿真假象（4★ 峰值 201 张，94% 是底卡） |
-| `planner.py:288` 速率闸 | `len(furnaces)*3+6`，**不是** `free*3+3` | 炉忙时正该前瞻买料；旧版炉忙压到 3/tick → 98% 空闲是没料 |
-| `planner.py:300` 轮转买 | 每轮每种底卡各买 1 张 | 按 cid 序买满一种 → 3 合 1 的 trio 永远凑不齐 → 死锁 |
-| `planner.py:161` | 底卡也要分配 slot | 旧版 `is_base → continue` → 底卡永不进炉、泄漏囤箱 |
+| `_refine_all:1379` | 主炉满 ≠ 全停，偷炉位要单独判 | 旧版主炉一满就 `return`，末尾偷炉分支永远走不到 → "从来没偷过炉" |
+| `_sort_time_aware` | 深度 + 炉时排序，不是纯深度降序 | 纯降序把「素材没齐的 150(4h)」排在「素材齐的 40(1h)」前 → 反复试投被挡、空转 |
+| `_make_room:1534` | 拖保险箱优先；**只卖 10 面底卡**；高面额永不自动卖 | 卖卡只换回面值等额金币，卖高面额=把收藏折成零头（用户明确反对） |
 
 ### 2.2 DP 路径：`DPTickController.decide`（`dp_controller.py:933`）
 
@@ -518,10 +514,13 @@ $PY -m backend.engine_v2.tests.cp_sat_solve
 
 ### 9.1 已知边界
 
+> ⚠️ 下面 1~3 条的 gap 数字来自**旧仿真口径**（`Planner`+`Executor` 那条已被删除的路径）。换成生产路径后绝对工时会变（见 §9.3），标尺（CP-SAT 最优值）不变。
+
 1. **交付层 gap 4.7~6.1%**（2★~4★）。残余 gap 定位到"对称关键分支"（2★ `241←{240,239,233}` 向上 cp 全相等），静态优先级区分不了。
 2. **全状态 DP 不可行**：4★ 联合状态 ~10²⁶。要缩小 gap 只能走 robust CP-SAT（给 slack 出可执行界）或让重解更准更快。
-3. **多套纯高星**（4+3 / 4+5 各 1 轮）DP 略慢贪心 1.5~2h。这是静态骨架 + 滚动重规划的已知 gap。
+3. **多套纯高星**（4+3 / 4+5 各 1 轮）DP 略慢贪心 1.5~2h。这是静态骨架 + 滚动重规划的已知 gap（同样是旧口径，待用生产路径复测）。
 4. **bench 后 2 例（各 3 轮压力）未跑完**——曾被主动 kill 以聚焦紧箱修复，属 follow-up。
+5. **3★/4★ 贪心在生产路径下会卡死**（§9.3），当前只有 DP 能跑完；这不是 DP 变强，是贪心缺腾箱手段。
 
 ### 9.2 已证伪（**别再试**）
 
@@ -535,6 +534,33 @@ $PY -m backend.engine_v2.tests.cp_sat_solve
 | 多套共享段用「套内 DP 序」/「cp 关键路序」 | 2 套 +8h / +18h，3 套 +27h。多套的正解是跨套分配策略，不是套内排序 |
 | 联合 DP 静态序接滚动 | 2 套 411.5→433.6h，3 套 459.9→500.2h |
 
+### 9.3 仿真/生产统一（2026-10-26）与它当场暴露的三个生产 bug
+
+用户定调：「仿真就是要模拟生产环境，真实 API 的细节在仿真中也要模拟，引擎决策层和执行层就是同一套，不要分开写。」
+
+改动：`Engine.run_sim` 不再跑 `Planner`+`Executor`，改为 `VirtualSession` + `AutoRefine.tick()`（生产同一个 tick 流程）；`planner.py` / `executor.py` / `dp_adapter.py` 删除。
+
+统一后第一次跑 DP 就卡死（1★/2★ 900 tick 零进展），逐层定位到三个**真实生产 bug**（都在磁盘上的生产代码里，不是仿真造成的）：
+
+| # | bug | 机理 | 修法 |
+|---|---|---|---|
+| 1 | 买卡闸口径错 | `box_free_local` 用**双箱合计**（change+store），保险箱 199 空 → 判"有位" → 每 tick 发 6 张买卡，执行层 `_free_change<=0` **全失败**；这些幽灵买卡已计入 `bought_this_tick` → pass 2 判喂料"本 tick 已占用" → **一张精炼都不发** | 改用 `ws.change_free`（买卡只能落换卡箱） |
+| 2 | `sell/move` 被丢弃 | 控制器 `_box_compaction` 一直在发腾箱动作，执行层注释写着「move/sell 当前 DP 不产出」直接 `continue` → 腾箱永远无效，1★ 卡在 17/18 | `_dp_refine_all` 补 `sell_card` / `move_card` 分支，成功后 `_read_state()` 重读（slot 会重排） |
+| 3 | 落箱预留无条件 +2 | 换成换卡箱口径后，`reserve = soon + 2` 在**炉全空**时仍吃 2 格 → change_free=1 时买卡预算=0 → 依赖那张卡的整条精炼链卡住 | `reserve = soon + (2 if ws.furnaces else 0)` |
+
+修完实测（单套 1 轮、18+200 箱、空箱起步、无礼物卡、3 主炉+1 偷炉、生产代码路径）：
+
+| 场景 | 贪心 | DP | 备注 |
+|---|---|---|---|
+| 1★ (85) | 8.01h | 8.07h | 浅树，DP 无优势（与旧结论一致） |
+| 2★ (62) | 39.01h | 24.05h（solve=~200，墙钟 1~2min） | **DP 快 15h**；旧 bench 说"只快 4.94h"，因为基线是删掉的那份更强贪心 |
+| 3★ (59) | **42.5h 起卡死**（18/18 满、炉全空、跑到 112.5h 仍未完成） | 73.55h（solve=347，墙钟 615s） | 贪心 `_make_room` 把所有在炼套卡的卡都保护起来 → 箱满时无候选可腾 |
+| 4★ (60) | **同样卡死**（150h 未完成，炉占 26%） | 未跑完（2s×上千次解算，墙钟过长） | — |
+
+> ★ **待决策（未改）**：3★/4★ 贪心死锁的根因是 `_make_room` 的 `keep_ids` 把所有「在炼套卡自己的卡」都保护起来，箱满时一个候选都没有；而 DP 侧已能靠 `sell/move` 腾箱。要不要给贪心也放开「卖掉超过 due 的 10 面底卡」属于授权问题（卖卡有真实后果），**未擅自改**。
+>
+> ⚠️ 口径说明：上表是「空箱起步 + 无礼物卡」的 from-scratch 场景（与 `sched_cmp` 实例可比）。生产环境箱里通常有累计的礼物卡、变卡能持续供给 40 面素材，绝对工时会比上表低；但**同场景下贪心/DP 的相对差距**与死锁风险是真实的。`Engine.run_sim(gift=N)` 可把礼物卡纳入场景。
+
 ---
 
 ## 10. 常见改动，从哪下刀
@@ -545,7 +571,7 @@ $PY -m backend.engine_v2.tests.cp_sat_solve
 | 提升调度质量 | `sched_dp` 的 `vec_prio` / `max_vecs` / LB 剪枝 / `_ub_schedule` 排序 | 改完**必跑** `_verify_sched`；**禁止并发跑对照** |
 | 调 JIT 松紧 | `_jit_due` 的 `window`（`due_window = 2*(machines+steal)+2`）+ collect 缺口项 | 窗口太小 → 频繁等料空转；太大 → 囤货死锁 |
 | 调买卡闸 | `_run_plan` pass1 的 `box_free_local` / `buy_cap` / `reserve` | 违反 §6 #1 #9 → 死锁或静默丢卡 |
-| 加新 `Action` 类型 | `plan.py` + `engine_v2/executor.py` + `auto_refine._dp_refine_all` | **三处必须同步**，否则仿真与生产行为不一致 |
+| 加新 `Action` 类型 | `plan.py` + `auto_refine._dp_refine_all`（唯一消费者） | **两处必须同步**：控制器产出没人执行 = 静默丢弃（`sell/move` 曾这样丢了半年） |
 | 改箱容口径 | `WorldState.box_free` / `_solve_plan` 的 `box_cap` | 双箱各自有硬顶，`box_cap` 用合计是近似；换卡箱只有 18 格 |
 | 加新资源约束（新炉型等） | `_skeleton` 的 `mclass` + `inst` 的 `shop_cap`/`steal_cap` + `cp_sat_plan` 的 `AddCumulative` | 求解器与 CP 模型必须同改，否则 gap 对照失效 |
 | 换求解后端 | 保持契约 `mk, sched, stats = solve(inst, …)` | 参考 `cp_sat_plan.py` 头部契约表 |
