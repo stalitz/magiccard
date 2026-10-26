@@ -266,10 +266,12 @@ class DPTickController:
         # 买卡只能落换卡箱（硬顶 18 格），保险箱不能收买卡。旧版用双箱合计
         # （ws.box_free）→ 保险箱剩 199 格时判「有位」，把整套专辑底卡全买一遍，
         # 执行层 `_free_change <= 0` 逐张失败（4★ 实测 220 次「卡箱 0 空位」）。
-        # reserve 同 _run_plan：只给「炉里有活」留落位。
+        # reserve 同 _run_plan：只按「到点临近度」留落位（2026-10-26，见
+        # _run_plan 里的实测记录：旧版「有炉就 +2」在紧箱时把预算清零）。
         reserve = sum(1 for f in ws.furnaces
                       if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
-        reserve += 2 if ws.furnaces else 0
+        reserve += 1 if any(TICK_SECS + EPS < f.endtime - ws.now <= 2 * TICK_SECS
+                            for f in ws.furnaces) else 0
         free = max(0, ws.change_free + extra_free - reserve)
         for t in active:
             m = self.models[t]
@@ -707,12 +709,27 @@ class DPTickController:
         # 箱有位；长时炉的产物远未到收卡时刻，提前几十 tick 占位纯属过虑。
         soon = sum(1 for f in ws.furnaces
                    if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
-        # 落箱预留：只给「炉里有活」时留 2 格（炉空着就没有卡会落箱）。
-        # ★ 2026-10-26：旧版无条件 +2。换成换卡箱口径后这是死锁点——1★ 实测
-        # change_free=1、炉全空（soon=0），reserve 仍吃 2 格 → 买卡预算 0 →
-        # 计划头部的 buy(685) 永发不出 → 依赖 685 的精炼也被喂料不足挡住 →
-        # 箱内 17 张一张不动、refined 停在 14、800+ tick 零进展。
-        reserve = soon + (2 if ws.furnaces else 0)
+        # 落箱预留：**只按「到点临近度」留**，不再「有炉就留 2 格」。
+        # ★★ 2026-10-26 真机 1★ 再次实测（第二次踩同一个坑）：
+        #   4 炉在炼、剩余 656~2275s（远未到点），change_free=2，
+        #   旧式 reserve = soon(0) + 2 = 2 → 买卡预算 0 → **整 tick 零动作**
+        #   （bought_now=0、refined_now=0），箱里囤着 687×4 + 688×3 共 7 张
+        #   10 面却缺 684/685/686 一张都凑不出配方 → 用户看到「买了 7 张
+        #   10 面还没开炼」。
+        #   物理事实：只有 endtime 落在本 tick 的炉才会落箱，落 1 张占 1 格；
+        #   2000s 后才到点的炉现在预留格位是纯浪费，而且它正是死锁点
+        #   （change_free <= 2 时预算恒 0）。
+        #   抖动容错：真机 tick 可能因网络超过 45s，对**下一 tick 内**会到点
+        #   的炉再留 1 格，别的不留。
+        # ★ 真机取卡要 **2 个**换卡箱空位（2026-10-26 实测原文：「亲，可能会出现
+        # 幸运事件，请空出两个卡箱的位置，再取卡！」）。但**不在预算里预留 2 格**：
+        # 实测 reserve = soon*2 会让 3★/4★ 直接 750h 卡死（预算被吃光 → 不买料 →
+        # 不投炉 → 更腾不出位，恶性循环）。取卡失败的真机语义是「拒绝取卡、炉不
+        # 消失、卡不丢」，下一 tick 重试即可（1★ 实测 2 次连拒后成功）。
+        # 故：预留仍按 1 格/炉，取卡位不足交给执行层重试。
+        near = sum(1 for f in ws.furnaces
+                   if TICK_SECS + EPS < f.endtime - ws.now <= 2 * TICK_SECS)
+        reserve = soon + (1 if near else 0)
         # ★ 买卡闸必须用**换卡箱**空位（2026-10-26，仿真/生产统一后实测发现）：
         # 买卡只能落到换卡箱（硬顶 18 格），保险箱不能收买卡。旧版用双箱合计
         # （ws.box_free = change_free + store_free）→ 保险箱还剩 199 格时仍判「有位」，
@@ -738,6 +755,20 @@ class DPTickController:
         # 由专辑预买/计划终局 op 按 collect 在即拉起。op 不标记 issued：
         # 前沿需求后续增长（上层随中间卡落箱逐层获得）时再放行。
         buy_cap = max(0, len(ws.furnaces) * 3 + 6 - album_bought)
+        # ★ 底卡买卡额度 = 本 tick **能吸收**的炼炉数 × 3（2026-10-26 真机实测）：
+        # 底卡只能投主炉（偷炉只收 40 面），所以「没有空主炉/没有马上空出的主炉」
+        # 时买的底卡 100% 只是躺在箱里——这就是用户说的囤卡。
+        # 实测形态：4 炉在炼（剩 656~2275s）仍买 7 张 10 面，箱里 687×4+688×3
+        # 缺 684/685/686 凑不出任何一炉。加额度后「买一组（≤3 张）就够开一炉」。
+        # 额度 = max(1, 空主炉 + 本 tick 空出) × 3。下限 1 波（3 张 = 一炉的量）：
+        # 炉全满时仍允许补齐「下一炉」，否则炉一空就要现等 LAG（仿真实测
+        # 严格 0 额度 4★ 78.71→82.15h、放宽到 3 tick 反而 83.41h——「提前买」
+        # 在这套引擎里无益，与「利用率不是目标」的既有结论一致，只保底 1 波）。
+        soon_main = sum(1 for f in ws.furnaces
+                        if not f.steal
+                        and 0 < f.endtime - ws.now <= TICK_SECS + EPS)
+        base_quota = max(1, ws.main_free + soon_main) * 3
+        n_base = 0
         for i, op in enumerate(ops):
             if n_buy >= buy_cap or box_free_local <= 0:
                 break                   # 速率闸 / 箱闸（紧急买也进不来）
@@ -753,6 +784,11 @@ class DPTickController:
                 if in_sys >= due.get(cid, 0):
                     self.jit_blocked += 1
                     continue            # 前沿用量已够 → 不超买（op 保留）
+                if cid in self._base_cids:
+                    if n_base >= base_quota:
+                        self.jit_blocked += 1
+                        continue        # 无炉可投 → 买来只能躺箱（囤卡）
+                    n_base += 1
             actions.append(Action(kind="buy", cid=cid, n=1,
                                  note=f"DP骨架买底料 {cid}"))
             plan["bought"][cid] += 1

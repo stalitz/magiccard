@@ -75,6 +75,10 @@ for _c in LIB["card_list"]:
     FACE[int(_c[0])] = int(_c[3] or 0)
 
 
+# 取卡所需换卡箱空位：真机 2 格、仿真旧口径 1 格（见 _can_take_card）
+TAKE2 = os.environ.get("MC_SIM_TAKE2") == "1"
+
+
 def secs_of(cid: int) -> int:
     return SECS.get(int(cid), 3600)
 
@@ -377,12 +381,33 @@ class VirtualSession:
             return {"code": 0, "raw": '<QQHOME code="0" result="1">'}
         return {"code": 0, "raw": ""}
 
+    def _can_take_card(self) -> bool:
+        """取卡所需换卡箱空位。
+
+        ★ 真机硬约束（2026-10-26 实测原文）："亲，可能会出现幸运事件，请**空出
+        两个卡箱的位置**，再取卡！" —— 真机要 **2 格**，仿真旧版只要 1 格。
+        默认仍按 1 格（旧 bench 口径可复现）；`MC_SIM_TAKE2=1` 切到真机口径。
+        ⚠️ 已知：按 2 格跑，3★/4★ 会 750h 卡死（引擎腾箱不保取卡位，见文档
+        §9.4），修好后应把默认值切到 2。
+        """
+        if not TAKE2:
+            # 旧口径：箱满时 _add_to_box 静默丢卡（这把真机的「拒绝取卡」掩盖成
+            # 一路顺畅 —— 正是它让旧 bench 高星数字偏乐观，见文档 §9.4）
+            return True
+        return self._free_change_slot() is not None and \
+            len(self.change) + 1 < self.change_cur
+
     async def get_refined_card(self, slot):
         st = self.stoves.get(int(slot))
         if not st:
             return {"ok": False, "message": "无此炉"}
         if self.now < st["endtime"]:        # 未到点（flag=1）取卡必失败
             return {"ok": False, "code": -32001, "message": "卡还没炼好"}
+        if not self._can_take_card():
+            # 炉不消失、卡不丢（真机是「拒绝取卡」，不是「取出后丢弃」）
+            self.take_rejected = getattr(self, "take_rejected", 0) + 1
+            return {"ok": False, "code": -1,
+                    "message": "亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！"}
         self.stoves.pop(int(slot))
         self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
         self._add_to_box(st["cid"])
@@ -394,6 +419,10 @@ class VirtualSession:
             return {"ok": False, "message": "无此炉"}
         if self.now < st["endtime"]:
             return {"ok": False, "code": -32001, "message": "卡还没炼好"}
+        if not self._can_take_card():
+            self.take_rejected = getattr(self, "take_rejected", 0) + 1
+            return {"ok": False, "code": -1,
+                    "message": "亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！"}
         self.stoves.pop(int(slot))
         self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
         self._add_to_box(st["cid"])
