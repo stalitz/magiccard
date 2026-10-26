@@ -788,6 +788,15 @@ class DPTickController:
                     if n_base >= base_quota:
                         self.jit_blocked += 1
                         continue        # 无炉可投 → 买来只能躺箱（囤卡）
+                    # 同一 tick 同一 cid 最多买 1 张（2026-10-26 真机实测）：
+                    # 1★ 的 buy op 前 7 个全是 684，额度 3 全花在 684 上 →
+                    # 箱里 684×3 而 685/686 一张没买 → 5 个配方（各要 3 张
+                    # **不同**底卡）仍然一张凑不出，正是用户说的「买超过 4 个
+                    # 10 面还没开炼」。一炉只需每种 1 张，跨 tick 补齐的代价
+                    # 是 45s/张（整套 20h 量级，可忽略），换来「3 张凑一组」。
+                    if bought_this_tick.get(cid, 0) >= 1:
+                        self.jit_blocked += 1
+                        continue
                     n_base += 1
             actions.append(Action(kind="buy", cid=cid, n=1,
                                  note=f"DP骨架买底料 {cid}"))
