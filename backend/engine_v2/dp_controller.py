@@ -289,7 +289,6 @@ class DPTickController:
     def _jit_due(self, ws, plan, box_stock, pending, window: int = 0,
                  active=None):
         """JIT 需求（due）：即将能炼的合成卡 → 其实例底卡喂料（同贪心口径）。
-
         根因（2026-10-25 紧箱 60 格·各2轮 DP done=0/4 根治）：pass 1 旧版
         reactive 把整套 buy op 按箱预算一次性买齐 → 囤货（4★ 峰值 201/218、
         94% 是底卡；紧箱 60 格箱被喂料囤到 60/60）→ 买卡闸 box_free-reserve
@@ -314,6 +313,13 @@ class DPTickController:
         白等 1439 tick（旧版 bulk 计划前置终局 buy 才掩盖，轮转买后暴露）。
         """
         due: Dict[int, int] = {}
+        # protect = 窗口内可炼 op 的喂料毛需求（**不看是否底卡**）。腾箱用它当
+        # 「必须留在换卡箱」的门槛：窗口外的半成品（40/80/120 面中间物）可以挪
+        # 保险箱——素材在保险箱照样能投炉（payload 带 slottype），不影响精炼。
+        # ★ 旧版腾箱用「全部未发 op 的毛需求」，18 格下 8 条链的半成品全在
+        # 保护名单里 → 一张也挪不动 → 箱 18/18 永久、买卡全失败、4 炉全空
+        # （4★ 实测 34h 起 refined=82 卡到 45h）。
+        protect: Dict[int, int] = {}
         ops = plan["ops"]
         issued = plan["issued"]
         base_cids = self._base_cids
@@ -331,6 +337,7 @@ class DPTickController:
                 break                   # 窗口外的前沿需求不进门禁（不拉齐囤货）
             n_ready += 1
             for f in feeders:
+                protect[f] = protect.get(f, 0) + 1
                 if f in base_cids:
                     due[f] = due.get(f, 0) + 1
         # ---- collect 缺口（不走窗口：只 1 张/套，天然有界）----
@@ -347,9 +354,11 @@ class DPTickController:
                 gap = 1 - box_stock.get(c, 0) - pending.get(c, 0)
                 if gap > 0:
                     due[c] = max(due.get(c, 0), gap)
-        return due
+                    protect[c] = max(protect.get(c, 0), gap)
+        return due, protect
 
-    def _box_compaction(self, ws, plan, due, actions, avail_slots):
+    def _box_compaction(self, ws, plan, due, actions, avail_slots,
+                        protect=None):
         """腾箱（BoxCompaction，同贪心 Step4 口径）：箱紧时卖多余 10 面底卡
         + 挪多余合成卡进保险箱，给 JIT 买卡 / 落箱腾位。
 
@@ -364,30 +373,28 @@ class DPTickController:
         ① 只卖 is_base 且 price==10 的底卡（铁律：高面值卡永不自动卖；
           10 面卡 sell_card 只换回面值等额金币，卖+买无损，绝不动 40 面
           素材与合成卡—— tid=709 底卡 57 面也不卖，保守）；
-        ② 保留 max(1, due) 张（JIT 前沿需求，不是总需求——否则箱满时
-          一张不敢卖，腾位形同虚设）；卖超的卡同步回减 plan["bought"]
-          （计划去重账），后续需求增长可经计划 op / 应急买重新拉起；
-        ③ 挪箱只挪「超出未发 op 喂料需求」的合成卡，目标箱要有空位
-          （预测 sim 的首空位规则，同步修 avail_slots 防悬空槽位）。
+        ② 保留量按 **JIT 窗口需求**（protect = 窗口内可炼 op 的喂料毛需求，
+          不是全部未发 op 的总需求）：否则 18 格箱里 8 条链的半成品全在保护
+          名单里 → 一张也挪不动 → 箱永久满、买不进 → 4 炉全空（4★ 实测）。
+          卖超的卡同步回减 plan["bought"]（计划去重账），后续需求增长可经
+          计划 op / 应急买重新拉起；
+        ③ 挪箱把「窗口外的合成卡」挪进保险箱，目标箱要有空位（预测 sim 的
+          首空位规则）。挪走后**必须把新槽位 `(dest, 1)` 补进 avail_slots**：
+          素材在保险箱照样能投炉（payload 带 slottype），不补就会让 pass 2
+          以为该卡没了 → 整条链饿死。
+        ★ 口径纠正（2026-10-26）：3 合 1 不是「3 张同类」，是配方指定的 3 张
+          （4★：40面 199←172+170+171；80面 197←198+172+169 混层混箱）。
+          旧注释的「同类/trio」说法是错的，protect 按 op 的 feeders 逐张累加
+          即可，不涉及同类假设。
         每次腾箱记 1 点 discrepancy（计划与现实偏差信号 → disc_over 重解）。
         """
         if not (ws.change_free <= 2 or ws.box_free <= 4):
             return 0
         n_sold = n_moved = 0
         n_free_change = 0        # 换卡箱净腾位：卖换卡箱的卡 + 挪箱
-        # 未发 refine op 的喂料毛需求（3 合 1 需要 3 张同类！）。
-        # ★ 卖卡必须按它兜底，不能只看 due（2026-10-26 实锤）：due 是「前沿
-        # 还差多少」的口径，重复张达到 due 就判「不欠」→ 旧规则 keep=max(1,due)
-        # 把 3 张同款卖到只剩 1 张 → trio 永远凑不齐 → 买回 2 张又在下个 tick
-        # 被卖 → 活锁。4★ 实测 refined 卡在 83/144、箱 18/18、炉全空（62~87h
-        # 零进展）。need 来自未发 op 的 feeders，正是「凑齐这一炉要几张」。
-        need: Dict[int, int] = {}
-        for j, op in enumerate(plan["ops"]):
-            if plan["issued"][j] or op["kind"] != "refine":
-                continue
-            for f in self._owner[op["cid"]].feeders(op["cid"]):
-                need[f] = need.get(f, 0) + 1
-        # ---- 1) 卖多余 10 面底卡（换卡箱 + 保险箱；保留 due / need）----
+        # 保留门槛：窗口内需求（protect），缺省退回空（= 只保 due）
+        keep_map: Dict[int, int] = dict(protect or {})
+        # ---- 1) 卖多余 10 面底卡（换卡箱 + 保险箱；保留 due / protect）----
         # total_of[cid] = 双箱合计张数；每卖 1 张递减， remainder>keep 才卖
         total_of: Dict[int, int] = {}
         for cid, _s, _st in ws.slots:
@@ -399,7 +406,7 @@ class DPTickController:
             m0 = self._owner.get(cid)
             if m0 is None or not m0.is_base(cid) or m0.price(cid) != 10:
                 continue                    # 只卖 10 面底卡（铁律）
-            keep = max(1, due.get(cid, 0), need.get(cid, 0))
+            keep = max(1, due.get(cid, 0), keep_map.get(cid, 0))
             if total_of.get(cid, 0) <= keep:
                 continue                    # 已降到保留量 → 不再卖
             actions.append(Action(kind="sell", cid=cid, slot=slot,
@@ -428,7 +435,7 @@ class DPTickController:
                 m0 = self._owner.get(cid)
                 if m0 is None or m0.is_base(cid):
                     continue                    # 底卡已在上面处理
-                keep = max(1, need.get(cid, 0))
+                keep = keep_map.get(cid, 0)      # 窗口内要用的才留，其余可挪
                 if change_of.get(cid, 0) <= keep:
                     continue
                 dest = next((s for s in range(1, ws.store_cur + 1)
@@ -441,6 +448,10 @@ class DPTickController:
                 lst = avail_slots.get(cid)
                 if lst and (slot, 0) in lst:
                     lst.remove((slot, 0))
+                # 挪到保险箱后槽位变了：素材在保险箱照样能投炉（payload 带
+                # slottype），必须把新槽位补回去，否则 pass 2 判该卡缺失 →
+                # 整条链饿死。
+                avail_slots.setdefault(cid, []).append((dest, 1))
                 store_used.add(dest)
                 store_free_local -= 1
                 change_of[cid] -= 1
@@ -656,9 +667,19 @@ class DPTickController:
         # 腾箱在箱紧时卖多余 10 面底卡 / 挪合成卡（_box_compaction），腾出
         # 的位当 tick 即可被 pass 1 买卡用上（sell/move 动作排在 buy 前，
         # executor 按序执行）。
-        due_window = 2 * (self.machines + (1 if self.steal_enabled else 0)) + 2
-        due = self._jit_due(ws, plan, box_stock, pending, due_window, active)
-        freed = self._box_compaction(ws, plan, due, actions, avail_slots)
+        base_window = 2 * (self.machines + (1 if self.steal_enabled else 0)) + 2
+        # ★ 窗口还要受**箱容**约束（2026-10-26，用户定调「不要囤卡，提前买齐就是囤卡」）：
+        # 一个可炼 op 平均吃 3 张喂料 → 窗口 W 等于让 3W 张毛需求同时在箱。
+        # 18 格换卡箱下 W=10 → 30 张 → 8 条 d=2 链全铺开，13 张半成品各 1 张
+        # 占满箱、每张只差 1~2 样，真缺的 4 张底卡买不进 → 4 炉全空（4★ 实测
+        # 34h 起 refined=82 冻结）。改成 change_cur//4（18→4）后只推 4 条链。
+        # 60/200 格箱仍是 min(10, 15/50) = 10 = 原行为，不影响旧场景。
+        cap_window = max(2, ws.change_cur // 4)
+        due_window = min(base_window, cap_window)
+        due, protect = self._jit_due(ws, plan, box_stock, pending,
+                                     due_window, active)
+        freed = self._box_compaction(ws, plan, due, actions, avail_slots,
+                                     protect)
 
         def take_slot(cid: int):
             lst = avail_slots.get(cid)
