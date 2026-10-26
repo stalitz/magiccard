@@ -923,11 +923,17 @@ class AutoRefine:
                 slot = c["slot"]
                 opu = c.get("opuin")
                 is_self = not (opu and str(opu) != str(self.s.uin))
-                if not is_self:
-                    # 好友炉上炼的卡（偷炉成功收回）：必须带好友 uin 走 steal 端点
-                    r = await self.s.get_steal_card(slot, str(opu))
-                else:
-                    r = await self.s.get_refined_card(slot)
+                r = await self._take_card(slot, opu, is_self)
+                if not r.get("ok") and self._is_box_full(r):
+                    # ★ 2026-10-26 真机死锁（用户报「买 10 面把卡箱占满、取不出 40 面」）：
+                    #   换卡箱满 → 收卡被拒（"您的卡片箱满了…"）→ **炉位不释放** →
+                    #   没有空炉炼箱里的 10 面 → 10 面烧不掉 → 箱永远满 → 永远取不出。
+                    #   真机实测连续几十个 tick 全是这三条失败，引擎一次都没腾箱。
+                    #   收卡是最高优先级（不取卡整条流水线停摆），必须立刻腾位重试。
+                    freed = await self._make_room(
+                        self.queue[0] if self.queue else 0, 2, st, steps)
+                    if freed > 0:
+                        r = await self._take_card(slot, opu, is_self)
                 nm = card_name(c["id"])
                 steps.append({"action": "收卡", "ok": r.get("ok"), "detail": f"{nm}: {r.get('message')}"})
                 self._log("收卡", bool(r.get("ok")), f"{nm} {r.get('message')}")
@@ -1559,6 +1565,40 @@ class AutoRefine:
                 self.steal_blocked = ("没有待提交的炉次（都已在炉上）" if not rest
                                       else "候选素材没备齐（底卡买不到/换卡箱没格，见日志）")
 
+    async def _take_card(self, slot: int, opu, is_self: bool) -> dict:
+        """从炉位取回一张已炼成的卡（自己炉 / 好友偷炉走不同端点）。"""
+        if not is_self:
+            # 好友炉上炼的卡（偷炉成功收回）：必须带好友 uin 走 steal 端点
+            return await self.s.get_steal_card(slot, str(opu))
+        return await self.s.get_refined_card(slot)
+
+    @staticmethod
+    def _is_box_full(r: dict) -> bool:
+        """收卡/取卡被拒的原因是不是「换卡箱空位不够」。
+
+        真机两种原文：
+          · `您的卡片箱满了，不能取出炼制成功的卡片，请整理卡片箱后再试。`（0 空位）
+          · `亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！`（只剩 1 空位）
+        ★ 第二种最坑：只差 1 格时提示语完全不含「满」字，旧判定漏掉 → 引擎误以为
+          是别的原因（限流/风控），一直原地重试而不腾位（真机实测连续几十 tick）。
+        这类失败**不是限流**，腾够 2 格后重试就能成功。
+        """
+        m = str((r or {}).get("message") or "")
+        return ("箱满" in m) or ("满了" in m) or ("空间不够" in m) \
+            or ("空出两个" in m) or ("两个卡箱" in m)
+
+    @staticmethod
+    def _take_reserve(st: dict) -> int:
+        """给「已炼成待收」的炉预留换卡箱空位（真机取卡要 2 格空位）。
+
+        ★ 只在本 tick 真有卡等收时预留。无条件预留会把买卡流水线掐死 ——
+          历史上 `reserve = soon * 2` 让 3★/4★ 直接 750h 卡死（记忆里的老坑）。
+        """
+        for c in st.get("stove") or []:
+            if int(c.get("id") or 0) > 0 and int(c.get("flag") or 0) == 2:
+                return 2
+        return 0
+
     @staticmethod
     def _free_change(st: dict) -> int:
         """换卡箱剩余可放格数 = 已开通格 cur - 已放卡数 used（max-cur 是未开通格）。"""
@@ -1617,19 +1657,47 @@ class AutoRefine:
             return int(c[3] or 0) if c else 0
 
         def candidates(box_key):
+            # ★ 2026-10-26 死锁修复（用户报「买 10 面把卡箱占满、取不出 40 面」）：
+            #   旧版 `if cid in keep_ids: continue` 把**套内 10 面底卡也保护了**，
+            #   而真机满箱形态恰恰是「9 张藏品 + 9 张套内卡」，藏品移不进保险箱
+            #   （已开通 168 格全满）→ 候选集为空 → _make_room 恒返回 0 →
+            #   收卡永远「卡片箱满了」→ 炉位不释放 → 箱里的 10 面也烧不掉 → 永久死锁。
+            #   事实依据：10 面卡**卖 = 面值金币、买回同价（无损）**，且用户 2026-10-03
+            #   已定调「10 面值卡用多少现场买多少，留着纯占格位，卖掉既腾格又回金币」。
+            #   故：套内 10 面卡可以卖，只是**优先卖同 cid 的重复张**（>1），
+            #   单张的垫到最后 —— 3 合 1 配方要的是 3 张**不同**卡，同 cid 留 1 张就够。
+            have: Counter = Counter()
+            for c in snap.get(box_key) or []:
+                cid = int(c.get("id") or 0)
+                if cid > 0:
+                    have[cid] += 1
             out = []
             for c in snap.get(box_key) or []:
                 cid = int(c.get("id") or 0)
-                if cid <= 0 or cid in keep_ids:
-                    continue                        # 在炼套卡的卡：保护，不动
-                out.append((cid, _face_of(cid), int(c.get("slot") or 0)))
+                if cid <= 0:
+                    continue
+                face = _face_of(cid)
+                rank = 0
+                if cid in keep_ids:
+                    # ★ 套内卡：只有 **10 面底卡**可腾（40 面及以上是一炉炼出来的成品，
+                    #   卖掉就白烧 3 张底卡 + 1 小时炉时）。旧版用 `face > CHANGE_FACE`
+                    #   （40）判，40 面成品正好落在「可卖」一侧 → 会误卖在炼配方要用的
+                    #   40 面卡，是隐患，这里收紧到 > 10。
+                    if face > 10:
+                        continue
+                    rank = 1 if have[cid] > 1 else 2   # 重复底卡先卖，单张垫后
+                out.append((cid, face, int(c.get("slot") or 0), rank))
             # 排序：① 高面值杂卡最先（移保险箱，无损、且大面额本就用不上，用户定调
-            #   「优先移保险箱」）；② 10 面值底卡垫后（要腾更多格时才卖掉它们）。
-            out.sort(key=lambda x: (0 if x[1] > CHANGE_FACE else 1, -x[1]))
+            #   「优先移保险箱」）；② 套内重复的 10 面底卡；③ 套内单张 10 面底卡。
+            out.sort(key=lambda x: (x[3], -x[1]))
             return out
 
         cands = candidates("change")
+        n_cand0 = len(cands)
         if not cands:
+            self._log("腾位", False,
+                      "换卡箱满且无卡可腾：高面值杂卡移不进保险箱（保险箱已开通格全满）、"
+                      "箱内也没有多余的 10 面底卡")
             return 0
         # ★ 用 while + 每次重取候选：卖卡/移卡后**其他卡的 slot 会重排**，
         #   继续用旧 slot 会 -311（卡牌有变化）；且失败的那张要跳过、试下一张，
@@ -1642,13 +1710,15 @@ class AutoRefine:
             cands = [c for c in candidates("change") if (c[0], c[2]) not in tried]
             if not cands:
                 break
-            cid, face, slot = cands[0]
+            cid, face, slot, _rank = cands[0]
             tried.add((cid, slot))
             nm = card_name(cid)
             done = False
-            if face <= CHANGE_FACE:
+            if face <= 10:
                 # ★ 10 面值底卡：用户定调「未下架的 10 面值卡都买掉」——它们是炼卡
                 #   素材、用多少现场买多少，留着纯占格位，卖掉既腾格又回金币。
+                #   ★ 2026-10-26 用户重申：「不能用 10 面的卡占位，要卖掉再取卡向上合」。
+                #   卖价=面值、买回同价 → 无损；40 面以上是炼出来的成品，绝不卖。
                 sr = await self.s.sell_card(slot, cid, box_type=1)
                 if sr.get("ok"):
                     self._log("腾位", True, f"{nm}（面{face}底卡）卖掉腾位（炼卡素材，用多少买多少）")
@@ -1675,15 +1745,20 @@ class AutoRefine:
             if done:
                 freed += 1
                 tried.clear()      # 状态变了，重新看全部候选
-            else:
-                snap = await snapshot()      # 换卡箱状态可能变（slot 重排）
+                snap = await snapshot()      # 只有真腾出格位才需要重扫（slot 会重排）
                 if snap is None:
+                    self._log("腾位", False, "重读卡箱失败（mainpage code≠0），中止本轮腾位")
                     break
+            # ★ 失败不重读：卖/移失败根本没改状态，旧版这里每失败一张就重扫一次
+            #   —— 真机连打 9 次 mainpage 直接被限流 → snap=None → 循环提前 break，
+            #   结果「9 张藏品移不进保险箱」之后**再也轮不到卖 10 面卡**（实测只尝试 8 次）。
+            #   直接试下一张即可。
         if freed < need:
             # 腾不出位：如实说明原因（保险箱满 + 高面值卡不自动卖 → 只能靠清保险箱）
-            self._log("腾位", False,
-                      f"腾位不足：还需 {need - freed} 格。保险箱已满、高面值杂卡不自动卖，"
-                      f"只能腾 10 面值底卡 —— 请手动清理保险箱或换卡箱")
+            self._log("腾位不足", False,
+                      f"还需 {need - freed} 格｜候选 {n_cand0} 张 / 尝试 {guard} 次 / "
+                      f"腾出 {freed} 格。保险箱已满、高面值卡不自动卖，"
+                      f"只能卖 10 面值底卡 —— 请手动清理保险箱或换卡箱")
         return freed
 
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
@@ -1719,6 +1794,10 @@ class AutoRefine:
             return None
         if need_buy:
             free_box = self._free_change(st)
+            # ★ 2026-10-26：给「已炼成待收」的炉预留 2 格取卡空位（真机取卡要 2 格）。
+            #   不留 → 买卡把换卡箱塞满 → 收卡永远被拒 → 炉位不释放 →
+            #   箱里的 10 面烧不掉 → 箱永远满（真机死锁，用户当场报）。
+            free_box = max(0, free_box - self._take_reserve(st))
             # ★ 2026-10-03 死锁修复：换卡箱满 → 先腾位（优先移保险箱）再买。
             #   真机复现：18/18 满时底卡买不进来，而唯一腾格的是占炉 4h 的 150，
             #   于是「暂缓」连转 4 小时不自愈（150 不烧素材就不腾格）。
@@ -1730,6 +1809,7 @@ class AutoRefine:
                         return None
                     st, stock, slots, pending = rd
                     free_box = self._free_change(st)
+                    free_box = max(0, free_box - self._take_reserve(st))
             if need_buy > free_box or bought + need_buy > MAX_BUY_PER_TICK:
                 # 不是故障，是等前面那几炉把素材烧掉腾格位 —— 不计入 errors
                 self._log("暂缓", True,

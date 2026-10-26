@@ -709,6 +709,13 @@ class DPTickController:
         # 箱有位；长时炉的产物远未到收卡时刻，提前几十 tick 占位纯属过虑。
         soon = sum(1 for f in ws.furnaces
                    if 0 < f.endtime - ws.now <= TICK_SECS + EPS)
+        # ★ 2026-10-26 真机死锁（用户报「买 10 面把卡箱占满、取不出 40 面」）：
+        #   `soon` 只数「**还没**到点」的炉；已到点（endtime <= now）却因箱满取不出的
+        #   卡完全不计 → reserve=0 → 买卡预算拉满 → 箱越买越满 → 收卡永远失败 →
+        #   炉位不释放 → 箱里的 10 面烧不掉 → 箱永远满。真机连续几十 tick 全是
+        #   「您的卡片箱满了」而引擎一次都没腾箱。
+        #   有卡已到点待收时，必须留 2 格取卡位（真机取卡要 2 格空位）。
+        overdue = sum(1 for f in ws.furnaces if f.endtime - ws.now <= EPS)
         # 落箱预留：**只按「到点临近度」留**，不再「有炉就留 2 格」。
         # ★★ 2026-10-26 真机 1★ 再次实测（第二次踩同一个坑）：
         #   4 炉在炼、剩余 656~2275s（远未到点），change_free=2，
@@ -730,6 +737,10 @@ class DPTickController:
         near = sum(1 for f in ws.furnaces
                    if TICK_SECS + EPS < f.endtime - ws.now <= 2 * TICK_SECS)
         reserve = soon + (1 if near else 0)
+        if overdue:
+            # 只在「真有卡到点待收」时才抬到 2 —— 与历史 `reserve=soon*2`（让 3★/4★
+            # 750h 卡死）不同：那时是无条件按炉数预留，这里只认「已经该收却收不到」。
+            reserve = max(reserve, 2)
         # ★ 买卡闸必须用**换卡箱**空位（2026-10-26，仿真/生产统一后实测发现）：
         # 买卡只能落到换卡箱（硬顶 18 格），保险箱不能收买卡。旧版用双箱合计
         # （ws.box_free = change_free + store_free）→ 保险箱还剩 199 格时仍判「有位」，

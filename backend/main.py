@@ -441,9 +441,12 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
                                - st["cap"].get(k, {}).get("used", 0))
                         for k in ("change", "store")}
     if free["change"] < need:
+        why = [f"{e.get('action')}：{str(e.get('detail'))[:90]}"
+               for e in (getattr(eng, "log", None) or [])[-14:]]
         return {"ok": False, "plan": plan, "plans": plans, "free": free, "need": need,
                 "message": (f"换卡箱 0 空位，连 1 张底卡都买不进来："
-                            f"请先从换卡箱挪走一些卡（保险箱还剩 {free['store']} 格）")}
+                            f"请先从换卡箱挪走一些卡（保险箱还剩 {free['store']} 格）"
+                            + (f"｜腾位记录：{' / '.join(why)}" if why else ""))}
     if _auto is not None and _auto.running:
         _auto.stop()
     _auto = eng
