@@ -16,6 +16,10 @@ class Action:
     tid: Optional[int] = None       # collect 用的套 id
     target: Optional[int] = None    # refine 的产出卡 id
     feeders: List[Tuple[int, int]] = field(default_factory=list)  # [(slot, slottype), ...]
+    # 喂料的卡 id（与 feeders 同序）。非空时执行层**按 cid 现查真实槽位**，
+    # 而不是反查 feeders 里的 slot —— 本 tick 刚买的卡还没有 slot（规划期用
+    # 虚拟槽占位），必须买完重读状态才知道它在哪一格。
+    feed_cids: List[int] = field(default_factory=list)
     cid: Optional[int] = None       # buy / move / sell 的卡 id
     n: int = 0                      # buy 张数
     steal: bool = False             # refine 是否走偷炉

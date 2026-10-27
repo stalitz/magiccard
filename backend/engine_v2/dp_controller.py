@@ -137,6 +137,20 @@ class DPTickController:
         #   None=默认（按箱余量自适应）、True=强制保底一波、False=强制不保底
         _fl = os.environ.get("MC_PREBUY_FLOOR")
         self.prebuy_floor = None if _fl is None else (_fl == "1")
+        # ★★ 2026-10-27 用户定调（第二次）：「买卡不是瓶颈，所以买卡不应该单独占一个
+        #   tick，也不应该算到单独的解」。
+        #   现状确实是错的：pass 2 用 `f in bought_this_tick → blocked` 把本 tick 买的
+        #   料全部排除在喂料之外，等于「买卡占一个 tick」。真机 `card_buy` code=0 即落
+        #   换卡箱、仿真 `EP_BUY` 即 `_add_to_box` —— 两边都没有物理延迟。
+        #   实测（3★ 空炉起步）：tick1 买 143~148 → 全被排他；tick2 又买 144~148（143
+        #   因 planned_buy 用完跳过）→ 只剩 143 可用，单张凑不成配方；到 tick3 才投第
+        #   1 炉。箱空 18→12→7 花掉 11 张料只开 1 炉，就是这条自造回环。
+        #   开关打开 = 本 tick 买的卡用**虚拟槽**进 avail_slots，买完即投。
+        self.buy_sametick = os.environ.get("MC_BUY_SAMETICK") == "1"
+        # 底卡在 solver 里的耗时（45s = 1 tick）改为 0：物理上买卡即时落箱。
+        # 必须与 buy_sametick 同时开——只解锁执行层会让执行比计划早 1 tick（乱序），
+        # 只改 dur 则执行层仍被 `bought_this_tick` 挡住（两者都白改）。
+        self.base_dur0 = os.environ.get("MC_BASE_DUR0") == "1"
         self._memo: dict = {}
         self._skel_sig: tuple = None
         self._skel: dict = None
@@ -558,6 +572,11 @@ class DPTickController:
         nL = len(live)
         durL = [sk["dur"][idx[c]] for c in live]
         mclassL = [sk["mclass"][idx[c]] for c in live]
+        # ★ 底卡「买卡耗时」= 45s 是建模虚构（真机 code=0 即落箱、仿真即时入箱）。
+        #   打开后 solver 认为买卡零耗时 → buy 的 start 与消费者同 tick，与执行层
+        #   「买完即投」一致；关闭时 solver 以为买卡要 1 tick（旧口径）。
+        if self.base_dur0:
+            durL = [0.0 if 1 in mclassL[i] else d for i, d in enumerate(durL)]
         matsL = []
         for c in live:
             mc = {}
@@ -931,6 +950,15 @@ class DPTickController:
             n_buy += 1
 
         # ============ pass 2: 精炼时序门 ============
+        # ★ 本 tick 买入的料：给一个负号虚拟槽塞进 avail_slots，让 pass 2 能把它当
+        #   喂料排上（执行层买完重读状态、按 cid 现查真实槽位）。虚拟槽不参与
+        #   `_box_compaction`（那一步已在上面跑完）。
+        if self.buy_sametick:
+            _virt = 0
+            for _c, _n in bought_this_tick.items():
+                for _ in range(_n):
+                    _virt += 1
+                    avail_slots.setdefault(_c, []).append((-_virt, 0))
         i = plan["cursor"]
         scanned = 0
         first_refine = True             # 头动作（首个精炼）才允许提前发
@@ -1009,10 +1037,13 @@ class DPTickController:
             miss_buy: List[int] = []        # 缺且可紧急买的底卡
             blocked = False
             for f in feeders:
-                if f in bought_this_tick or f in protected or not has_slot(f):
+                # 开关关：本 tick 买的料一律不能当喂料（旧行为）；开关开：已给虚拟槽，
+                # 只要槽没被 protected/taken 就能投（买完即投）。
+                _excl = (f in bought_this_tick) and not self.buy_sametick
+                if _excl or f in protected or not has_slot(f):
                     blocked = True
                     if (self._owner[f].is_base(f) and pending.get(f, 0) < 1
-                            and f not in bought_this_tick and f not in protected):
+                            and not _excl and f not in protected):
                         miss_buy.append(f)
             if not blocked:
                 picks = []
@@ -1036,9 +1067,13 @@ class DPTickController:
                 note = f"DP精炼 {cid}{'（偷炉）' if steal else ''}"
                 if early:
                     note += "（提前发）"
+                # 含虚拟槽（本 tick 刚买）→ 执行层必须按 cid 现查真实槽位
+                _fc = ([_c for (_c, _s, _st) in picks]
+                       if any(_s < 0 for (_c, _s, _st) in picks) else [])
                 actions.append(Action(
                     kind="refine", target=cid,
                     feeders=[(s, st) for (_c, s, st) in picks],
+                    feed_cids=_fc,
                     steal=steal,
                     note=note))
                 issued[i] = True

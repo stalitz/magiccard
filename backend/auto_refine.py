@@ -1285,6 +1285,9 @@ class AutoRefine:
         for cid, lst in slots.items():
             for sl in lst:
                 slot2cid[(sl[0], sl[1])] = cid
+        # 本 tick 买过卡 → slots 快照过期（买的卡还没有 slot 记录）。带 feed_cids 的
+        # refine 要按 cid 现查真实槽位，故买完必须重读一次（每 tick 至多 1 次）。
+        slots_dirty = False
         for a in actions:
             if a.kind == "collect":
                 continue              # 上交已在 tick 第 3 步做过（DP 看到的是上交后状态）
@@ -1326,6 +1329,7 @@ class AutoRefine:
                     if ok:
                         self.stats["bought"] += 1
                         stock[a.cid] += 1
+                        slots_dirty = True      # 新卡还没有 slot 记录，refine 前要重读
                         st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                     msg = r.get("message") or err_msg(r.get("code"))
                     self._log("买卡", ok, f"{card_name(a.cid)}（DP预买） {msg}")
@@ -1347,14 +1351,39 @@ class AutoRefine:
                        "targettype": 1, "themeid": comp[0], "code": ""}
             used_feeders: list[tuple] = []
             ok_slots = True
-            for i, (sl, stt) in enumerate(a.feeders, 1):
-                cid_f = slot2cid.get((sl, stt))
-                if cid_f is None or not slots.get(cid_f):
-                    ok_slots = False
-                    break
-                payload[f"slot{i}"] = sl
-                payload[f"slottype{i}"] = stt
-                used_feeders.append((cid_f, sl, stt))
+            if a.feed_cids:
+                # 含本 tick 刚买的料（规划期是虚拟槽）→ 先重读拿到真实槽位
+                if slots_dirty:
+                    rd = await self._read_state()
+                    if rd is not None:
+                        st, stock, slots, pending = rd
+                        slot2cid = {(sl[0], sl[1]): c
+                                    for c, lst in slots.items() for sl in lst}
+                    slots_dirty = False
+                _used: set = set()
+                for i, cid_f in enumerate(a.feed_cids, 1):
+                    cand = [sl for sl in slots.get(cid_f, [])
+                            if (sl[0], sl[1]) not in _used]
+                    if not cand:
+                        ok_slots = False
+                        self._log("DP炼卡", False,
+                                  f"{plan.cname(target)}：喂料 {card_name(cid_f)} "
+                                  f"买后未落箱，跳过")
+                        break
+                    sl = cand[0]
+                    _used.add((sl[0], sl[1]))
+                    payload[f"slot{i}"] = sl[0]
+                    payload[f"slottype{i}"] = sl[1]
+                    used_feeders.append((cid_f, sl[0], sl[1]))
+            else:
+                for i, (sl, stt) in enumerate(a.feeders, 1):
+                    cid_f = slot2cid.get((sl, stt))
+                    if cid_f is None or not slots.get(cid_f):
+                        ok_slots = False
+                        break
+                    payload[f"slot{i}"] = sl
+                    payload[f"slottype{i}"] = stt
+                    used_feeders.append((cid_f, sl, stt))
             if not ok_slots:
                 self._log("DP炼卡", False,
                           f"{plan.cname(target)}：喂料槽已不在箱内（状态变了），跳过")
