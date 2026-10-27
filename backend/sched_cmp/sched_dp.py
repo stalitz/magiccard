@@ -975,7 +975,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                             break
                         need[b] -= 1
                         if BASEFREE:
-                            _sl[b] += 1          # 即时落箱（无 LAG、不占槽）
+                            # ★★ 2026-10-27 修正（多套实测）：买卡**不占 shop 槽**
+                            #   （不排队、不扣 idle[1]，这是「买卡不是瓶颈」的本义），
+                            #   但仍要有 **1 个时间单位到货延迟** —— 旧版直接
+                            #   `_sl[b] += 1` 当场入箱 + `_ready_items` 立刻开工，
+                            #   等于假设「买完同一决策点就能投炉」。现实里引擎买卡
+                            #   后要重读卡箱、下一 tick 才投得出去（同 tick 买投已
+                            #   实测三档全负）。
+                            #   骨架因此比现实乐观 45s/次，多套场景买卡上百次 → 漂移
+                            #   累积 1~3h，执行层追不上 → 空转（85 两轮/178 三轮/
+                            #   290 两轮实测均慢 1~3h）。
+                            running_rel = running_rel + ((b, dur[b], 1),)
                         else:
                             running_rel = running_rel + ((b, dur[b], 1),)
                             idle[1] -= 1
@@ -993,10 +1003,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     # 素材晚到 → 空转+重解级联（DP 输贪心的隐藏根因之一）。
                     cur_path = cur_path + ((t, tuple(bv)),)
                     own_ops.append((t_rel, tuple(bv)))
-                if BASEFREE:
-                    # 料已在箱 → 同一决策点就能开工（旧版要等下一迭代 = 白丢一拍）
-                    stock = tuple(_sl)
-                    items = _ready_items(stock, need)
+                # ★ 2026-10-27：BASEFREE 不再「当场入箱」——买卡作为 dur=LAG 的
+                #   class-1 任务在 running_rel 里滚动，到点才回 stock（物理正确：
+                #   引擎买完要下一 tick 重读卡箱才投得出去）。故此处不做
+                #   `_sl`/`_ready_items` 的即时结算。
                 need = tuple(need)
 
             # ---- 分支：可行开工向量（按机器类限容量）----

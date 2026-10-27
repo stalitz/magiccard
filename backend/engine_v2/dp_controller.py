@@ -956,14 +956,29 @@ class DPTickController:
             if not _need and buy0_map:
                 # ★★ 2026-10-27 修（`tests/_probe_bf_idle.py` 实锤）：ops 里没有
                 #   refine（只剩「买底卡」这件事）时，`jit_need` 从 refine op 反推
-                #   出来就是空的 → 一张不买 → 空主炉干等（85 三套实测：t=1201min
-                #   （20.0h）起 ops=0 且 0 动作，连续 2.0h 到 22.0h 才恢复）。
-                #   兜底：按 `buy0_map`（`_union_need0` 算出的底卡净需求）买。
-                #   门栏遵用户铁律「买底卡的时机在除底卡外的所有卡都在卡箱里」：
-                #   只要还有非底卡在炉（pending>0），就说明它还没进箱 → 不买。
-                if not any(pending.values()):
-                    _need = {c: n for c, n in buy0_map.items()
-                             if n > 0 and c in self._base_cids}
+                #   出来就是空的 → 一张不买 → 空主炉干等（85 三套实测：t=20.0h
+                #   起 ops=0 且 0 动作，连续 2.0h 才恢复）。
+                # ★★ 2026-10-27 再修（`_probe_multi_bf` 矩阵实锤）：旧门栏用
+                #   「炉全空（`not any(pending)`）」当「可以买整套收藏底卡」的判据
+                #   —— 炉空只说明没料，不代表卡都齐了。结果兜底把 `buy0_map`
+                #   （整套收藏底卡，10+ 张）按 `base_quota` 一波波买进箱 → 囤卡
+                #   （85 两轮：买 104→128 张、炼 25→30、15.07→21.05h，慢 40%）。
+                #   改按用户铁律：**非底卡全在箱（只差底卡就能上交）** 才买那套
+                #   缺的底卡，各买 1 张 —— 与 `_album_prebuy` 同判据、同粒度。
+                _lack: Dict[int, int] = {}
+                for t in (active or ()):
+                    m = self.models[t]
+                    if not all(box_stock.get(c, 0) >= 1
+                               for c in m.ids if not m.is_base(c)):
+                        continue
+                    for c in m.ids:
+                        if not m.is_base(c):
+                            continue
+                        if (box_stock.get(c, 0) + pending.get(c, 0)
+                                + bought_this_tick.get(c, 0)) < 1:
+                            _lack[c] = _lack.get(c, 0) + 1
+                if _lack:
+                    _need = _lack
                     self.buy_fallback += 1
             for cid in sorted(_need, key=lambda c: (-_need[c], c)):
                 if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
