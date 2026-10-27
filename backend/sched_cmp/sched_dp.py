@@ -234,6 +234,11 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
   box_cap = inst.get("box_cap")
   if box_cap is None:
       box_cap = INF
+  # ★★ 2026-10-27 用户定调：「10 面额底卡可以认为本身就存在，因为可以随时买、
+  #   也不用花 tick」。真机 `card_buy` code=0 即落换卡箱、仿真 `EP_BUY` 即
+  #   `_add_to_box` —— 没有任何物理延迟。打开后买卡**不占 shop 时间槽**、
+  #   当场进 stock（同一 t 的精炼就能用），只受箱容约束。
+  buy_free = bool(inst.get("buy_free"))
   stock = list(init_stock) if init_stock is not None else [0] * n
   need = list(inst["need0"])
   run_norm = _norm_running(init_running, n)
@@ -309,8 +314,13 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
           if not free_s or box_used + len(running) + 1 > box_cap + EPS:
             break
           m = free_s.pop(0)
-          land_t = t + dur[b]
-          buy_run.append((land_t, b))
+          if buy_free:
+              # 即时落箱：同一 t 的精炼段立刻能用（不写 buy_run、槽位立刻空出）
+              land_t = t
+              stock[b] += 1
+          else:
+              land_t = t + dur[b]
+              buy_run.append((land_t, b))
           mfree[1][m] = land_t
           out.append((b, t))
           need[b] -= 1
@@ -379,8 +389,12 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
           if 1 not in _cls_of(mclass, b) or need[b] <= stock[b] or not fs2:
             continue
           m = fs2.pop()
-          buy_run.append((t + dur[b], b))
-          mfree[1][m] = t + dur[b]
+          if buy_free:
+              stock[b] += 1
+              mfree[1][m] = t
+          else:
+              buy_run.append((t + dur[b], b))
+              mfree[1][m] = t + dur[b]
           out.append((b, t))
           need[b] -= 1
           forced = True
@@ -663,12 +677,25 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # （更好的静态序让头动作更少被卡 → 重解 5→2 次 → 少掉执行层自适应修正），
     # 故默认关闭，由 dp_controller 按 MC_TB=1 显式注入。
     ub_sched = _ub_schedule(inst, init_stock, init_running, init_machine_free)
-    ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
+    _buyfree = bool(inst.get("buy_free"))
+    if _buyfree:
+        # 底卡不耗时 → 它的「完成时刻」不构成 makespan（否则 UB 白多 45s 尾巴）
+        ub = max((s if 1 in _cls_of(mclass, i) else s + dur[i]
+                  for i, s in ub_sched), default=0.0)
+    else:
+        ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
     best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None, "capped": 0}
     t0 = _t.perf_counter()
     memo = memo if (use_memo and memo is not None) else {}
+    # ★ buy_free 下 dfs 仍按「买卡要 45s」的口径搜索，与 UB 的新口径不一致 →
+    #   best=min(UB, dfs) 会取到旧口径的解，执行层按新口径跑就错配。
+    #   ub_only 直接交 UB 的解（仅供判定口径一致性，正常不开）。
+    if _buyfree and inst.get("ub_only"):
+        stats["time"] = 0.0
+        stats["ub_only"] = True
+        return ub, list(ub_sched), stats
     # 向量启发式权重 = 向上 cp（上面已算并注入 inst["ucp"]）。
     # 骨架 inst["cp"] 是**向下**口径（dur + 喂料链），所有叶子打平（4★ 实测全
     # = 7245）→ LDS 截断（max_vecs=96）按权重截向量时关键链向量与非关键叶向量

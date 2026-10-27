@@ -151,6 +151,12 @@ class DPTickController:
         # 必须与 buy_sametick 同时开——只解锁执行层会让执行比计划早 1 tick（乱序），
         # 只改 dur 则执行层仍被 `bought_this_tick` 挡住（两者都白改）。
         self.base_dur0 = os.environ.get("MC_BASE_DUR0") == "1"
+        # ★★ 2026-10-27 用户定调：「10 面额底卡可以认为本身就存在，因为可以随时买、
+        #   也不用花 tick」。把买卡从**解**里拿掉：solver 认为底卡即时可得（只受箱容），
+        #   买卡不再占 shop 时间槽、也不再是独立排期节点。
+        self.buy_free = os.environ.get("MC_BUY_FREE") == "1"
+        # 仅供口径一致性判定：buy_free 时跳过 dfs、直接交 UB 解（dfs 仍是旧口径）
+        self.ub_only = os.environ.get("MC_UB_ONLY") == "1"
         self._memo: dict = {}
         self._skel_sig: tuple = None
         self._skel: dict = None
@@ -606,6 +612,10 @@ class DPTickController:
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
                 "cp": cpL, "init_stock": init_stockL,
                 "steal_cap": 1 if self.steal_enabled else 0}
+        if self.buy_free:
+            inst["buy_free"] = True
+            if self.ub_only:
+                inst["ub_only"] = True
         if not self.tb_on:
             inst["tb"] = None           # 显式关闭（对照实验用）
         else:
@@ -691,6 +701,9 @@ class DPTickController:
             st_tick = (int(s / tick + (1 - EPS)) * tick) if s > EPS else 0.0
             c = live[i]
             if 1 in mclassL[i]:
+                if self.buy_free:
+                    # 底卡不进解：不生成 buy op（执行层按 jit_need 即时补料）
+                    continue
                 ops.append({"kind": "buy", "cid": c, "start": st_tick})
                 planned_buy[c] += 1
             else:
@@ -908,7 +921,29 @@ class DPTickController:
             got += 1
             if got >= n_wave:
                 break
+        # ★★ 2026-10-27 buy_free（用户定调「买卡不该算到单独的解」）：solver 里
+        #   底卡即时可得，ops 里**没有** buy op → 这里直接按 jit_need（头 n_wave 炉
+        #   的配方缺口）即时补料，买多少用多少。base_quota 仍是「投得出去的量」的
+        #   上限（炉满 → 只保一波），箱空位仍是硬约束。
+        if self.buy_free:
+            for cid in sorted(jit_need, key=lambda c: (-jit_need[c], c)):
+                if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
+                    break
+                have = (box_stock.get(cid, 0) + pending.get(cid, 0)
+                        + bought_this_tick.get(cid, 0))
+                want = jit_need[cid] - have
+                while (want > 0 and n_buy < buy_cap and box_free_local > 0
+                       and n_base < base_quota):
+                    actions.append(Action(kind="buy", cid=cid, n=1,
+                                         note=f"DP即时买底料 {cid}"))
+                    bought_this_tick[cid] += 1
+                    box_free_local -= 1
+                    n_base += 1
+                    n_buy += 1
+                    want -= 1
         for i, op in enumerate(ops):
+            if self.buy_free:
+                break                   # 买卡已由 jit_need 通道处理（ops 里无 buy）
             if n_buy >= buy_cap or box_free_local <= 0:
                 break                   # 速率闸 / 箱闸（紧急买也进不来）
             if issued[i] or op["kind"] != "buy":
