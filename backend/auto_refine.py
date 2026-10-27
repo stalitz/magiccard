@@ -1090,6 +1090,15 @@ class AutoRefine:
         if self.buy:
             for tid in list(self.queue):
                 plan = self.plans[tid]
+                # ★ 2026-10-27 用户定调「提前买齐就是一种囤卡」（真机实测）：
+                #   本套还有卡在炉里没出时，补集卡册的底卡**一律不买**。
+                #   旧行为是「成品卡全在箱或在炉」就算「只差底卡」→ 立刻把 5 张底卡
+                #   买进换卡箱，于是顶层那 4h 炉时里，这 5 张 10 面白占 5 格（换卡箱
+                #   硬顶 18，其中 9 格还是用户藏品卡）；随后取卡要 2 个空位取不出、
+                #   买料又撞「换卡箱满了」，一整轮卡死。等本套最后一张出炉、pending
+                #   归零再补，买齐到上交只隔几秒，格位占用从小时级降到秒级。
+                if any(pending.get(c, 0) > 0 for c in plan.ids):
+                    continue
                 miss_comp = [c for c in plan.ids if c in plan.comp
                              and stock.get(c, 0) + pending.get(c, 0) < 1]
                 miss_base = [c for c in plan.ids if c not in plan.comp and stock.get(c, 0) < 1]
