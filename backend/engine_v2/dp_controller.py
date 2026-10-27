@@ -155,6 +155,17 @@ class DPTickController:
         #   也不用花 tick」。把买卡从**解**里拿掉：solver 认为底卡即时可得（只受箱容），
         #   买卡不再占 shop 时间槽、也不再是独立排期节点。
         self.buy_free = os.environ.get("MC_BUY_FREE") == "1"
+        # ★ 2026-10-27（多套退化定位，`tests/_probe_multi_bf.py`）：buy_free 把
+        #   buy op 一起删掉是**过度**的，而且会造出真 bug。op 有两重身份：
+        #   ① solver 的排期节点（该删：物理不存在）；② 执行层的「买卡需求清单」
+        #   （不能删）。删掉后实测（tid85 三套）：非底卡需求归零时 `ops` 为空 →
+        #   pass 1 的 `jit_need` 也从空 ops 算出空 → 有炉位却一张不买 → 空转；
+        #   且 `exhausted`（0>=0）每 tick 触发一次空解，803 次空算：
+        #     删 op 28.09h 炼42 买167 炉占 82.8%
+        #     留 op 20.07h 炼33 买155 炉占 97.1%   ← 与 AD 21.11h 同量级
+        #   故默认**保留** buy op（零耗时，只是需求清单）；`MC_BUY_KEEPOP=0`
+        #   可复现病态档。
+        self.buy_keepop = os.environ.get("MC_BUY_KEEPOP", "1") == "1"
         # 仅供口径一致性判定：buy_free 时跳过 dfs、直接交 UB 解（dfs 仍是旧口径）
         self.ub_only = os.environ.get("MC_UB_ONLY") == "1"
         self._memo: dict = {}
@@ -701,7 +712,7 @@ class DPTickController:
             st_tick = (int(s / tick + (1 - EPS)) * tick) if s > EPS else 0.0
             c = live[i]
             if 1 in mclassL[i]:
-                if self.buy_free:
+                if self.buy_free and not self.buy_keepop:
                     # 底卡不进解：不生成 buy op（执行层按 jit_need 即时补料）
                     continue
                 ops.append({"kind": "buy", "cid": c, "start": st_tick})
@@ -925,7 +936,7 @@ class DPTickController:
         #   底卡即时可得，ops 里**没有** buy op → 这里直接按 jit_need（头 n_wave 炉
         #   的配方缺口）即时补料，买多少用多少。base_quota 仍是「投得出去的量」的
         #   上限（炉满 → 只保一波），箱空位仍是硬约束。
-        if self.buy_free:
+        if self.buy_free and not self.buy_keepop:
             for cid in sorted(jit_need, key=lambda c: (-jit_need[c], c)):
                 if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
                     break
@@ -942,7 +953,7 @@ class DPTickController:
                     n_buy += 1
                     want -= 1
         for i, op in enumerate(ops):
-            if self.buy_free:
+            if self.buy_free and not self.buy_keepop:
                 break                   # 买卡已由 jit_need 通道处理（ops 里无 buy）
             if n_buy >= buy_cap or box_free_local <= 0:
                 break                   # 速率闸 / 箱闸（紧急买也进不来）
@@ -1290,7 +1301,8 @@ class DPTickController:
         # ---- 3) 承诺点判定：仅在这些情况重解（低频），否则复用骨架 ----
         rounds_sig = tuple(sorted(completed_rounds.items()))
         plan = self._plan
-        exhausted = plan is not None and plan["cursor"] >= len(plan["ops"])
+        exhausted = (plan is not None and len(plan["ops"]) > 0
+                     and plan["cursor"] >= len(plan["ops"]))
         # disc_over 不带退避：60 格·各2轮 实测高频重解（按当前库存重新投影）
         # 正是紧箱生机——禁掉后槽占 93.6%→3.6%、进度冻结。仅 streak 走退避
         # （纯等待信号，物理短缺下重解无新信息）；CPU 代价靠 relax 0.5s 摊薄。
