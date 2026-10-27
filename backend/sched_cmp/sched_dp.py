@@ -50,6 +50,12 @@ import time as _t
 EPS = 1e-9
 INF = float("inf")
 
+# ---- 「底卡随时可买」口径（buy_free）的模块级开关 ------------------------
+# solve() 每次入口按 inst["buy_free"] 覆写；`_chain_avail_rel` 等纯函数靠它
+# 判断「底卡最早可得时刻 = 0 还是 LAG」。默认关 = 旧行为（底卡占 1 tick 物流）。
+BASEFREE = False
+BASESET = frozenset()
+
 # ---- CP 最优轨迹 tie-break 表（2026-10-25 option 2）------------------------
 # 背景：CP-SAT 的**精确时刻**接执行层是负收益（零容差紧排产，2★ 实测
 # 24.12h vs sched_dp 骨架 23.10h）；但 CP 的**开工顺序**是对的（2★ 差分：
@@ -555,7 +561,14 @@ def _chain_avail_rel(j, k, stock, running_rel, seen):
     """k 张 j 卡可用的最早增量时刻（相对剩余时间，可采纳下界）。
 
     running_rel 为 (type, 剩余, 类) 三元组；买卡类型（dur=LAG）无素材 →
-    最早可得时刻 = LAG（假设现在就买，可采纳）。"""
+    最早可得时刻 = LAG（假设现在就买，可采纳）。
+
+    ★ buy_free（`BASEFREE`）：底卡随时可买且即时落箱 → 最早可得时刻 = 0，
+      不是 LAG。旧版把这个 LAG 带进了 LB 链（买卡 45s 被当成真实等待）→
+      下界在本口径下**高估**，会剪掉真正的最优分支。
+    """
+    if BASEFREE and j in BASESET:
+        return 0.0
     if stock[j] >= k:
         return 0.0
     fins = [f for (j2, f, _c) in running_rel if j2 == j]
@@ -647,7 +660,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
       · box_cap  number     卡箱容量上限（任何落箱后 sum(stock) ≤ 上限）
       · steal_cap int       偷炉容量（缺省：有 class-2 类型/在炉→1，否则 0=不可用）
     """
-    global DUR, MATS, MACHINES, N
+    global DUR, MATS, MACHINES, N, BASEFREE, BASESET
     DUR = inst["dur"]
     MATS = inst["mats"]
     MACHINES = inst["machines"]
@@ -665,6 +678,16 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     run_norm = _norm_running(init_running, n)
     sc = inst.get("steal_cap")
     sc = int(sc) if sc is not None else (1 if _has_steal(mclass, n, run_norm) else 0)
+    # ★★ 2026-10-27 buy_free 口径必须同时进 dfs / LB，不能只改 UB：
+    #   只改 `_ub_schedule` 会让 UB 变紧 → `best["val"]` 变小 → dfs 的
+    #   `t + lb >= best["val"]` 剪枝更狠 → 交付解退化成 UB 的贪心列表调度。
+    #   实测（3★ tid59）buy_free 只改 UB：ub0 从 7530s 级降到 …, 交付解里
+    #   13% 的分支 v≥ub0（= 直接交了贪心）。故三处口径必须一起翻：
+    #   ① dfs 买卡：不占 shop 槽、无 LAG、当场入箱；
+    #   ② `_chain_avail_rel`：底卡最早可得 = 0（否则 LB 高估 → 剪掉最优）；
+    #   ③ 执行层同 tick 买投（buy_sametick，由 controller 联动）。
+    BASEFREE = bool(inst.get("buy_free"))
+    BASESET = frozenset(i for i in range(n) if 1 in _cls_of(mclass, i))
 
     # ★ 向上 cp 在此预计算并注入 inst["ucp"]：供 vec_prio（搜索指路）复用，
     # 外部也可直接传 inst["ucp"] 覆盖。注意 UB 的 ready 排序**不用**它
@@ -761,6 +784,25 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             head = (cc[0], cc[1], head)
         return head
 
+    def _ready_items(stock_v, need_v):
+        """素材齐的可开工精炼 [(type, 可开数上限)]。
+
+        ★ buy_free 下买卡当场入箱 → 必须在买卡之后**重新算一次**，否则
+          「买完当拍就能开工」的炉会白等下一迭代（= 又变成买卡占一拍）。
+        """
+        out_i = []
+        for i3 in range(n):
+            if need_v[i3] <= 0:
+                continue
+            if 0 in _cls_of(mclass, i3):
+                if all(stock_v[j] >= kk for j, kk in mats[i3]):
+                    lim = need_v[i3]
+                    for j, kk in mats[i3]:
+                        lim = min(lim, stock_v[j] // kk)
+                    if lim > 0:
+                        out_i.append((i3, lim))
+        return out_i
+
     def dfs(need, stock, running_rel, t, path):
         """返回 (从该状态的相对额外耗时, 最优后缀链)。
 
@@ -837,17 +879,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             for i2, _f, _c in running_rel:
                 running_cnt[i2] = running_cnt.get(i2, 0) + 1
             dem = _buy_demand(n, mclass, mats, stock, need, running_cnt)
-            items = []
-            for i in range(n):
-                if need[i] <= 0:
-                    continue
-                if 0 in _cls_of(mclass, i):
-                    if all(stock[j] >= kk for j, kk in mats[i]):
-                        lim = need[i]
-                        for j, kk in mats[i]:
-                            lim = min(lim, stock[j] // kk)
-                        if lim > 0:
-                            items.append((i, lim))
+            items = _ready_items(stock, need)
             idle = [0, 0, 0]
             for _i2, _f2, c2 in running_rel:
                 if 0 <= c2 < 3:
@@ -901,8 +933,13 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 后缀时只取本迭代的 op（相对迭代顶状态 delta 归零）；前序迭代
             # 的 op 属于更早的状态，混入会在 memo 命中时重放更早的买卡。
             iter_start = len(own_ops)
-            if S > 0 and idle[1] > 0:
+            # ★★ buy_free：买卡不占 shop 槽（容量视为无限，真实上限是箱位/金币），
+            #   且**当场入箱**（不建 45s 的 class-1 任务）。这样「买卡」不再是排期
+            #   节点，solver 的决策变量只剩精炼顺序 —— 正是用户要的口径。
+            _shop = 10 ** 9 if BASEFREE else S
+            if _shop > 0 and (BASEFREE or idle[1] > 0):
                 need = list(need)
+                _sl = list(stock) if BASEFREE else None
                 # 箱占用保守口径：箱内 + 在途买卡（在途精炼产出由落箱时校验）
                 box_now = sum(stock) + sum(1 for _i, _f, c in running_rel
                                            if c == 1)
@@ -927,20 +964,23 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     if 1 in _cls_of(mclass, b) and dem.get(b, 0) > stock[b]:
                         caps[b] = min(need[b], dem[b]) - stock[b]
                 bv = []
-                while idle[1] > 0 \
+                while (BASEFREE or idle[1] > 0) \
                         and box_now + n_run + 1 <= box_cap + EPS:
                     progressed = False
                     for b, cap_left in caps.items():
                         if cap_left <= 0:
                             continue
-                        if idle[1] <= 0 \
+                        if (not BASEFREE and idle[1] <= 0) \
                                 or box_now + n_run + 1 > box_cap + EPS:
                             break
                         need[b] -= 1
-                        running_rel = running_rel + ((b, dur[b], 1),)
+                        if BASEFREE:
+                            _sl[b] += 1          # 即时落箱（无 LAG、不占槽）
+                        else:
+                            running_rel = running_rel + ((b, dur[b], 1),)
+                            idle[1] -= 1
                         bv.append((b, 1, 1))
                         caps[b] = cap_left - 1
-                        idle[1] -= 1
                         box_now += 1
                         progressed = True
                     if not progressed:
@@ -953,6 +993,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     # 素材晚到 → 空转+重解级联（DP 输贪心的隐藏根因之一）。
                     cur_path = cur_path + ((t, tuple(bv)),)
                     own_ops.append((t_rel, tuple(bv)))
+                if BASEFREE:
+                    # 料已在箱 → 同一决策点就能开工（旧版要等下一迭代 = 白丢一拍）
+                    stock = tuple(_sl)
+                    items = _ready_items(stock, need)
                 need = tuple(need)
 
             # ---- 分支：可行开工向量（按机器类限容量）----

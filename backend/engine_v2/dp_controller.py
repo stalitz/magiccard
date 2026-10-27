@@ -155,6 +155,11 @@ class DPTickController:
         #   也不用花 tick」。把买卡从**解**里拿掉：solver 认为底卡即时可得（只受箱容），
         #   买卡不再占 shop 时间槽、也不再是独立排期节点。
         self.buy_free = os.environ.get("MC_BUY_FREE") == "1"
+        if self.buy_free:
+            # ★ 口径联动（2026-10-27）：solver 里 buy 与 refine 同拍（instant），
+            #   执行层若还按「本 tick 买的料不能当喂料」就会系统性晚 1 tick 投炉，
+            #   等于把计划改成不可执行。两处必须同口径 → 强制联动。
+            self.buy_sametick = True
         # ★ 2026-10-27（多套退化定位，`tests/_probe_multi_bf.py`）：buy_free 把
         #   buy op 一起删掉是**过度**的，而且会造出真 bug。op 有两重身份：
         #   ① solver 的排期节点（该删：物理不存在）；② 执行层的「买卡需求清单」
@@ -165,7 +170,16 @@ class DPTickController:
         #     留 op 20.07h 炼33 买155 炉占 97.1%   ← 与 AD 21.11h 同量级
         #   故默认**保留** buy op（零耗时，只是需求清单）；`MC_BUY_KEEPOP=0`
         #   可复现病态档。
-        self.buy_keepop = os.environ.get("MC_BUY_KEEPOP", "1") == "1"
+        # ★★ 2026-10-27 修正（`tests/_probe_bf_idle.py` 实测）：buy op **不能**留在
+        #   `ops` 里。buy_free 让 solver 对买卡没有任何时间成本 → 连「终局收藏」
+        #   的底卡也被排到 t=0；执行层的 JIT 闸（`cid not in jit_need`）正确地
+        #   拒绝买它，但**不会把它标成已处理** → `while issued[cursor]` 永远卡在
+        #   索引 0 → streak 每 tick +1 → 每 4 tick 重解一次（结果还是同一个），
+        #   两个空主炉白转 2h。实测 3★ tid59：留 op 73.41h / 删 op 70.74h。
+        #   故默认**不生成** buy op（`MC_BUY_KEEPOP=1` 可复现病态档）。
+        #   注：删 op 后 pass 1 的需求清单来自 refine op 反推的 `jit_need`；
+        #   `exhausted` 已加 `len(ops)>0` 守卫，空计划不会每 tick 空解。
+        self.buy_keepop = os.environ.get("MC_BUY_KEEPOP", "0") == "1"
         # 仅供口径一致性判定：buy_free 时跳过 dfs、直接交 UB 解（dfs 仍是旧口径）
         self.ub_only = os.environ.get("MC_UB_ONLY") == "1"
         self._memo: dict = {}
@@ -203,6 +217,7 @@ class DPTickController:
         self.streak_max = 0
         # JIT 门 + 腾箱统计（2026-10-25 紧箱根治，见 _jit_due/_box_compaction）
         self.jit_blocked = 0            # JIT 门拦下的买卡 op 数（未到需求不买）
+        self.buy_fallback = 0           # 「ops 空、只剩底卡要买」时按 buy0_map 兜底的次数
         self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
         self.compact_moved = 0          # 腾箱挪保险箱累计张数
         # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
@@ -731,7 +746,7 @@ class DPTickController:
 
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
-                  box_stock, pending, active=None):
+                  box_stock, pending, active=None, buy0_map=None):
         """有限偏差列表调度（两趟：买卡 reactive + JIT 门 + 精炼时序门）。
 
         pass 1 — 买卡（reactive + JIT 门，不过 start 时序门）：
@@ -937,12 +952,25 @@ class DPTickController:
         #   的配方缺口）即时补料，买多少用多少。base_quota 仍是「投得出去的量」的
         #   上限（炉满 → 只保一波），箱空位仍是硬约束。
         if self.buy_free and not self.buy_keepop:
-            for cid in sorted(jit_need, key=lambda c: (-jit_need[c], c)):
+            _need = jit_need
+            if not _need and buy0_map:
+                # ★★ 2026-10-27 修（`tests/_probe_bf_idle.py` 实锤）：ops 里没有
+                #   refine（只剩「买底卡」这件事）时，`jit_need` 从 refine op 反推
+                #   出来就是空的 → 一张不买 → 空主炉干等（85 三套实测：t=1201min
+                #   （20.0h）起 ops=0 且 0 动作，连续 2.0h 到 22.0h 才恢复）。
+                #   兜底：按 `buy0_map`（`_union_need0` 算出的底卡净需求）买。
+                #   门栏遵用户铁律「买底卡的时机在除底卡外的所有卡都在卡箱里」：
+                #   只要还有非底卡在炉（pending>0），就说明它还没进箱 → 不买。
+                if not any(pending.values()):
+                    _need = {c: n for c, n in buy0_map.items()
+                             if n > 0 and c in self._base_cids}
+                    self.buy_fallback += 1
+            for cid in sorted(_need, key=lambda c: (-_need[c], c)):
                 if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
                     break
                 have = (box_stock.get(cid, 0) + pending.get(cid, 0)
                         + bought_this_tick.get(cid, 0))
-                want = jit_need[cid] - have
+                want = _need[cid] - have
                 while (want > 0 and n_buy < buy_cap and box_free_local > 0
                        and n_base < base_quota):
                     actions.append(Action(kind="buy", cid=cid, n=1,
@@ -974,17 +1002,31 @@ class DPTickController:
                 #      永远凑不出一炉——配方要的是 3 张**不同**底卡）。
                 if cid not in jit_need:
                     self.jit_blocked += 1
+                    if os.environ.get("MC_DBG_BUYBLOCK"):
+                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 不在jit_need "
+                              f"(n_wave={n_wave} got={got}) jit={dict(jit_need)} "
+                              f"box={box_stock.get(cid,0)} pend={pending.get(cid,0)}",
+                              flush=True)
                     continue
                 in_sys = (box_stock.get(cid, 0) + pending.get(cid, 0)
                           + bought_this_tick.get(cid, 0))
                 if in_sys >= jit_need[cid]:
                     self.jit_blocked += 1
+                    if os.environ.get("MC_DBG_BUYBLOCK"):
+                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 在箱已够 "
+                              f"in_sys={in_sys} need={jit_need[cid]}", flush=True)
                     continue
                 if n_base >= base_quota:
                     self.jit_blocked += 1
+                    if os.environ.get("MC_DBG_BUYBLOCK"):
+                        print(f"[buyblk] t={ws.now:.0f} cid={cid} base_quota "
+                              f"{n_base}>={base_quota}", flush=True)
                     continue            # 无炉可投 → 买来只能躺箱（囤卡）
                 if bought_this_tick.get(cid, 0) >= 1:
                     self.jit_blocked += 1
+                    if os.environ.get("MC_DBG_BUYBLOCK"):
+                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 本tick已买过",
+                              flush=True)
                     continue
                 n_base += 1
             actions.append(Action(kind="buy", cid=cid, n=1,
@@ -1301,6 +1343,17 @@ class DPTickController:
         # ---- 3) 承诺点判定：仅在这些情况重解（低频），否则复用骨架 ----
         rounds_sig = tuple(sorted(completed_rounds.items()))
         plan = self._plan
+        # ★ 空计划（只有底卡要买、没有 refine 可排）时，状态一变就必须重解：
+        #   buy_free 下 buy op 已不在 ops 里，这种计划的 ops 长度 = 0 → 既不会
+        #   exhausted（加了 len>0 守卫）也不会 head_due → 不重解就永远冻结
+        #   （实测 85 三套：t=1201min（20.0h）起 nops=0，连续 2.0h 零动作）。
+        #   用「箱内 + 在炉」签名做判据：只有真实事件（买卡落箱/出炉）才变，
+        #   不会退化成每 tick 空解。
+        state_sig = (tuple(sorted(box_stock.items())),
+                     tuple(sorted((c, n) for c, n in pending.items() if n)),
+                     tuple(sorted((f.cid, round(f.endtime)) for f in ws.furnaces)))
+        empty_stale = (plan is not None and not plan["ops"]
+                       and plan.get("state_sig") != state_sig)
         exhausted = (plan is not None and len(plan["ops"]) > 0
                      and plan["cursor"] >= len(plan["ops"]))
         # disc_over 不带退避：60 格·各2轮 实测高频重解（按当前库存重新投影）
@@ -1311,10 +1364,11 @@ class DPTickController:
         by_streak = plan is not None and plan["streak"] >= self.streak_limit
         streak_over = by_streak and self._no_progress_resolves < self.streak_resolve_cap
         if (plan is None or self._plan_rounds_sig != rounds_sig
-                or exhausted or disc_over or streak_over
+                or exhausted or empty_stale or disc_over or streak_over
                 or self.solve_every_tick):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
                                            box_cap, self._skel, rounds_sig)
+            plan["state_sig"] = state_sig
             self._plan = plan
             self._plan_rounds_sig = rounds_sig
             self.resolves += 1
@@ -1333,7 +1387,8 @@ class DPTickController:
         run_stats = self._run_plan(ws, plan, self._skel, actions,
                                    bought_this_tick,
                                    sum(bought_this_tick.values()),
-                                   collect_freed, box_stock, pending, active)
+                                   collect_freed, box_stock, pending, active,
+                                   buy0_map=buy0_map)
         # 真实进展 = 本 tick 有真实精炼产出（n_ref>0）。**买卡/应急不算**——
         # 紧箱场景几乎每 tick 都有零星 reactive 买卡，若据此清零退避等于没
         # 退避（实测 500tick streak 重解 66 次 > cap 16）；**cursor 微推进
