@@ -1085,22 +1085,23 @@ class AutoRefine:
         else:
             await self._refine_all(st, stock, slots, pending, steps)
 
-        # 5) 收尾：某套该炼的都炼完了（成品卡全在箱内或在炉），只差商店底卡
-        #    → 只给这一套把底卡买齐。买来只为放进集卡册，不再入炉消耗。
+        # 5) 收尾：**除底卡外的所有卡都已在卡箱里**（不是在炉里），只差商店底卡
+        #    → 只给这一套把底卡买齐，买齐立刻上交（上交消耗整套、格位当场释放）。
         if self.buy:
             for tid in list(self.queue):
                 plan = self.plans[tid]
-                # ★ 2026-10-27 用户定调「提前买齐就是一种囤卡」（真机实测）：
-                #   本套还有卡在炉里没出时，补集卡册的底卡**一律不买**。
-                #   旧行为是「成品卡全在箱或在炉」就算「只差底卡」→ 立刻把 5 张底卡
-                #   买进换卡箱，于是顶层那 4h 炉时里，这 5 张 10 面白占 5 格（换卡箱
-                #   硬顶 18，其中 9 格还是用户藏品卡）；随后取卡要 2 个空位取不出、
-                #   买料又撞「换卡箱满了」，一整轮卡死。等本套最后一张出炉、pending
-                #   归零再补，买齐到上交只隔几秒，格位占用从小时级降到秒级。
+                # ★★ 2026-10-27 用户定调（真机纠正）：
+                #   「买底卡的时机在除底卡外的所有卡都在卡箱子里，现在买齐直接上交，
+                #     **而不是还在炼呢就要买齐**；只差底卡也不需要买（紧箱时少一个
+                #     空位就取不了卡）」。
+                #   旧行为：`成品卡全在箱**或在炉**` 就算「只差底卡」→ 顶层还要 4h
+                #   时就把 5 张 10 面底卡买进换卡箱，白占 5 格；换卡箱硬顶 18、其中
+                #   9 格还是用户藏品卡 → 少一个取卡空位 → 「请空出两个卡箱的位置」。
+                #   现要求：本套 **pending 必须为空**（炉里一张都没有）+ 非底卡
+                #   **全部在箱**，才买底卡；买完同一个 tick 就上交，占用只剩几秒。
                 if any(pending.get(c, 0) > 0 for c in plan.ids):
                     continue
-                miss_comp = [c for c in plan.ids if c in plan.comp
-                             and stock.get(c, 0) + pending.get(c, 0) < 1]
+                miss_comp = [c for c in plan.ids if c in plan.comp and stock.get(c, 0) < 1]
                 miss_base = [c for c in plan.ids if c not in plan.comp and stock.get(c, 0) < 1]
                 if miss_comp or not miss_base:
                     continue

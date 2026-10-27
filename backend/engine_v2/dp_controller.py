@@ -306,8 +306,16 @@ class DPTickController:
         free = max(0, ws.change_free + extra_free - reserve)
         for t in active:
             m = self.models[t]
-            if not all(box_stock.get(c, 0) + pending.get(c, 0) >= 1
+            # ★★ 2026-10-27 用户定调（真机纠正）：「买底卡的时机在除底卡外的所有卡
+            #   都在**卡箱里**，现在买齐直接上交，而不是还在炼呢就要买齐」。
+            #   旧版条件放宽成「在箱**或在炉**」→ 最后一个非底卡是长时顶层卡
+            #   （4★ 实测在炉 ~1400 tick）时，5 张底卡提前买进换卡箱白占 5 格；
+            #   换卡箱硬顶 18、紧箱时少一个空位就「请空出两个卡箱的位置，再取卡」。
+            #   现要求：非底卡全部在**箱**，且该套在炉里一张都没有。
+            if not all(box_stock.get(c, 0) >= 1
                        for c in m.ids if not m.is_base(c)):
+                continue
+            if any(pending.get(c, 0) > 0 for c in m.ids if not m.is_base(c)):
                 continue
             for c in m.ids:
                 if not m.is_base(c):
@@ -378,9 +386,13 @@ class DPTickController:
             m = self.models.get(t)
             if m is None:
                 continue
-            if not all(box_stock.get(c, 0) + pending.get(c, 0) >= 1
+            # ★ 2026-10-27 同 _album_prebuy：collect 缺口也只认「非底卡全在箱」
+            #   （在炉不算），否则顶层还在炼就把底卡拉进 due → 提前买、占格。
+            if not all(box_stock.get(c, 0) >= 1
                        for c in m.ids if not m.is_base(c)):
-                continue                # 合成卡未齐（含在炉）→ collect 不在即
+                continue                # 合成卡未全在箱 → collect 不在即
+            if any(pending.get(c, 0) > 0 for c in m.ids if not m.is_base(c)):
+                continue
             for c in m.ids:
                 if not m.is_base(c):
                     continue
@@ -809,13 +821,23 @@ class DPTickController:
         soon_main = sum(1 for f in ws.furnaces
                         if not f.steal
                         and 0 < f.endtime - ws.now <= TICK_SECS + EPS)
-        base_quota = max(1, ws.main_free + soon_main) * 3
+        # ★★ 2026-10-27 真机纠正（用户：「7 个炉里有 1 个是 VIP 的、我们用不上，
+        #   所以现在炉是满的」）：可用主炉 = 总槽位 − VIP 位，炉真满时**一张喂料
+        #   底卡都不预买**。旧写法 `max(1, ...)` 保底 1 波 → 炉满也照买 3 张，
+        #   真机实测换卡箱里躺着 8 张 10 面（杜松1/大团扇1/侏儒3/霜白2/褐斑1），
+        #   而 4 个 40 面炉还要 20~95 分钟才出 —— 正是用户说的
+        #   「买了超过 4 个 10 面还没开炼」。
+        #   pass 2 的缺料补买**不吃**这个额度（缺料 ⇒ 有炉位 ⇒ abs_slots>0，
+        #   且另给 base_quota_emerg 保底），不会把「有炉位但缺料」也闸死。
+        abs_slots = ws.main_free + soon_main
+        base_quota = abs_slots * 3
+        base_quota_emerg = max(3, base_quota)   # 应急补料闸（有炉位缺料时至少一组）
         n_base = 0
         # ---- 预买目标：只备「骨架头几炉」的**配方缺口**，绝不按骨架买整套 buy op ----
         # 旧引擎 `_prepare_turn` 的 need_buy = 这一炉（3 张不同卡）缺的底卡，
         # 买几张用几张、买完立刻投炉。DP 执行层买来的卡要下一 tick 重解才知道
         # slot（不能同 tick 投），所以这里提前备「头几炉」：
-        #   波数 = base_quota / 3 = 本 tick 能吸收的炉数（无空炉时保底 1 波），
+        #   波数 = base_quota / 3 = 本 tick 能吸收的炉数（无空炉 → 0 → 完全不预买），
         #   每波取该 refine op 的 feeders 缺口并集 → 买来的必然凑得成一炉。
         # ★ 反例（2026-10-26 真机）：旧版按骨架顺序遍历**全部** buy op，买的是
         #   buy op 的原始顺序、可能全是同一张（684×3），也不保证这一 tick 投得
@@ -1005,7 +1027,7 @@ class DPTickController:
                 i += 1
                 continue
             if (miss_buy and box_free_local >= len(miss_buy)
-                    and n_base + len(miss_buy) <= base_quota
+                    and n_base + len(miss_buy) <= base_quota_emerg
                     and n_buy + n_emerg + len(miss_buy) <= buy_cap):
                 # 有限偏差①：物流失败（缺底卡且骨架无到期买卡）→ 就地补买这一炉
                 # 缺的底卡，下 tick 落箱即可投炉（本 tick 只买不炼 = LAG）。
