@@ -1133,7 +1133,9 @@ class AutoRefine:
         return sum(1 for box in ("change", "store")
                    for c in st.get(box, []) if c.get("id") in ids)
 
-    def _face40_credit(self, plan: "ThemePlan", st: dict) -> Counter:
+    def _face40_credit(self, plan: "ThemePlan", st: dict,
+                       stock: Counter | None = None,
+                       pending: Counter | None = None) -> Counter:
         """这套卡「变卡环节还没交、但马上就会交」的 40 面卡 -> 净需求里的虚拟库存。
 
         用户 2026-09-26 指出：「已经变了 40 的卡，怎么不去用 40 的去练 80 的，
@@ -1145,10 +1147,15 @@ class AutoRefine:
         ⚠️ 只顶「变卡环节真能产出的量」（卡箱里还剩几张礼物卡），且只在变卡开关
         打开时生效；礼物卡用完 credit 自然归零，净需求退回「拿底卡炼 40 面」，
         不会死锁。
+
+        `stock` / `pending` 可显式传入（DP 路径在 tick 中段会重读一次状态，
+        此时成员 `self._stock` 还是旧快照 —— 用新快照算缺口才是对的）。
         """
         if not (self.box_gift_change or self.gift_drain):
             return Counter()
-        gap = face40_gap(plan, self._stock, self._pending)["gap"]
+        sk = self._stock if stock is None else stock
+        pd_ = self._pending if pending is None else pending
+        gap = face40_gap(plan, sk, pd_)["gap"]
         if not gap:
             return Counter()
         cap = self._gift_cards_left(st)
@@ -1208,7 +1215,13 @@ class AutoRefine:
                 # （2★ 23.10→25.07h，见 dp_controller「自适应分层预算」注释）。
                 # 仿真/bench 走默认（warm=8 后 0.1s），不受此处影响。
                 time_budget=2.0, time_budget_cold=2.0, warm_solves=10**9,
-                steal_enabled=bool(self.steal_enabled))
+                steal_enabled=bool(self.steal_enabled),
+                # ★ 多套（2026-10-27 接入）：DP 此前 `_union_need0` 里 `sets = 1`
+                #   写死，前端「套数设置」在 DP 下形同虚设，1 星囤了多张 40 面也只
+                #   排 1 套（空炉 + 囤货白囤）。这里直接把生产那份 `_calc_sets`
+                #   传进去 —— 贪心与 DP 用同一个套数口径，不写两套逻辑。
+                sets_fn=lambda t, stk, pd_, fm: self._calc_sets(
+                    self.plans[t], stk, pd_, fm))
             self._dp_sig = sig
         # ★ 决策前重读真实状态（2026-10-26，仿真=生产统一后实测出的坑）：
         # tick 早段（收礼/翻牌/变卡/上交后续炼）会把新卡落进换卡箱，而传进来的
@@ -1223,9 +1236,20 @@ class AutoRefine:
         if not self.steal_enabled:
             ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）
         completed = {t: self.plans[t].rounds for t in self.queue}
+        # ★ 变卡 credit 接入 DP（2026-10-27）：`_face40_credit` 此前只在贪心
+        #   `_refine_all` 里用，DP 路径完全不知道「变卡环节马上要交 40 面卡」→
+        #   于是 DP 又拿底卡现造同款 40 面（一炉一炉白烧），变卡等于白变。
+        #   这里按与贪心同一个函数算，交给控制器并进净需求库存。
+        credits: dict[int, Counter] = {}
+        for t in self.queue:
+            cr = self._face40_credit(self.plans[t], st, stock, pending)
+            if cr:
+                credits[t] = cr
+        self.face40_credit = credits or {t: Counter() for t in self.queue}
         try:
             actions, dpstats = self._dp_ctrl.decide(
-                ws, list(self.queue), completed, self.max_rounds)
+                ws, list(self.queue), completed, self.max_rounds,
+                credits=credits)
         except Exception as exc:  # noqa: BLE001  DP 异常不拖死生产循环
             # _log(ok=False) 自身会累加 stats["errors"]，这里别再 +1
             self._log("DP调度", False, f"decide 异常：{str(exc)[:120]}")

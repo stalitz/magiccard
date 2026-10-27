@@ -64,9 +64,13 @@ class DPTickController:
                  lag_secs: float = TICK_SECS, shop_cap: int = 15,
                  streak_limit: int = 4, scan_window: int = 6,
                  steal_enabled: bool = True,
-                 cp_first: bool = False, cp_budget: float = 120.0):
+                 cp_first: bool = False, cp_budget: float = 120.0,
+                 sets_fn=None):
         self.models = models
         self.machines = machines
+        # 每套本轮排几套（与贪心 `AutoRefine._calc_sets` 同口径）。None = 恒 1。
+        # 生产/仿真都把生产那份 `_calc_sets` 传进来，保证「多套」不是两套口径。
+        self.sets_fn = sets_fn
         # ★ 自适应分层预算（2026-10-26，用户定调「每 tick 快速出相对优的解」）：
         # 实测（_probe_speed.py / _probe_fast.py）：
         #  · iso 单次解算质量**与预算无关**——2★/3★/5★ 在 50ms 与 2s 的
@@ -223,23 +227,50 @@ class DPTickController:
                 "mats": mats, "mclass": mclass, "depth": depth, "cp": cp}
 
     def _union_need0(self, box_stock, pending, active, completed_rounds,
-                     max_rounds):
+                     max_rounds, credits=None, sets_fn=None, free_main=0):
         """净需求：(非底卡炼几次, 底卡买几张)。
 
         直接复用 net_plan(box, pending, sets)（与贪心 Planner 完全同口径）：
         每一层自顶向下扣减 box+pending，是正确的 MRP 净需求。底卡需求取 net_plan
         的 buy 字典（含集卡册收藏需求 + 喂料需求，已净减持有）。
+
+        两个「与贪心同口径」的接口（2026-10-27 接入，此前 DP 都缺）：
+
+        · `credits` = {tid: Counter(40面卡 -> 张数)}：**变卡环节接下来会产出的 40
+          面卡**（生产 `AutoRefine._face40_credit`）。并进 avail 后，净需求就不会
+          再排「拿底卡现造一张同款 40 面」—— 否则变卡白变、且白占一炉。
+          与贪心 `_refine_all` 里 `p.net_plan(stock, pending, credit, sets)` 同一语义。
+        · `sets_fn` = 每套本轮排几套（生产是 `AutoRefine._calc_sets`：1 星按囤的
+          40 面算多套、其他星按未收集 qq秀 数）。默认 None → 恒 1（旧行为）。
+          ⚠ sets>1 会一次性排多轮中间卡，紧箱下有「叠加占满箱 → collect 不触发 →
+          rounds_sig 不变 → 永不重解」的死锁史（见下方注释），所以上限再按
+          `max_rounds - completed` 收紧，且只有调用方显式给 sets_fn 才会 >1。
         """
         need, buy = Counter(), Counter()
+        credits = credits or {}
         for t in active:
             m = self.models[t]
-            # 每解只排「下一轮」（task#96 紧箱各2轮 FAIL 根治）：
-            # 原 sets = max_rounds - completed_rounds[t] 会把多轮卡一次性全排进计划，
-            # 两轮中间卡叠加占满箱 → collect 永不触发 → rounds_sig 不变 → 永不重解 →
-            # 永久饿死（实测 done=0/4、箱满 60/60、槽占仅 22%）。改为每解只排下一轮，
-            # 第一轮完成后 completed 变化触发重解下一轮。
+            # 变卡 credit：变卡环节即将交出的 40 面卡，先当已到货
+            avail = dict(box_stock)
+            for c, n in (credits.get(t) or {}).items():
+                if int(n) > 0:
+                    avail[int(c)] = avail.get(int(c), 0) + int(n)
+            # 套数：默认 1；给了 sets_fn 就与贪心 `_calc_sets` 同口径。
+            # 原写法 `sets = max_rounds - completed_rounds[t]` 会把多轮卡一次性全排进
+            # 计划，两轮中间卡叠加占满箱 → collect 永不触发 → rounds_sig 不变 →
+            # 永不重解 → 永久饿死（实测 done=0/4、箱满 60/60、槽占仅 22%）。
+            # 所以这里是「每解排下一批」，且用剩余轮数封顶。
             sets = 1
-            runs, buys = m.net_plan(dict(box_stock), dict(pending), sets=sets)
+            if sets_fn is not None:
+                try:
+                    sets = max(1, int(sets_fn(t, avail, pending, free_main)))
+                except Exception:      # noqa: BLE001  回调异常不拖死调度
+                    sets = 1
+            if max_rounds:
+                left = int(max_rounds) - int(completed_rounds.get(t, 0))
+                if left > 0:
+                    sets = min(sets, left)
+            runs, buys = m.net_plan(avail, dict(pending), sets=sets)
             for c, nd in runs.items():
                 if not m.is_base(c):
                     need[c] += nd
@@ -1086,7 +1117,8 @@ class DPTickController:
                 "early": n_early}
 
     def decide(self, ws: WorldState, active: List[int],
-               completed_rounds: Counter, max_rounds: int = 0
+               completed_rounds: Counter, max_rounds: int = 0,
+               credits: dict | None = None
                ) -> Tuple[List[Action], dict]:
         actions: List[Action] = []
         box_stock = ws.stock
@@ -1104,7 +1136,10 @@ class DPTickController:
 
         # ---- 净需求（非底卡炼几次 / 底卡买几张）----
         need0_map, buy0_map = self._union_need0(box_stock, pending, active,
-                                                completed_rounds, max_rounds)
+                                                completed_rounds, max_rounds,
+                                                credits=credits,
+                                                sets_fn=self.sets_fn,
+                                                free_main=ws.main_free)
 
         # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
         # ★ collect_freed 只做统计，**不进买卡预算**（2026-10-26）：
