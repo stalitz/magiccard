@@ -447,6 +447,24 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
                 "message": (f"换卡箱 0 空位，连 1 张底卡都买不进来："
                             f"请先从换卡箱挪走一些卡（保险箱还剩 {free['store']} 格）"
                             + (f"｜腾位记录：{' / '.join(why)}" if why else ""))}
+    # ★ 2026-10-27 套卡「尺码」vs 真实箱容（用户指正：「我让你测 9 张卡的 1 星，
+    #   你非要选 13 张卡的，结果卡箱本来 10 格够、现在不够了」）：
+    #   上交要求**整套 distinct 卡各 1 张同时持有**（换卡箱 + 保险箱合计都算），
+    #   所以「还缺的张数 > 两箱总空位」是数学上不可能集齐的 —— 必须当场拒绝，
+    #   否则引擎会每 tick 买底卡 → 箱满 → 腾位卖掉 → 再买（真机实测 1★ tid=85
+    #   在 18+168 全满时 bought=636 张 / refined=20 次 / errors=6862，炉子却全空）。
+    cap2 = free["change"] + free["store"]
+    for t in ids:
+        pl = eng.plans[t]
+        missing = [c for c in pl.ids if stock.get(c, 0) < 1]
+        if len(missing) > cap2:
+            return {"ok": False, "plans": plans, "free": free,
+                    "need": len(pl.ids), "missing": len(missing),
+                    "message": (f"{pl.name}：一套要 {len(pl.ids)} 张卡**同时持有**才能上交，"
+                                f"现在还缺 {len(missing)} 张，而两箱合计只有 {cap2} 个空位 —— "
+                                f"装不下，永远集不齐。请换张数更少的套"
+                                f"（1★ 有 9 张的：蜻蜓款款飞 / 瓢虫物语 / 橡皮泥的记忆 /"
+                                f" 果味酸奶 / 七夕情人节），或先清理保险箱再启动")}
     if _auto is not None and _auto.running:
         _auto.stop()
     _auto = eng

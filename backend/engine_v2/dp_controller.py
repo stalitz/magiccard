@@ -780,6 +780,35 @@ class DPTickController:
                         and 0 < f.endtime - ws.now <= TICK_SECS + EPS)
         base_quota = max(1, ws.main_free + soon_main) * 3
         n_base = 0
+        # ---- 预买目标：只备「骨架头几炉」的**配方缺口**，绝不按骨架买整套 buy op ----
+        # 旧引擎 `_prepare_turn` 的 need_buy = 这一炉（3 张不同卡）缺的底卡，
+        # 买几张用几张、买完立刻投炉。DP 执行层买来的卡要下一 tick 重解才知道
+        # slot（不能同 tick 投），所以这里提前备「头几炉」：
+        #   波数 = base_quota / 3 = 本 tick 能吸收的炉数（无空炉时保底 1 波），
+        #   每波取该 refine op 的 feeders 缺口并集 → 买来的必然凑得成一炉。
+        # ★ 反例（2026-10-26 真机）：旧版按骨架顺序遍历**全部** buy op，买的是
+        #   buy op 的原始顺序、可能全是同一张（684×3），也不保证这一 tick 投得
+        #   出去 → bought=636 张 / refined=20 次，箱里堆满 10 面却凑不出任何配方
+        #   （用户原话：「买了超过 4 个 10 面还没开炼」）。
+        jit_need: Dict[int, int] = {}
+        # ★ n_wave 的标定（唯一实测口径，别凭感觉放宽）：
+        #   due_window(=min(2(主炉+偷炉)+2, max(2, change_cur//4))，18 格 → 4)
+        #   2★ 23.06h / 3★ 72.09h / 4★ 81.46h；
+        #   放到 2×due_window(8) → **3★ 277h done=0 死锁**（多预买 → 箱满 → 头 op
+        #   发不出 → 零动作）；收到 base_quota//3(1~3) → 2★ 27.02h 退化（买不上料、
+        #   炉空转）。故取 due_window：紧箱场景「多买」与「少买」两侧都有悬崖。
+        n_wave = max(due_window, base_quota // 3)
+        got = 0
+        for j in range(plan["cursor"], len(ops)):
+            if issued[j] or ops[j]["kind"] != "refine":
+                continue
+            mj = self._owner[ops[j]["cid"]]
+            for f in mj.feeders(ops[j]["cid"]):
+                if f in self._base_cids:
+                    jit_need[f] = jit_need.get(f, 0) + 1
+            got += 1
+            if got >= n_wave:
+                break
         for i, op in enumerate(ops):
             if n_buy >= buy_cap or box_free_local <= 0:
                 break                   # 速率闸 / 箱闸（紧急买也进不来）
@@ -790,25 +819,29 @@ class DPTickController:
                 issued[i] = True        # 专辑预买/应急买已买到 → 去重跳过
                 continue
             if cid in self._feeder_cids:
+                # ★★ 2026-10-27 移植旧引擎铁律（auto_refine 顶部注释 2026-09-16）：
+                #   「**就地为每一炉补买，绝不预先囤货** —— 只有『这一炉马上要入炉』
+                #    的底卡才买，买几张用几张，没有任何一炉会用到时一张都不买。」
+                #   判据从「全套前沿 due」换成「头 n_wave 炉的配方缺口 jit_need」：
+                #   ① 不在头几炉配方里 → 买了也没有炉能吸收（纯囤）；
+                #   ② 这一波配方在箱/在炉/在途已够 → 不超买；
+                #   ③ 同一 tick 同一 cid 最多 1 张（一炉只需每种 1 张，买 684×3
+                #      永远凑不出一炉——配方要的是 3 张**不同**底卡）。
+                if cid not in jit_need:
+                    self.jit_blocked += 1
+                    continue
                 in_sys = (box_stock.get(cid, 0) + pending.get(cid, 0)
                           + bought_this_tick.get(cid, 0))
-                if in_sys >= due.get(cid, 0):
+                if in_sys >= jit_need[cid]:
                     self.jit_blocked += 1
-                    continue            # 前沿用量已够 → 不超买（op 保留）
-                if cid in self._base_cids:
-                    if n_base >= base_quota:
-                        self.jit_blocked += 1
-                        continue        # 无炉可投 → 买来只能躺箱（囤卡）
-                    # 同一 tick 同一 cid 最多买 1 张（2026-10-26 真机实测）：
-                    # 1★ 的 buy op 前 7 个全是 684，额度 3 全花在 684 上 →
-                    # 箱里 684×3 而 685/686 一张没买 → 5 个配方（各要 3 张
-                    # **不同**底卡）仍然一张凑不出，正是用户说的「买超过 4 个
-                    # 10 面还没开炼」。一炉只需每种 1 张，跨 tick 补齐的代价
-                    # 是 45s/张（整套 20h 量级，可忽略），换来「3 张凑一组」。
-                    if bought_this_tick.get(cid, 0) >= 1:
-                        self.jit_blocked += 1
-                        continue
-                    n_base += 1
+                    continue
+                if n_base >= base_quota:
+                    self.jit_blocked += 1
+                    continue            # 无炉可投 → 买来只能躺箱（囤卡）
+                if bought_this_tick.get(cid, 0) >= 1:
+                    self.jit_blocked += 1
+                    continue
+                n_base += 1
             actions.append(Action(kind="buy", cid=cid, n=1,
                                  note=f"DP骨架买底料 {cid}"))
             plan["bought"][cid] += 1
@@ -940,15 +973,24 @@ class DPTickController:
                 # 不计偏差（本就没到计划时刻）。
                 i += 1
                 continue
-            if miss_buy and box_free_local >= len(miss_buy):
-                # 有限偏差①：物流失败（缺底卡且骨架无到期买卡）→ 应急补买，
-                # 下 tick 落箱即可投炉。本 tick 只买不炼（LAG）。
+            if (miss_buy and box_free_local >= len(miss_buy)
+                    and n_base + len(miss_buy) <= base_quota
+                    and n_buy + n_emerg + len(miss_buy) <= buy_cap):
+                # 有限偏差①：物流失败（缺底卡且骨架无到期买卡）→ 就地补买这一炉
+                # 缺的底卡，下 tick 落箱即可投炉（本 tick 只买不炼 = LAG）。
+                # ★ 2026-10-27：这是喂料底卡的**应急**买入点，与 pass 1 的「按配方组
+                #   预买」互补。实测若把它改成「缺料不买、继续往后扫能发的 op」
+                #   （旧引擎阶段一语义），4★ 78.08→89.09h（多炼 5 次、打乱 DP 顺序），
+                #   故保留「缺料即买 + break」，扫描式两阶段在 DP 上不成立。
                 for f in miss_buy:
+                    if f in bought_this_tick:
+                        continue        # 同 tick 同一 cid 只买 1 张
                     actions.append(Action(kind="buy", cid=f, n=1,
                                          note=f"DP应急买底料 {f}"))
                     bought_this_tick[f] += 1
                     box_free_local -= 1
                     plan["bought"][f] += 1
+                    n_base += 1
                 n_emerg += len(miss_buy)
                 plan["discrepancy"] += len(miss_buy)
                 self.emergency_total += len(miss_buy)
