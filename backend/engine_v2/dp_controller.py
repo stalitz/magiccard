@@ -128,6 +128,15 @@ class DPTickController:
         self.streak_limit = int(os.environ.get("MC_STREAK") or streak_limit)
         self.scan_window = int(os.environ.get("MC_SCAN") or scan_window)
         self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
+        # ★ 喂料底卡预买提前量（单位=tick）：买来的卡要下一 tick 才落箱/才知道
+        #   slot，所以「下一 tick 会空」的炉必须在**本 tick** 就把料买进来，
+        #   否则炉空那一 tick 才开始买 → 空转 1 tick（45s）× 每炉次。
+        #   1 = 只看本 tick 内到点（会空转）；2 = 多看一个 tick（提前 45s 备料）。
+        self.prebuy_look = int(os.environ.get("MC_PREBUY_LOOK") or 1)
+        # 0 额度下限（旧行为 max(1,...)*3，炉满也保底一波）；仅供 ablation 对照
+        #   None=默认（按箱余量自适应）、True=强制保底一波、False=强制不保底
+        _fl = os.environ.get("MC_PREBUY_FLOOR")
+        self.prebuy_floor = None if _fl is None else (_fl == "1")
         self._memo: dict = {}
         self._skel_sig: tuple = None
         self._skel: dict = None
@@ -820,17 +829,35 @@ class DPTickController:
         # 在这套引擎里无益，与「利用率不是目标」的既有结论一致，只保底 1 波）。
         soon_main = sum(1 for f in ws.furnaces
                         if not f.steal
-                        and 0 < f.endtime - ws.now <= TICK_SECS + EPS)
-        # ★★ 2026-10-27 真机纠正（用户：「7 个炉里有 1 个是 VIP 的、我们用不上，
-        #   所以现在炉是满的」）：可用主炉 = 总槽位 − VIP 位，炉真满时**一张喂料
-        #   底卡都不预买**。旧写法 `max(1, ...)` 保底 1 波 → 炉满也照买 3 张，
-        #   真机实测换卡箱里躺着 8 张 10 面（杜松1/大团扇1/侏儒3/霜白2/褐斑1），
-        #   而 4 个 40 面炉还要 20~95 分钟才出 —— 正是用户说的
-        #   「买了超过 4 个 10 面还没开炼」。
-        #   pass 2 的缺料补买**不吃**这个额度（缺料 ⇒ 有炉位 ⇒ abs_slots>0，
+                        and 0 < f.endtime - ws.now
+                        <= self.prebuy_look * TICK_SECS + EPS)
+        # ★ 2026-10-27 真机现象（用户：「买了超过 4 个 10 面还没开炼」，换卡箱里
+        #   躺着 8 张 10 面而 4 个 40 面炉还要 20~95 分钟才出）—— 但把这 8 张
+        #   归因到本额度是错的：本额度峰值只给 1 波（3 张），8 张里多出来的来自
+        #   `_album_prebuy`/collect 的**整套上交底卡**预买（已在那三处收紧成
+        #   「非底卡全在箱才买」，见 4b28aac）。此处的 3 张是「下一炉的料」。
+        #   pass 2 的缺料补买不吃这个额度（缺料 ⇒ 有炉位 ⇒ abs_slots>0，
         #   且另给 base_quota_emerg 保底），不会把「有炉位但缺料」也闸死。
         abs_slots = ws.main_free + soon_main
-        base_quota = abs_slots * 3
+        # ★★ 2026-10-27 消融（`tests/_probe_prebuy_ab.py`，18/200、单套 1 轮、45s/tick）：
+        #   | 档 | 炉满不预买 | 保底一波 | 提前 2 tick+保底 |
+        #   | 2★ | 23.12h | 23.07h | — |
+        #   | 3★ | 74.33h/炼44 | 72.10h/炼42 | 76.19h/炼45 |
+        #   | 4★ | 78.96h/炼44 | 81.47h/炼44 | 81.46h/炼47 |
+        #   ① 「提前买」(向前多看 1 tick) 两档**都更慢** → 提前量无益，此前把
+        #     「3★ +2.2h」定性成「必要代价」是错的：那 2.2h 只来自「炉满时手里
+        #      有没有一波料」。② 保底一波在 3★ 赚 2.2h（炉占 83.9% vs 81.4%，
+        #      且**少炼 2 次**——料断档时 DP 会绕冤枉路），在 4★ 亏 2.5h
+        #      （4★ 瓶颈是格位而非缺料，炉占 92% 本就没空转余量）。
+        #   取 3★ 侧（1★~3★ 是主战场，且「紧箱囤卡」的真机根因是 album 整套
+        #   底卡预买，已在 `_album_prebuy`/collect 收紧，与喂料额度无关）。
+        #   炉满时留在箱里的这一波 = **下一炉的料**，不是囤卡：买来就是为了投炉，
+        #   没有它炉空出来要白等 1 tick 物流。
+        base_quota = max(3, abs_slots * 3)
+        if self.prebuy_floor is None:
+            pass
+        elif not self.prebuy_floor:
+            base_quota = abs_slots * 3       # ablation：强制不保底（3★ 病态档 74.33h）
         base_quota_emerg = max(3, base_quota)   # 应急补料闸（有炉位缺料时至少一组）
         n_base = 0
         # ---- 预买目标：只备「骨架头几炉」的**配方缺口**，绝不按骨架买整套 buy op ----
