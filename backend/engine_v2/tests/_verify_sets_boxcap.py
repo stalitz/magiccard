@@ -7,8 +7,9 @@
   → 炉子清空后永久停摆（真机表现：同一个 40 面卡囤 13 张、三箱全满、零上交）。
 
 判据：
-  1. **公式**：`_calc_sets` 结果 ≤ max(1, change_cur // 套内张数)；
-     `box_cur=0`（未知容量）时不封顶，保持旧行为。
+  1. **公式**：`_calc_sets` 结果 ≤ max(1, **换卡箱空位** // 套内张数)；
+     空位够时不能死顶 1（用户 2026-10-28：「空位 9 就能炼无限套」——
+     限的是同时铺开几套，不是总共能炼几套）；`_box_cur=0`（未知容量）不封顶。
   2. **端到端**：生产默认路径（不勾 DP + max_rounds=0 不限轮）跑 178 蜻蜓，
      900 tick 内必须**至少上交 1 套**且换卡箱**不能顶满** —— 修前是 0 套 + 18/18。
 
@@ -29,6 +30,7 @@ def _bare() -> AutoRefine:
     ar.surplus_sets = 0
     ar._tick_collected = {}
     ar._box_cur = 0
+    ar._box_used = 0
     return ar
 
 
@@ -42,15 +44,29 @@ def check_formula() -> list[str]:
         f40 = list(p.f40)[:3]
         stock = Counter({c: 6 for c in f40})
         raw = ar._calc_sets_raw(p, stock, Counter(), free_slots=7)
-        capped = ar._calc_sets(p, stock, Counter(), free_slots=7, box_cur=18)
-        want = max(1, 18 // n_expect)
-        print(f"  tid={tid} 张数={n_expect} 原口径={raw} 封顶后={capped} 期望≤{want}")
+        print(f"  tid={tid} 张数={n_expect} 原口径={raw}")
+
+        # ① 箱里已占 7 格（稳态）→ 空位 11 → 只能铺 1 套
+        ar._box_cur, ar._box_used = 18, 7
+        capped = ar._calc_sets(p, stock, Counter(), free_slots=7)
+        want = max(1, 11 // n_expect)
+        print(f"     空位11 封顶后={capped} 期望={want}")
         if raw <= want:
             errs.append(f"tid={tid} 场景没造出放大（raw={raw} ≤ {want}），本回归失效")
-        if capped > want:
-            errs.append(f"tid={tid} 封顶失效：{capped} > {want}")
-        # box_cur=0 → 不封顶（保持旧行为，供未读状态的预检路径用）
-        if ar._calc_sets(p, stock, Counter(), free_slots=7, box_cur=0) != raw:
+        if capped != want:
+            errs.append(f"tid={tid} 空位封顶错：{capped} != {want}")
+
+        # ② 箱全空（空位 18）→ 允许 2 套，不能死顶 1
+        ar._box_used = 0
+        empty = ar._calc_sets(p, stock, Counter(), free_slots=7)
+        want2 = max(1, 18 // n_expect)
+        print(f"     空位18 封顶后={empty} 期望={want2}")
+        if empty != want2:
+            errs.append(f"tid={tid} 空位充足时未放开：{empty} != {want2}")
+
+        # ③ 容量未知（0）→ 退回原口径
+        ar._box_cur = 0
+        if ar._calc_sets(p, stock, Counter(), free_slots=7) != raw:
             errs.append(f"tid={tid} box_cur=0 时应退回原口径")
     return errs
 

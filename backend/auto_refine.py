@@ -627,6 +627,7 @@ class AutoRefine:
         # 换卡箱已开通格数（parse_full 的 cap.change.cur，真机 18）——`_calc_sets` 用它
         # 给并行套数封顶（N 张一套必须同时在箱才能上交，见 _calc_sets 的 2026-10-28 事故说明）
         self._box_cur: int = 0
+        self._box_used: int = 0      # 本 tick 换卡箱已占格数（空位 = cur - used）
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
         # 礼物箱 → 变卡（可选环节，勾选才做）。2026-09-21 用户定调：
@@ -802,25 +803,28 @@ class AutoRefine:
 
     def _calc_sets(self, plan: "ThemePlan", stock: Counter, pending: Counter,
                    free_slots: int = 0, box_cur: int = 0) -> int:
-        """这一套本轮排几套 —— **必须以换卡箱容量封顶**，见下面 `_calc_sets_raw`。
+        """这一套**本轮同时排几套**（并行度，不是「总共能炼几套」）。
 
         ★★ 2026-10-28 真机事故（用户报「自动炼蜻蜓把同一个 40 面卡囤到 13 张、三箱全满、
-        两小时零上交」）：`_calc_sets_raw` 只看「囤得最多的那张 40 面」和炉位，**不看箱装不装得下**。
-        1★ 一套 9 张卡、要 6 张 40 面（3 张 40 面各 2 张＝1 收藏 + 1 素材）；40 面一旦囤到
-        5~6 张 → sets 跳到 5~6 → net_plan 一次排 6 张顶层 + 12 张 40 面 ≈ 18 张半成品，
-        正好塞满 18 格换卡箱 → 底卡买不进 → 炉子清空后永久停摆；而囤得越多 sets 越大，
-        是**正反馈**（真机保险箱 168 格能装，所以能一路堆到 13 张）。
-        仿真复现（178、不勾 DP、不限轮、18/168）：11.25h 零上交、18/18 满、炉全空；
-        加本封顶后同样 11.25h 交 2 套、箱只用 7/18。只改炉位口径无效（仍 18/18 死锁）。
+        零上交」）：`_calc_sets_raw` 只看「囤得最多的那张 40 面」和炉位，**完全不看箱还剩
+        几格**。1★ 一套 9 张卡要 6 张 40 面（3 张 40 面各 2 张 = 1 收藏 + 1 素材）；40 面
+        一囤到 5~6 张 → sets 跳到 5~6 → net_plan 一次排 6 张顶层 + 12 张 40 面 ≈ 18 张
+        半成品。而顶层要等**三张** 40 面全齐才能开炉 → 40 面只进不出 → 堆满换卡箱 →
+        底卡买不进 → 炉子清空后永久停摆；且囤得越多 sets 越大，是**正反馈**
+        （真机保险箱 168 格能装，所以一路堆到 13 张）。
 
-        封顶依据是**物理容量**，不是调参：N 张一套的卡必须同时在箱里才能上交，
-        所以并行套数上限 = `换卡箱格数 // N`（1★ 9 张套 → 2；13 张套 → 1；
-        高星套 N>箱格 → 恒 1，本来就装不下两套）。
+        ★ 封顶对象是**在途并行度**，用**空位**而不是总容量（用户 2026-10-28 纠正：
+        「换卡箱空位 9，收卡又没有奖励卡占格，那可以炼无限套」—— 一套的卡是滚动消耗的，
+        只要**空位够一套流转**就能一直炼下去，`max_rounds=0` 不限轮次就是无限套；
+        这里限的只是「同时铺开几套」，铺开太多才会「三张 40 面全在等」把箱塞死）。
+
+        `_box_used` 来自本 tick 的 `parse_full`；容量未知（0）时不封顶，退回旧口径。
         """
         sets = self._calc_sets_raw(plan, stock, pending, free_slots)
-        cap_box = int(box_cur or getattr(self, "_box_cur", 0) or 0)
-        if cap_box > 0 and plan.ids:
-            sets = min(sets, max(1, cap_box // max(1, len(plan.ids))))
+        cur = int(box_cur or getattr(self, "_box_cur", 0) or 0)
+        if cur > 0 and plan.ids:
+            free = cur - int(getattr(self, "_box_used", 0) or 0)
+            sets = min(sets, max(1, free // max(1, len(plan.ids))))
         return sets
 
     def _calc_sets_raw(self, plan: "ThemePlan", stock: Counter, pending: Counter,
@@ -945,8 +949,10 @@ class AutoRefine:
             return steps
         raw0 = mp.get("raw", "")
         st = parse_full(raw0)
-        # 换卡箱容量（供 `_calc_sets` 给并行套数封顶；0 = 未知则不封顶）
-        self._box_cur = int((st.get("cap") or {}).get("change", {}).get("cur") or 0)
+        # 换卡箱容量与占用（供 `_calc_sets` 用**空位**给并行套数封顶；0 = 未知则不封顶）
+        _cap_ch = (st.get("cap") or {}).get("change") or {}
+        self._box_cur = int(_cap_ch.get("cur") or 0)
+        self._box_used = len(st.get("change") or [])
         self.randchance = st.get("randchance", 0)
         # 跨 tick 差分：上一 tick 翻过牌 → 此刻的变化就是那些奖励的去向
         cur_fields = parse_state_fields(raw0)
