@@ -180,7 +180,14 @@ class DPTickController:
         # ★★ 2026-10-27 用户定调：「10 面额底卡可以认为本身就存在，因为可以随时买、
         #   也不用花 tick」。把买卡从**解**里拿掉：solver 认为底卡即时可得（只受箱容），
         #   买卡不再占 shop 时间槽、也不再是独立排期节点。
-        self.buy_free = os.environ.get("MC_BUY_FREE") == "1"
+        self.buy_free = os.environ.get("MC_BUY_FREE", "1") == "1"
+        # ★★ 2026-10-28 转默认开（原默认关，卡在「多套亏」上；该缺陷已由
+        #   事件驱动重解修掉）。今日同环境实测（18/200、3 主炉+偷炉、45s/tick）：
+        #     BF  vs  AD：85×1 4.45/4.45、290×1 14.43/14.44、59×1 45.41/45.86、
+        #                 60×1 50.83/50.85、178×2 3.79/3.84、290×2 21.90/21.93、
+        #                 178×3 5.69/7.03、85×3 13.19/13.84
+        #   → 全档不劣于 AD（最大差 0.01h，噪声级），多套明显更优。
+        #   `MC_BUY_FREE=0` 可回旧路径（AD）做对照。
         # ★★ 2026-10-28 流水线一环（修「多轮里当前轮排满 → ops 空 → 执行层停手」）：
         #   多轮场景下 `_calc_sets` 常算出 1 套（1★ 按 `max(各 40 面持有)` 算，而
         #   一套顶层要 3 张**不同** 40 面 → 箱里刚好各 1 张时 max=1）。此时当前那套
@@ -269,6 +276,19 @@ class DPTickController:
         self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时把 sets 提到 2 的次数
         self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
         self.compact_moved = 0          # 腾箱挪保险箱累计张数
+        # ★★ 2026-10-28 事件驱动重解（默认开，`MC_EVENT_RESOLVE=0` 可关）：
+        #   buy_free 下 ops 里没有 buy op，于是「骨架推进」这个唯一的重解信号源
+        #   消失了 —— 实测 290×2：AD 178 次解 / BF 只有 6 次，骨架一次定终身。
+        #   代价：首解把 46 张 0.625h 短活按 50tick/批 连排到 tick 551，2.5h 中间层
+        #   被挤到 554/754/954（AD 是 204/652/654），顶层卡开工 1154 vs 853 → 慢
+        #   1.28h。★加大预算无效（0.1/1/4s 三档同为 23.80h、4259 开工同为 1154），
+        #   即首解就是这么排的，不是搜索深度问题；让它滚动重解即可修复
+        #   （每 tick 解 21.29h，留 buy op 22.51h，基线 23.80h）。
+        #   这里用「真正投出一炉」作为事件（比每 tick 解便宜得多：60 次量级）。
+        self.event_resolve = os.environ.get("MC_EVENT_RESOLVE", "1") == "1"
+        self._dirty = False             # 上次解之后是否又投出过炉（需重解）
+        self._left_rounds = None        # 各套剩余轮数最小值（多轮判定，_union_need0 写）
+        self.dirty_resolves = 0         # 事件驱动重解次数
         # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
         # （等买卡落箱/等炉出货，JIT 正常等待）连续被卡 → streak 触发重解，
         # 但新骨架头动作往往不变（短缺不是顺序问题）→ 每 4 tick 一次 2s 解算
@@ -353,6 +373,7 @@ class DPTickController:
         """
         need, buy = Counter(), Counter()
         credits = credits or {}
+        self._left_rounds = None        # 本次净需求计算里各套剩余轮数的最小值
         for t in active:
             m = self.models[t]
             # 变卡 credit：变卡环节即将交出的 40 面卡，先当已到货
@@ -381,6 +402,12 @@ class DPTickController:
                 #   否则流水线一环（pipe_sets）在生产恒不生效 —— bench 全用
                 #   mr=1/2/3 会掩盖这个口径差。
                 left = 99
+            # 供事件驱动重解判定「是否多轮」（多套取最小剩余轮数 = 最保守）：
+            # 跨轮才有「下一环要滚动规划」的需求。强制全局开时 290×1 退化
+            # +1.22h（单轮静态序更好），故按多轮启用；多轮侧 290×2 −1.90h、
+            # 85×3 AD −1.23h，单轮侧全档逐位不变（见 __init__ 注释）。
+            self._left_rounds = (left if self._left_rounds is None
+                                 else min(self._left_rounds, left))
             runs, buys = m.net_plan(avail, dict(pending), sets=sets)
             # ★★ 2026-10-28 流水线一环（见 `__init__` 的 `pipe_sets` 注释）：
             #   本轮的净需求（非底卡）已经归零 —— 顶层在炉/已炼完，但**还有剩余
@@ -1319,6 +1346,7 @@ class DPTickController:
                                 feeders=[(s, st) for (_c, s, st) in picks],
                                 feed_cids=_fc, steal=True,
                                 note=f"DP精炼 {cid}（偷炉·让主炉）"))
+                            self._dirty = True
                             issued[i] = True
                             n_ref += 1
                             if self.dbg_op:
@@ -1365,6 +1393,7 @@ class DPTickController:
                     feed_cids=_fc,
                     steal=steal,
                     note=note))
+                self._dirty = True          # 投出一炉 = 骨架推进 → 下 tick 重解
                 issued[i] = True
                 n_ref += 1
                 if early:
@@ -1471,6 +1500,7 @@ class DPTickController:
                     kind="refine", target=opj["cid"],
                     feeders=[(s, st) for (_c, s, st) in picks],
                     steal=False, note=f"DP精炼 {opj['cid']}（箱闸兜底）"))
+                self._dirty = True
                 issued[j] = True
                 n_ref += 1
                 plan["discrepancy"] += 1
@@ -1588,6 +1618,8 @@ class DPTickController:
         streak_over = by_streak and self._no_progress_resolves < self.streak_resolve_cap
         if (plan is None or self._plan_rounds_sig != rounds_sig
                 or exhausted or empty_stale or disc_over or streak_over
+                or (self.event_resolve and self._dirty
+                    and (self._left_rounds or 0) >= 2)
                 or self.solve_every_tick):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
                                            box_cap, self._skel, rounds_sig)
@@ -1595,6 +1627,9 @@ class DPTickController:
             self._plan = plan
             self._plan_rounds_sig = rounds_sig
             self.resolves += 1
+            if self._dirty:
+                self._dirty = False
+                self.dirty_resolves += 1
             if by_streak:
                 self._no_progress_resolves += 1
             else:
