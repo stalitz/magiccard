@@ -133,6 +133,11 @@ class DPTickController:
         #   是下界当上界，料已齐/炉已空时也要空等。开关开 = 纯按顺序发，只看
         #   料齐+炉空，不看 start。
         self.order_only = os.environ.get("MC_ORDER_ONLY") == "1"
+        # 「主炉只给不可偷炉的卡」（默认开）：40 面卡可走偷炉，4h/顶层只能主炉。
+        #   旧逻辑按数组顺序抢主炉 → 40 面卡（1h 短链）把最后一个主炉占掉，
+        #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
+        #   消融入口：MC_MAIN_RESERVE=0 关。
+        self.main_reserve = os.environ.get("MC_MAIN_RESERVE", "1") == "1"
         # 逐 op 执行日志（默认关；排查「为什么这一炉没开」用）
         self.dbg_op = os.environ.get("MC_DBG_OP") == "1"
         self._oplog: List[tuple] = []
@@ -824,6 +829,16 @@ class DPTickController:
             return any((cid, slot) not in taken
                        for slot, _st in avail_slots.get(cid, []))
 
+        def _soon(cid: int) -> bool:
+            # 该料还有 ≤2 tick 就出炉（在炉里，快到了）。用于「主炉让位」判据：
+            #   2★ 实测 4.025h 唯一空出的主炉给了多余的 1h 王翦，而白起/信陵君
+            #   缺的 3 张孙膑 4.05h（下一 tick）就到 → 关键 4h 卡被顶到 5.025h，
+            #   顶层跟着晚 1h。把「即将到货」视同「在箱」，判据才看得见它们。
+            for f in ws.furnaces:
+                if f.cid == cid and 0 < f.endtime - ws.now <= 2 * TICK_SECS + EPS:
+                    return True
+            return False
+
         # ---- 箱预算（买卡闸；精炼腾出的位在 pass 2 汇入）----
         # Ⅴ 类约束：炼成卡落箱失败会被静默丢弃（get_refined_card 先 pop 炉再
         # _add_to_box，箱满即丢卡）→ 必须给在炉卡留落位，口径同贪心 Step5。
@@ -1185,16 +1200,79 @@ class DPTickController:
             #   错误（4★ 78.06→82.10h 且 err=30、1★ +1.00h err=6）。原因：提前开满炉
             #   本身就是 4★（深链紧箱）收益的来源，留炉 = 把炉闲死。
             if not blocked and _pre_ok and _cp_ok:
-                picks = []
-                for f in feeders:
-                    sl = take_slot(f)
-                    picks.append((f, sl[0], sl[1]))
+                # ★★ 2026-10-28 修：**先拿炉位，再占喂料槽**。
+                #   旧版先对全部 feeders 调 take_slot（把 (cid,slot) 记进 taken），
+                #   再判断炉位；若炉位不够就 continue —— **这些槽位没有归还**。
+                #   结果是本 tick 内后续 op 的 `has_slot(f)` 全部为假，明明箱里
+                #   有料却被判「缺料」→ 同一 tick 的其余炉位全空转。
+                #   这属于纯粹的记账 bug（动作没发出，料物理上没动）。
+                # ★★「主炉只给不可偷炉的卡」：40 面卡（is_40）可以走偷炉，
+                #   而 4h/顶层卡只能占主炉。若把最后一个主炉给了 40 面卡，随后
+                #   到期且料齐的不可偷炉 op 就没炉可上 —— 2★ 实测：4.02h 王翦/白起/
+                #   李牧 一次占满 3 个主炉，信陵君（4h，只能主炉）等到 5.025 才开，
+                #   4h 炉 5.025→9.025，顶层西施跟着从 8.062 推到 9.025（完工 +0.97h）。
+                #   判据：主炉余量 ≤ 「后面到期且料齐的不可偷炉 op 数」→ 40 面卡
+                #   先用偷炉；偷炉也没有就让位（自己连料都不占，直接向后扫）。
+                if (m.is_40(cid) and ws.main_free - used_main > 0
+                        and self.main_reserve):
+                    _need_main = 0
+                    # 视野按**时间**而非数组下标：ops 里 buy/refine 交错，只看
+                    # scan_window 个下标常漏掉 4~8 个 op 之后就到期的主炉卡
+                    # （2★ 实测：王翦只看 6 个下标只数到白起、漏掉信陵君 → 让位判断失效）。
+                    _horizon = elapsed + max(2 * TICK_SECS, 3600.0)
+                    for j in range(i + 1, len(ops)):
+                        opj = ops[j]
+                        if opj["start"] > _horizon:
+                            break         # start 有序，后面更晚
+                        if issued[j] or opj["kind"] != "refine":
+                            continue
+                        cj = opj["cid"]
+                        if self._owner[cj].is_40(cj):
+                            continue
+                        if all((f not in protected
+                                and (has_slot(f) or _soon(f)))
+                               for f in self._owner[cj].feeders(cj)):
+                            _need_main += 1
+                    if ws.main_free - used_main <= _need_main:
+                        if steal_avail > 0:
+                            steal_avail -= 1
+                            picks = []
+                            for f in feeders:
+                                sl = take_slot(f)
+                                picks.append((f, sl[0], sl[1]))
+                            for _c, _s, _st in picks:
+                                box_free_local += 1
+                            _fc = ([_c for (_c, _s, _st) in picks]
+                                   if any(_s < 0 for (_c, _s, _st) in picks) else [])
+                            actions.append(Action(
+                                kind="refine", target=cid,
+                                feeders=[(s, st) for (_c, s, st) in picks],
+                                feed_cids=_fc, steal=True,
+                                note=f"DP精炼 {cid}（偷炉·让主炉）"))
+                            issued[i] = True
+                            n_ref += 1
+                            if self.dbg_op:
+                                self._oplog.append((_t_dbg, i, cid, "偷炉让主炉"))
+                            i += 1
+                            continue
+                        if self.dbg_op:
+                            self._oplog.append((_t_dbg, i, cid, "让主炉待命"))
+                        i += 1
+                        continue
                 steal = False
                 if used_main < ws.main_free:
                     used_main += 1
+                    picks = []
+                    for f in feeders:
+                        sl = take_slot(f)
+                        picks.append((f, sl[0], sl[1]))
                 elif steal_avail > 0 and m.is_40(cid):
                     steal_avail -= 1
                     steal = True
+                    picks = []
+                    for f in feeders:
+                        sl = take_slot(f)
+                        picks.append((f, sl[0], sl[1]))
                 else:
                     if self.dbg_op:
                         self._oplog.append((_t_dbg, i, cid, "无炉位"))
