@@ -115,11 +115,19 @@ class Engine:
     async def run_sim(self, change_cur: int = 18, store_cur: int = 200,
                      max_ticks: int = 20000, interval: int = 45,
                      gift: int = 0, chaos: dict | None = None,
-                     seed: int = 0):
+                     seed: int = 0, gift_box: int = 0,
+                     gift_drain: bool = False,
+                     gift_upper: int = 0, gift_lower: int = 0):
         """跑一遍仿真。返回 (VirtualSession, 实际 tick 数)。
 
         gift > 0 时先往换卡箱塞 N 张礼物卡（48 面）——生产环境箱里本来就有累计的
         礼物卡，变卡由此供给 40 面素材。bench 默认 0 保持「空箱起步」的可比口径。
+
+        **gift_box**（与 gift 无关，别混）：礼物箱（freegift_get_list）的初始件数。
+        真机 2026-10-28 实测 46/50。旧版虚拟层没有礼物箱模拟 → `gift_inbox()`
+        读到空响应 count=0 → `gift_drain` 永不触发，这条路径从未被测过。
+
+        **gift_drain**：打开「收礼变卡」环节（生产界面对应勾选框）。
 
         chaos：扰动覆盖（见 `_sim_faithful.CHAOS_SAFE/CHAOS_STRESS`）。默认走
         SAFE 档——含**真实**的变卡约 50% 失败（失败也烧源卡）。环境变量
@@ -139,12 +147,25 @@ class Engine:
                 if s is None:
                     break
                 vs.change[s] = gid
+        if gift_box > 0:
+            # 真机形态：老件在前（gift_inbox 按 time 升序，drain 从最老的开始收）
+            vs.gift_box = [{"index_id": 10000 + i,
+                            "freegift_id": sim.GIFT_BOX_DEFAULT_ID,
+                            "sender": f"sim{i}",
+                            "nick": "",
+                            "time": 1000 + i} for i in range(gift_box)]
 
         ar = AutoRefine(vs, self.queue, buy=self.buy, max_rounds=self.max_rounds)
         if self.surplus_sets:
             ar.surplus_sets = int(self.surplus_sets)
         ar.steal_enabled = bool(self.steal_enabled)
         ar.dp_mode = bool(self.use_dp)      # ★ 生产同一个开关
+        # 收礼变卡（生产界面对应「收礼变卡」勾选框）
+        ar.gift_drain = bool(gift_drain)
+        if gift_upper:
+            ar.gift_upper = int(gift_upper)
+        if gift_lower:
+            ar.gift_lower = int(gift_lower)
         vs.ar = ar
         self.ar = ar
 

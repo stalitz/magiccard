@@ -44,7 +44,18 @@ from backend.auto_refine import AutoRefine, CHANGE_FACE, card_name, _gift_info_m
 from backend import gift as gf
 from backend.constants import (EP_MAINPAGE, EP_REFINE, EP_BUY, EP_COLLECTION_ADD,
                               EP_COLLECTION_GET, EP_USER_LIST, EP_STEAL, EP_TRANSFER,
+                              EP_FREEGIFT_LIST, EP_FREEGIFT_TAKE,
                               scale_secs, TIME_SCALE)
+
+# 收礼产物：真机 freegift_take 的 itemid 由服务端按 (freegift_id, action) 决定。
+# 已实证组合（gift.py 注释，来自 songli.har）：
+#   81 + action=2 → 7773 蚕丝；82 + action=2 → 7775 金丝线；84 + action=1 → 7774 五彩线。
+#   三者都是 **48 面礼物卡**（theme=487）。
+# 未实证的 freegift_id 一律按 7773 计 —— 同样是 48 面卡，只影响 cid 不影响面额，
+# 对本模块关心的「能不能变出 40 面」无影响（★ 不写成「未知就失败」，那会低估）。
+GIFT_TAKE_ITEM = {81: 7773, 82: 7775, 84: 7774}
+GIFT_TAKE_FALLBACK = 7773
+GIFT_BOX_DEFAULT_ID = 81        # 真机实测 46 件里 34 件是 81
 
 
 # ---- 把 asyncio.sleep 变成瞬时（虚拟时钟自己控制，不需要真等） ----
@@ -139,6 +150,14 @@ class VirtualSession:
         self.collected: dict[int, set] = {}   # tid -> 已收集 qq秀 实例 id（模拟真实上交反馈）
         self.completions: list[tuple] = []    # (完工时刻endtime, cid, 是否偷炉)——精确完工记录
         self.perturb_log: list[tuple] = []    # (时刻, 类型, 细节) —— 外部扰动留痕
+        # ---- 礼物箱（freegift_get_list，与卡箱无关）----
+        # 真机实测 2026-10-28：count=46/50，其中 freegift_id=81 占 34 件。
+        # 旧版没有这个模拟 → `gift_inbox()` 读到静默 code=0 的空响应 → count=0 →
+        # `gift_drain`（收礼变卡）在仿真里**永不触发**，这条路径等于从未被测过。
+        # 条目：{index_id, freegift_id, sender, time}（与 gift.gift_inbox 解析同形）。
+        self.gift_box: list[dict] = []
+        self.gift_taken = 0                   # 已收件数（统计用）
+        self.gift_item_lost = 0               # 收到但卡箱塞不下而丢掉的件数
 
     # ---- 槽位分配 ----
     def _free_change_slot(self):
@@ -413,6 +432,29 @@ class VirtualSession:
         return {"code": 0, "message": "ok"}
 
     async def qzone(self, method: str, endpoint: str, **kw):
+        # ---- 礼物箱：列表 / 收礼（真机 freegift/freegift_get_list、freegift_take）----
+        # 收礼产物直接进卡箱（changebox 优先、其次 storebox）—— 依据 gift.py:locate_card
+        # 注释「HAR 里 7773 位于 changebox slot=1」，即礼物卡是**在箱里**被定位后变卡的，
+        # 不是独立道具袋。所以这里复用 _add_to_box，箱满即丢（与真机一致）。
+        if endpoint == EP_FREEGIFT_LIST:
+            return {"code": 0, "data": {"freegifts": [
+                {"index_id": g["index_id"], "freegift_id": g["freegift_id"],
+                 "sender": g["sender"], "nick": g.get("nick") or "", "time": g["time"]}
+                for g in sorted(self.gift_box, key=lambda x: x["time"])]}}
+        if endpoint == EP_FREEGIFT_TAKE:
+            idx = int(kw.get("index_id") or 0)
+            for i, g in enumerate(self.gift_box):
+                if int(g["index_id"]) != idx:
+                    continue
+                self.gift_box.pop(i)
+                itemid = GIFT_TAKE_ITEM.get(int(g["freegift_id"]), GIFT_TAKE_FALLBACK)
+                if not self._add_to_box(itemid):
+                    # 箱满：礼物已从箱子扣掉，但卡没地方放 → 真机同样丢
+                    self.gift_item_lost += 1
+                self.gift_taken += 1
+                return {"code": 0, "data": {"change": {"bag": [
+                    {"itemid": itemid, "num": 1, "type": 1}]}}}
+            return {"code": -1, "message": "礼物不存在或已被收取"}
         # 变卡（card_user_transfer_card）：消耗源卡 -> 产出目标卡
         if endpoint == EP_TRANSFER:
             src_id = int(kw.get("srcid") or 0)
