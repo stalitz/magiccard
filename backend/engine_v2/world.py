@@ -111,15 +111,28 @@ class WorldState:
             except (TypeError, ValueError):
                 slot = -1
             end = 0
-            for key in (cid, slot):        # 仿真按卡 id 对齐、真机按炉序号对齐
-                if node_end.get(key):
-                    end = node_end[key]
-                    break
-            if not end:                    # 真机回退：btime + locktime
+            # ★★ 首选卡片自带的 btime+locktime（逐卡精确，真机与仿真都有）：
+            #   `<stove endtime>` 是**整条队列**的末尾时刻，用它给排队中的每一张赋
+            #   endtime 会把先出炉的那张算晚（真机 slot 2 的 2370 会被错配成炉 2 的
+            #   1793120002，凭空晚 2243 秒）。
+            try:
+                bt = int(c.get("btime") or 0)
+                lt = int(c.get("locktime") or 0)
+                if bt and lt:
+                    end = bt + lt
+            except (TypeError, ValueError):
+                end = 0
+            if not end:
+                # 回退：按**炉号**对齐（真机 `<stove id="0/1/2">` 是炉序号，不是卡 id）。
+                stove_no = -1
                 try:
-                    end = int(c.get("btime") or 0) + int(c.get("locktime") or 0)
+                    stove_no = int(c.get("stove") or -1)
                 except (TypeError, ValueError):
-                    end = 0
+                    stove_no = -1
+                for key in (stove_no, cid, slot):
+                    if node_end.get(key):
+                        end = node_end[key]
+                        break
             if not end and now:
                 try:
                     end = now + int(c.get("left") or 0)

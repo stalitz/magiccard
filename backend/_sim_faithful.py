@@ -43,7 +43,8 @@ from backend import auto_refine as ar_mod
 from backend.auto_refine import AutoRefine, CHANGE_FACE, card_name, _gift_info_map
 from backend import gift as gf
 from backend.constants import (EP_MAINPAGE, EP_REFINE, EP_BUY, EP_COLLECTION_ADD,
-                              EP_COLLECTION_GET, EP_USER_LIST, EP_STEAL, EP_TRANSFER)
+                              EP_COLLECTION_GET, EP_USER_LIST, EP_STEAL, EP_TRANSFER,
+                              scale_secs, TIME_SCALE)
 
 
 # ---- 把 asyncio.sleep 变成瞬时（虚拟时钟自己控制，不需要真等） ----
@@ -62,14 +63,16 @@ def _load_card_lib():
 
 
 LIB = _load_card_lib()
-# 卡 id -> 炼制秒数（来自 theme_compose_list[c][6]，与真实 net_plan/plan_summary 同口径）
+# 卡 id -> 炼制秒数（theme_compose_list[c][6]）★ 必须乘真机校准系数：
+#   真机 `<card locktime>` = floor(表值 × TIME_SCALE)，炉等级 + 精灵加速的合计
+#   （2026-10-28 四张在炉卡逐秒吻合）。`MC_TIME_SCALE=1.0` 回到旧口径做对照。
 SECS = {}
 # 卡 id -> 面额（card_list[c][3]，与 ThemePlan.cards[cid][3] / cards_price 同源）
 FACE = {}
 # 卡 id -> 3 张配方素材（theme_compose_list[c][3..5]），真实服务端会校验
 COMPOSE = {}
 for c in LIB["theme_compose_list"]:
-    SECS[int(c[2])] = int(c[6])
+    SECS[int(c[2])] = scale_secs(int(c[6]))
     COMPOSE[int(c[2])] = (int(c[3]), int(c[4]), int(c[5]))
 for _c in LIB["card_list"]:
     FACE[int(_c[0])] = int(_c[3] or 0)
@@ -80,7 +83,7 @@ TAKE2 = os.environ.get("MC_SIM_TAKE2") == "1"
 
 
 def secs_of(cid: int) -> int:
-    return SECS.get(int(cid), 3600)
+    return SECS.get(int(cid), scale_secs(3600))
 
 
 def face_of(cid: int) -> int:
@@ -103,8 +106,16 @@ CHAOS_STRESS = {"change_fail": 0.5, "buy_net_fail": 0.03, "mainpage_fail": 0.01,
 
 # ---- 虚拟服务端 ----
 class VirtualSession:
-    MAIN_SLOTS = [1, 2, 3]          # 主炉 3 个（与用户心智一致）
-    STEAL_SLOT = 9                  # 偷炉 1 个
+    # ★ 炉位（2026-10-28 真机实测纠正）：`<stovebox cur="7" max="7" stovenum="3">`
+    #   = **3 个主炉 + 每炉 2 个卡位（1 在炼 + 1 排队）+ 1 个偷炉位** = 7。
+    #   旧口径 `MAIN_SLOTS=[1,2,3]`（一槽一张、无排队）会让第 4 张直接「炉满」，
+    #   与真机「2370 结束 1793117671 == 2372 开始 1793117671」的链式排队不符。
+    STOVES = 3                       # 主炉数（stovenum）
+    SLOTS_PER_STOVE = 2              # 每炉卡位：第 2 个是排队位
+    STEAL_SLOT = 6                   # 偷炉位（独立，1 个）
+    MAIN_SLOTS = [s for s in range(STOVES * SLOTS_PER_STOVE)]   # 0..5
+    STOVE_LV = 9                     # 炉等级（真机 <stove lv="9">）
+    STOVE_STRONG_LV = 30             # 强化等级（真机 strong_lv="30"）
 
     def __init__(self, uin: int = 123456, change_cur: int = 80, store_cur: int = 80,
                  chaos: dict | None = None, seed: int = 0):
@@ -145,10 +156,28 @@ class VirtualSession:
         return None
 
     def _free_main_stove(self):
-        for s in self.MAIN_SLOTS:
-            if s not in self.stoves:
-                return s
-        return None
+        """返回 (卡位 slot, 炉号 stove)；每炉最多 SLOTS_PER_STOVE 张（1 炼 + 1 排）。
+
+        优先填「队列最短」的炉：先在完全没有卡的炉里找，再找只有 1 张（在炼）的炉
+        —— 这样排队位只在前一张已经在炼时才占用，与真机「slot 0 在炼 / slot 1 空位」
+        的形态一致。
+        """
+        for want in (0, 1):
+            for stove in range(self.STOVES):
+                slots = [stove * self.SLOTS_PER_STOVE + i
+                         for i in range(self.SLOTS_PER_STOVE)]
+                used = [s for s in slots if s in self.stoves]
+                if len(used) == want:
+                    free = [s for s in slots if s not in self.stoves]
+                    if free:
+                        return free[0], stove
+        return None, None
+
+    def _queue_end(self, stove: int) -> int:
+        """该炉队列的最后一个 endtime（空炉 = 0）。"""
+        ends = [st["endtime"] for s, st in self.stoves.items()
+                if st.get("stove") == stove]
+        return max(ends) if ends else 0
 
     def _free_steal_stove(self):
         if self.STEAL_SLOT not in self.stoves:
@@ -181,34 +210,46 @@ class VirtualSession:
             return f'<{key} cur="{cur}" max="{cur*2}">{cards}</{key}>'
         change_xml = box_xml("changebox", self.change, self.change_cur)
         store_xml = box_xml("storebox", self.store, self.store_cur)
-        # 卡炉：占用的 + 空的主炉 + 偷炉（空/占）
+        # 卡炉：按「炉 × 卡位」逐位输出（空位也输出 id=0，真机就是这个形态）
         stove_cards = []
-        main_occupied = 0
-        for s in self.MAIN_SLOTS:
-            st = self.stoves.get(s)
-            if st:
-                main_occupied += 1
-                flag = 2 if now >= st["endtime"] else 1
-                stove_cards.append(
-                    f'<card slot="{s}" id="{st["cid"]}" flag="{flag}" '
-                    f'opuin="{st["opuin"]}"/>')
-            else:
-                stove_cards.append(f'<card slot="{s}" id="0"/>')
+        for stove in range(self.STOVES):
+            for i in range(self.SLOTS_PER_STOVE):
+                s = stove * self.SLOTS_PER_STOVE + i
+                st = self.stoves.get(s)
+                if st:
+                    flag = 2 if now >= st["endtime"] else 1
+                    stove_cards.append(
+                        f'<card slot="{s}" stove="{stove}" id="{st["cid"]}" '
+                        f'flag="{flag}" btime="{st["btime"]}" '
+                        f'locktime="{st["locktime"]}" opuin="{st["opuin"]}"/>')
+                else:
+                    stove_cards.append(
+                        f'<card slot="{s}" stove="{stove}" id="0"/>')
         steal = self.stoves.get(self.STEAL_SLOT)
         if steal:
             flag = 2 if now >= steal["endtime"] else 1
             stove_cards.append(
-                f'<card slot="{self.STEAL_SLOT}" id="{steal["cid"]}" flag="{flag}" '
-                f'opuin="{steal["opuin"]}" slottype="steal"/>')
+                f'<card slot="{self.STEAL_SLOT}" stove="-1" id="{steal["cid"]}" '
+                f'flag="{flag}" btime="{steal["btime"]}" '
+                f'locktime="{steal["locktime"]}" opuin="{steal["opuin"]}" '
+                f'slottype="steal"/>')
         else:
-            stove_cards.append(f'<card slot="{self.STEAL_SLOT}" id="0" slottype="steal"/>')
+            stove_cards.append(
+                f'<card slot="{self.STEAL_SLOT}" stove="-1" id="0" slottype="steal"/>')
+        n_slots = len(self.MAIN_SLOTS) + 1
         stovebox = (
-            f'<stovebox cur="{len(self.MAIN_SLOTS)+1}" max="{(len(self.MAIN_SLOTS)+1)*2}">'
+            f'<stovebox cur="{n_slots}" max="{n_slots}" stovenum="{self.STOVES}">'
             + "".join(stove_cards) + "</stovebox>")
+        # `<stove>` 的 id = **炉序号**（真机如此；旧仿真错写成卡 id）。endtime = 该炉
+        # 队列最后一个的结束时刻（真机炉 1 有「2370 已完成 + 2372 在炼」时报的是 2372）。
         stoves_xml = "".join(
-            f'<stove id="{st["cid"]}" endtime="{st["endtime"]}"'
-            + (' slottype="steal"' if slot == self.STEAL_SLOT else '') + '/>'
-            for slot, st in self.stoves.items())
+            f'<stove id="{stove}" endtime="{self._queue_end(stove)}" '
+            f'lv="{self.STOVE_LV}" strong_lv="{self.STOVE_STRONG_LV}"/>'
+            for stove in range(self.STOVES))
+        if self.STEAL_SLOT in self.stoves:
+            st = self.stoves[self.STEAL_SLOT]
+            stoves_xml += (f'<stove id="{self.STOVES}" endtime="{st["endtime"]}" '
+                           f'slottype="steal"/>')
         return (f'<user randchance="0" gold_fen="0" color_stone="0">'
                 f'<hello time="{now}"/>'
                 + change_xml + store_xml + stovebox + stoves_xml +
@@ -224,13 +265,20 @@ class VirtualSession:
             if opu and opu != str(self.uin):
                 if self._rand("mainpage_fail"):
                     return {"code": -1, "message": "网络超时"}
-                empty = len(self.MAIN_SLOTS)        # 好友 3 个主炉都空着
-                cards = "".join(f'<card slot="{s}" id="0"/>'
+                # 好友主页：3 个主炉全空（每炉 2 个卡位）
+                empty = len(self.MAIN_SLOTS)
+                cards = "".join(f'<card slot="{s}" stove="{s // self.SLOTS_PER_STOVE}" id="0"/>'
                                 for s in self.MAIN_SLOTS)
+                stoves_xml = "".join(
+                    f'<stove id="{stove}" endtime="0" lv="{self.STOVE_LV}" '
+                    f'strong_lv="{self.STOVE_STRONG_LV}"/>'
+                    for stove in range(self.STOVES))
                 return {"code": 0, "raw":
                         f'<user randchance="0"><changebox cur="18" max="36"/>'
                         f'<storebox cur="200" max="400"/>'
-                        f'<stovebox cur="3" max="6">{cards}</stovebox>'
+                        f'<stovebox cur="{empty}" max="{empty}" '
+                        f'stovenum="{self.STOVES}">{cards}</stovebox>'
+                        f'{stoves_xml}'
                         f'<cap><stove free_main="{empty}"/></cap></user>'}
             if self._rand("mainpage_fail"):
                 return {"code": -1, "message": "网络超时"}
@@ -345,16 +393,23 @@ class VirtualSession:
             return {"code": -1, "message": "偷炉只能炼40面卡"}
         if steal:
             slot = self._free_steal_stove()
+            stove = -1
             opuin = str(kw.get("opuin") or self.friend_uin)
         else:
-            slot = self._free_main_stove()
+            slot, stove = self._free_main_stove()
             opuin = str(self.uin)
         if slot is None:
             return {"code": -33003, "message": "炉满"}
         for _cid, s, st in mats:          # 校验 + 炉位都通过才扣素材
             self._remove_mat(s, st)
-        self.stoves[slot] = {"cid": target, "opuin": opuin,
-                             "endtime": self.now + secs_of(target), "steal": steal}
+        # ★ 排队：真机同炉可放多张，后一张的 btime = 前一张的 endtime（链式预计算，
+        #   实测 2370 结束 1793117671 == 2372 开始 1793117671）。所以投下去那刻，
+        #   排队卡的 endtime 已经定了，取不取前面那张都不影响它。
+        lock = secs_of(target)
+        btime = max(self.now, self._queue_end(stove)) if stove >= 0 else self.now
+        self.stoves[slot] = {"cid": target, "opuin": opuin, "stove": stove,
+                             "btime": btime, "locktime": lock,
+                             "endtime": btime + lock, "steal": steal}
         return {"code": 0, "message": "ok"}
 
     async def qzone(self, method: str, endpoint: str, **kw):
@@ -570,7 +625,7 @@ async def main():
           f"初始礼物卡{args.gift}张 变卡{'关闭(steady)' if args.steady else '约50%失败(真实)'} "
           f"偷炉={'开' if ar.steal_enabled else '关'} "
           f"调度={'DP' if ar.dp_mode else '贪心轮转'} ===")
-    print(f"主炉={vs.MAIN_SLOTS.__len__()}个 偷炉={'1个' if ar.steal_enabled else '0个'} "
+    print(f"主炉={vs.STOVES}个 偷炉={'1个' if ar.steal_enabled else '0个'} "
           f"interval=45s 卡炉秒数来自 theme_compose_list[6]（真实）")
     print(f"套数模式={'固定%d套/轮' % args.sets if args.sets > 0 else '自动(未收集qq秀数)'} "
           f"轮数上限={max(1, args.rounds)}"
@@ -608,7 +663,7 @@ async def main():
     out.append(f"=== 有操作的 tick 流水：tid={args.tid} {ar.plans[args.tid].name} "
                f"初始礼物卡{args.gift}张 变卡{'关' if args.steady else '50%失败'} "
                f"偷炉={'开' if ar.steal_enabled else '关'} ===")
-    out.append(f"主炉={vs.MAIN_SLOTS.__len__()} 偷炉={'1' if ar.steal_enabled else '0'} "
+    out.append(f"主炉={vs.STOVES} 偷炉={'1' if ar.steal_enabled else '0'} "
                f"interval=45s 卡炉秒数来自 theme_compose_list[6]（真实）")
     out.append(f"完成于 模拟{done_hh}h（第{tick_n + 1} tick）；有实际操作的 tick 共 {len(groups)} 个 / 总计 {tick_n + 1} tick")
     out.append("")
@@ -627,7 +682,7 @@ async def main():
     # ---- 机器可读摘要（供 sched_cmp/run_prod_compare.py 对比，不影响任何决策）----
     plan = ar.plans[args.tid]
     top_cid = max(plan.ids, key=lambda c: plan.depth.get(c, 0))
-    machines = len(vs.MAIN_SLOTS) + (1 if ar.steal_enabled else 0)
+    machines = vs.STOVES + (1 if ar.steal_enabled else 0)
     done_cnt = Counter(cid for _, cid, _ in vs.completions)
     t_last = max((e for e, _, _ in vs.completions), default=0)
     leftover = [(st["cid"], st["endtime"]) for st in vs.stoves.values()]

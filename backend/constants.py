@@ -145,3 +145,27 @@ def err_msg(code: int) -> str:
     if code == 0:
         return "成功"
     return ERR_CODES.get(code, f"未知错误码 {code}")
+
+
+# ---------------------------------------------------------------------
+# ★ 炼卡时长校准（2026-10-28 真机实测，只读）
+# ---------------------------------------------------------------------
+# 真机 `<card btime locktime>` 的 locktime 不是卡片表 `theme_compose_list[6]` 的原值，
+# 而是它的 0.6232 倍（floor 后逐秒吻合，四张在炉卡全对）：
+#   cid=11354 表 182400 → 实 113671 = floor(182400×0.6232)
+#   cid=2370/2372 表 3600 → 实 2243  = floor(3600×0.6232)
+#   cid=2373  表 14400 → 实 8974  = floor(14400×0.6232)
+# 来源 = 炉等级（`<stove lv="9" strong_lv="30">`）+ 精灵（`<elf hunger="0" power="5" lv="11">`）
+# 的**合计**加速，单帧无法拆分；精灵饥饿时是否回退到 1.0 尚未实测（`hungertime` 到了再采）。
+# ★ 旧口径（=1.0）会让所有模型高估时长约 1.6×；`MC_TIME_SCALE=1.0` 可回到旧口径做对照。
+import os as _os
+
+TIME_SCALE = float(_os.environ.get("MC_TIME_SCALE") or "0.6232")
+
+
+def scale_secs(secs: int) -> int:
+    """卡片表秒数 → 真机实际炉·秒。0 表示「不是炼出来的卡」，原样返回。"""
+    s = int(secs or 0)
+    if s <= 0 or TIME_SCALE == 1.0:
+        return s
+    return max(1, int(s * TIME_SCALE))

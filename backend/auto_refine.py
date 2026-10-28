@@ -62,7 +62,8 @@ from pathlib import Path
 from . import gift as gf
 from . import buylog
 from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_COLLECTION_GET, EP_MAINPAGE,
-                        EP_REFINE, EP_STEAL, EP_USER_LIST, err_msg)
+                        EP_REFINE, EP_STEAL, EP_USER_LIST, err_msg, scale_secs,
+                        TIME_SCALE)
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -84,9 +85,18 @@ def _lib() -> dict:
     global _DERIV
     if _DERIV is None:
         lib = json.loads((DATA / "card_lib.json").read_text(encoding="utf-8"))
+        # ★ comp 行里的 secs（[6]）必须是**真机实际炉·秒**，不是卡片表原值：
+        #   真机 locktime = floor(表值 × 0.6232)（炉等级 + 精灵加速，2026-10-28 实测
+        #   四张卡逐秒吻合，见 constants.TIME_SCALE）。这里统一缩放一次，所有下游
+        #   （ThemePlan.comp / ThemeModel.secs / net_plan / _card_secs）自动同口径。
+        _comp: dict = {}
+        for _c in lib["theme_compose_list"]:
+            _row = list(_c)
+            _row[6] = scale_secs(int(_c[6] or 0))
+            _comp[int(_c[2])] = _row
         _DERIV = (
             {int(c[0]): c for c in lib["card_list"]},
-            {int(c[2]): c for c in lib["theme_compose_list"]},
+            _comp,
             {int(t[0]): t for t in lib["theme_card_list"]},
             lib,
         )

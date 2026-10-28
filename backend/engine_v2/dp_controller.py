@@ -138,6 +138,13 @@ class DPTickController:
         #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
         #   消融入口：MC_MAIN_RESERVE=0 关。
         self.main_reserve = os.environ.get("MC_MAIN_RESERVE", "1") == "1"
+        # ★ 排队位（真机每炉 2 个卡位：1 在炼 + 1 排队，`<stovebox cur="7"
+        #   stovenum="3">` = 3×2 + 偷炉 1）。
+        #   ★★「能排队」≠「该排队」：提前投会把素材锁死在排队卡上（换卡箱 18 格
+        #   下尤其致命），而且 DP 骨架只按 3 并发排期。1★ tid=85 旧时长实测：
+        #   允许排队 8.12h vs 只按并发 7.08h（更慢 1.04h）→ 默认按「并发上限」收窄，
+        #   `MC_MAIN_QUEUE=1` 才允许往已在炼的炉追加排队。
+        self.allow_queue = os.environ.get("MC_MAIN_QUEUE") == "1"
         # （流水线一环 `pipe_sets` / `pipe_min_free` 的定义在下方 `buy_free` 段之后：
         #   该策略假设「买卡不占 tick」，与 buy_free 是同一口径，不能独立开。）
         # 逐 op 执行日志（默认关；排查「为什么这一炉没开」用）
@@ -810,6 +817,23 @@ class DPTickController:
                 "cp_thr": _cp_thr}
         return plan, stats
 
+    def _main_cap(self, ws) -> int:
+        """本 tick 可投的主炉张数。
+
+        真机每炉 2 个卡位（1 在炼 + 1 排队；`<stovebox cur="7" stovenum="3">`
+        = 3×2 + 偷炉 1），所以 `ws.main_free`（空卡位数）会大于并发炉数。
+        ★ 但「能排队」≠「该排队」：提前投让素材长时间锁在排队卡上（换卡箱 18 格
+        下会挤掉正要买的底卡），而 DP 骨架只按 `machines` 并发排期 —— 两者不一致
+        时执行层会「比模型更早锁料、更晚出活」。
+        实测（1★ tid=85，TIME_SCALE=1.0 即旧时长）：允许排队 8.12h、只按并发
+        7.08h → **默认收窄到并发上限**；`MC_MAIN_QUEUE=1` 放开排队做消融。
+        """
+        if self.allow_queue:
+            return ws.main_free
+        running = sum(1 for f in ws.furnaces
+                      if not f.steal and f.endtime - ws.now > EPS)
+        return max(0, min(ws.main_free, self.machines - running))
+
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
                   box_stock, pending, active=None, buy0_map=None):
@@ -835,6 +859,8 @@ class DPTickController:
         ops = plan["ops"]
         issued = plan["issued"]
         elapsed = max(0.0, float(ws.now) - plan["solved_at"])
+        # ★ 本 tick 可投的主炉张数（见 `_main_cap`：默认只按并发，不允许排队）
+        main_cap = self._main_cap(ws)
         avail_slots: Dict[int, List[tuple]] = {}
         for cid, slot, slottype in ws.slots:
             if cid > 0:
@@ -972,7 +998,7 @@ class DPTickController:
         #   「非底卡全在箱才买」，见 4b28aac）。此处的 3 张是「下一炉的料」。
         #   pass 2 的缺料补买不吃这个额度（缺料 ⇒ 有炉位 ⇒ abs_slots>0，
         #   且另给 base_quota_emerg 保底），不会把「有炉位但缺料」也闸死。
-        abs_slots = ws.main_free + soon_main
+        abs_slots = self._main_cap(ws) + soon_main
         # ★★ 2026-10-27 消融（`tests/_probe_prebuy_ab.py`，18/200、单套 1 轮、45s/tick）：
         #   | 档 | 炉满不预买 | 保底一波 | 提前 2 tick+保底 |
         #   | 2★ | 23.12h | 23.07h | — |
@@ -1184,7 +1210,7 @@ class DPTickController:
                     self._dbg["喂料不足:" + str(f)] += 1
                     return False
             # 2) 空炉
-            if used_main < ws.main_free:
+            if used_main < main_cap:
                 return True
             if steal_avail > 0 and m.is_40(cid):
                 return True
@@ -1257,7 +1283,7 @@ class DPTickController:
                 #   4h 炉 5.025→9.025，顶层西施跟着从 8.062 推到 9.025（完工 +0.97h）。
                 #   判据：主炉余量 ≤ 「后面到期且料齐的不可偷炉 op 数」→ 40 面卡
                 #   先用偷炉；偷炉也没有就让位（自己连料都不占，直接向后扫）。
-                if (m.is_40(cid) and ws.main_free - used_main > 0
+                if (m.is_40(cid) and main_cap - used_main > 0
                         and self.main_reserve):
                     _need_main = 0
                     # 视野按**时间**而非数组下标：ops 里 buy/refine 交错，只看
@@ -1277,7 +1303,7 @@ class DPTickController:
                                 and (has_slot(f) or _soon(f)))
                                for f in self._owner[cj].feeders(cj)):
                             _need_main += 1
-                    if ws.main_free - used_main <= _need_main:
+                    if main_cap - used_main <= _need_main:
                         if steal_avail > 0:
                             steal_avail -= 1
                             picks = []
@@ -1304,7 +1330,7 @@ class DPTickController:
                         i += 1
                         continue
                 steal = False
-                if used_main < ws.main_free:
+                if used_main < main_cap:
                     used_main += 1
                     picks = []
                     for f in feeders:
@@ -1425,7 +1451,7 @@ class DPTickController:
                     continue
                 if any(f in protected or not has_slot(f) for f in feedersj):
                     continue
-                if used_main >= ws.main_free:
+                if used_main >= main_cap:
                     if not (steal_avail > 0 and mj.is_40(opj["cid"])):
                         break       # 无炉位（后续 op 同样无炉）
                 picks = []
@@ -1507,7 +1533,7 @@ class DPTickController:
                                                 completed_rounds, max_rounds,
                                                 credits=credits,
                                                 sets_fn=self.sets_fn,
-                                                free_main=ws.main_free,
+                                                free_main=self._main_cap(ws),
                                                 box_free=ws.change_free)
 
         # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
