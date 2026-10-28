@@ -127,6 +127,18 @@ class DPTickController:
         # 级联（500tick solves 69 次）。
         self.streak_limit = int(os.environ.get("MC_STREAK") or streak_limit)
         self.scan_window = int(os.environ.get("MC_SCAN") or scan_window)
+        # ★ 2026-10-27 消融（用户定调「DP 算的是投炉顺序，不是第几 tick 投哪个炉」）：
+        #   DP 的优化目标是 makespan，op["start"] 是「该最优序下最早可开工时刻」
+        #   —— 下界，不是指令。旧执行层把它当「必须等到」用（未到期即 break），
+        #   是下界当上界，料已齐/炉已空时也要空等。开关开 = 纯按顺序发，只看
+        #   料齐+炉空，不看 start。
+        self.order_only = os.environ.get("MC_ORDER_ONLY") == "1"
+        # 逐 op 执行日志（默认关；排查「为什么这一炉没开」用）
+        self.dbg_op = os.environ.get("MC_DBG_OP") == "1"
+        self._oplog: List[tuple] = []
+        #   （配套修复见 `_run_plan` 的 `_not_due` 分支：未到期且投不了 = 计划内
+        #     等待，不应急买、不计 discrepancy。旧的 `MC_BUY_GUARD` 硬门已删 ——
+        #     它让 4★ 买卡 191→204、收益归零，属错误修法。）
         self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
         # ★ 喂料底卡预买提前量（单位=tick）：买来的卡要下一 tick 才落箱/才知道
         #   slot，所以「下一 tick 会空」的炉必须在**本 tick** 就把料买进来，
@@ -734,14 +746,19 @@ class DPTickController:
                 planned_buy[c] += 1
             else:
                 ops.append({"kind": "refine", "cid": c, "start": st_tick,
-                            "feeders": list(self._owner[c].feeders(c))})
+                            "feeders": list(self._owner[c].feeders(c)),
+                            "cp": float(cpL[live_idx[c]])})
         ops.sort(key=lambda o: (o["start"], 0 if o["kind"] == "buy" else 1,
                                 -cpL[live_idx[o["cid"]]], o["cid"]))
+        # 关键路径长度中位数：早发只给「长链」开口子（见 `_run_plan` 的 `_cp_ok`）
+        _cps = sorted(o.get("cp", 0.0) for o in ops if o["kind"] == "refine")
+        _cp_thr = _cps[len(_cps) // 2] if _cps else 0.0
         plan = {"ops": ops, "issued": [False] * len(ops), "cursor": 0,
                 "solved_at": float(ws.now), "rounds_sig": rounds_sig,
                 "planned_buy": planned_buy, "bought": Counter(),
                 "streak": 0, "discrepancy": 0, "makespan": mk,
-                "n_types": nL, "box_relaxed": bool(stats.get("box_relaxed"))}
+                "n_types": nL, "box_relaxed": bool(stats.get("box_relaxed")),
+                "cp_thr": _cp_thr}
         return plan, stats
 
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
@@ -1124,8 +1141,10 @@ class DPTickController:
             if op["kind"] == "buy":
                 i += 1
                 continue               # 买卡已在 pass 1 处理（透明跳过）
+            _t_dbg = round(elapsed / 3600, 3)
             early = False
-            if op["start"] > elapsed + EPS:
+            _not_due = op["start"] > elapsed + EPS
+            if not self.order_only and _not_due:
                 if first_refine and early_ok(i, op["cid"]):
                     # 头动作提前发（有限偏差③）。仅限头动作——实测：放过窗口内
                     # 任意未到期 op 提前发会占掉关键 op 的计划炉位（75.49→79.46h）。
@@ -1148,7 +1167,24 @@ class DPTickController:
                     if (self._owner[f].is_base(f) and pending.get(f, 0) < 1
                             and not _excl and f not in protected):
                         miss_buy.append(f)
-            if not blocked:
+            # ★ 2026-10-28 纯顺序模式下的早发安全检查：
+            #   绕过 start 门后，若直接发炉就会**抢走未到期前序 op 的喂料**（`early_ok`
+            #   的 reserved 段本就是为了防这个，旧路径只有头动作才走到它）。实测漏掉
+            #   这一段：2★ 炼次 20→22（多炼 2 次、仍慢 0.97h）、3★ −0.65→+1.35、
+            #   4★ 收益 −4.06→−2.06。检查不过就按「计划内等待」静默跳过。
+            _pre_ok = (not _not_due) or early_ok(i, cid)
+            # ★ 2026-10-28 早发只给「长链」开口子（`MC_ORDER_ONLY` 时生效）：
+            #   提前生产本身要付库存代价 —— 产出的中间层在箱里躺着，同时占炉占箱。
+            #   长链（关键路径长）早开能直接缩短完工；短链早开纯粹是堆库存。实测支持：
+            #   4★（每条链都长、箱紧）−3.41h；2★/3★（短链多、ready 集宽）+0.97/+1.35h。
+            #   判据用骨架自己算的 cp（向上关键路径），阈值取 refine op 的 cp 中位数。
+            _cp_ok = (not _not_due) or (op.get("cp", 0.0) >= plan.get("cp_thr", 0.0))
+            # ⚠ 2026-10-28 已证伪并删除：「早发给到期头动作留 1 个炉」
+            #   （`main_free-used_main < 2` 就不早发）。理由看似充分 —— 早发占满炉 →
+            #   头动作到期无炉 → 重解把它往后排 —— 但实测把 4★ 的收益全毁掉并引入
+            #   错误（4★ 78.06→82.10h 且 err=30、1★ +1.00h err=6）。原因：提前开满炉
+            #   本身就是 4★（深链紧箱）收益的来源，留炉 = 把炉闲死。
+            if not blocked and _pre_ok and _cp_ok:
                 picks = []
                 for f in feeders:
                     sl = take_slot(f)
@@ -1160,6 +1196,8 @@ class DPTickController:
                     steal_avail -= 1
                     steal = True
                 else:
+                    if self.dbg_op:
+                        self._oplog.append((_t_dbg, i, cid, "无炉位"))
                     for f in feeders:        # 无炉位：保护喂料，向后扫描
                         if f in avail_slots:
                             protected.add(f)
@@ -1183,15 +1221,31 @@ class DPTickController:
                 n_ref += 1
                 if early:
                     n_early += 1
+                if self.dbg_op:
+                    self._oplog.append((_t_dbg, i, cid, "偷炉" if steal else "开炉"))
                 i += 1
                 continue
             # ---- 阻塞 ----
-            if early:
-                # 提前发试探失败（喂料/炉位在二次检查时被占）→ 静默跳过，
-                # 不计偏差（本就没到计划时刻）。
+            if early or _not_due:
+                # early：提前发试探失败（喂料/炉位在二次检查时被占）→ 静默跳过。
+                # _not_due（仅纯顺序模式可达）：op 未到期且当前投不了 = **计划内的
+                #   等待**（料还没轮到 / 炉还没空），不是「物流失败」。此处若落到
+                #   下面的应急买，就会把「还没轮到」误判成「运输出问题」（2★ 实测
+                #   买卡 87→109、慢 2.99h）。也不计 discrepancy —— 未到期等待不是
+                #   计划与现实的偏差，计了会假触发 disc_over 重解、打乱 DP 顺序。
+                # ★★ 2026-10-28 修：**不得 protected**。protected 的语义是「已到期
+                #   但投不了的 op 锁住自己的料，防止被抢」；未到期的 op 没有锁料权利，
+                #   它只是该等。先前给这里加 protected → cursor 附近 7 个 op 互相把
+                #   箱内料锁死 → 能发的 op 也发不出 → 每 tick 空转（实测 ORDER 日志
+                #   从 38 行暴涨到 5066 行、2★ +0.97h、3★ +1.35h）。前序料由
+                #   `early_ok` 的 reserved 段预留（按 start 覆盖 cursor..idx），够用。
+                if _not_due and self.dbg_op:
+                    self._oplog.append((_t_dbg, i, cid, "未到期跳过",
+                                        tuple(miss_buy)))
                 i += 1
                 continue
-            if (miss_buy and box_free_local >= len(miss_buy)
+            if (miss_buy
+                    and box_free_local >= len(miss_buy)
                     and n_base + len(miss_buy) <= base_quota_emerg
                     and n_buy + n_emerg + len(miss_buy) <= buy_cap):
                 # 有限偏差①：物流失败（缺底卡且骨架无到期买卡）→ 就地补买这一炉
@@ -1212,12 +1266,17 @@ class DPTickController:
                 n_emerg += len(miss_buy)
                 plan["discrepancy"] += len(miss_buy)
                 self.emergency_total += len(miss_buy)
+                if self.dbg_op:
+                    self._oplog.append((_t_dbg, i, cid, "应急买", tuple(miss_buy)))
                 break
             # 有限偏差②：等炉/等复合料 → 保护其在箱喂料，窗口内向后扫描。
             # 计 discrepancy：紧箱场景「等料扫描」高频是计划与现实偏差的信
             # 号——60 格·各2轮 实测：discrepancy 累计驱动 disc_over 重解
             # 正是系统生机（禁掉后槽占 93.6%→3.6%、进度冻结）；CPU 代价由
             # relax 0.5s + 小实例快解算摊薄（10000tick 墙钟 578s）。
+            if self.dbg_op:
+                self._oplog.append((_t_dbg, i, cid, "等料打不开",
+                                    tuple(miss_buy), tuple(feeders)))
             for f in feeders:
                 if f in avail_slots:
                     protected.add(f)
@@ -1236,7 +1295,7 @@ class DPTickController:
                 opj = ops[j]
                 if issued[j] or opj["kind"] != "refine":
                     continue
-                if opj["start"] > elapsed + EPS:
+                if not self.order_only and opj["start"] > elapsed + EPS:
                     break           # 未到期（start 有序，后面更晚）
                 mj = self._owner[opj["cid"]]
                 feedersj = mj.feeders(opj["cid"])
