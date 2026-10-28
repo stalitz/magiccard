@@ -1377,6 +1377,28 @@ async function loadState() {
         return chip("简易箱", lbl, sub);
       })() +
       chip("炼炉", busyN ? `${busyN} 个炼制中` : "全部空闲") +
+      // 精灵状态（只显示，不参与调度）：炉已满级，炼卡时长系数的唯一变量就是
+      // 精灵喂没喂；它只影响**新投炉卡**的时长，在炉卡走 btime+locktime 不受影响。
+      (function () {
+        const e = d.elf || {};
+        if (!e.lv) return "";
+        const hungry = Number(e.hunger || 0) !== 0;
+        let sub = hungry ? "新投炉卡会变慢" : "";
+        if (!hungry && e.hungertime) {
+          const left = e.hungertime - (d.now || 0);
+          // hungertime 已过但 hunger 仍为 0：语义未实证（可能自动重置），
+          // 不猜、不报警，只显示「饱食」。
+          if (left > 0) {
+            sub = left > 48 * 3600
+              ? `${fmtDate(e.hungertime).slice(5)} ${fmtClock(e.hungertime).slice(0, 5)} 会饿`
+              : `${fmtDur(left)}后会饿`;
+          }
+        }
+        const v = hungry
+          ? `<span style="color:var(--danger)">Lv${e.lv} 饿了</span>`
+          : `Lv${e.lv} 饱食`;
+        return chip("精灵", v, sub);
+      })() +
       `<div class="stat-chip" style="grid-column:1/-1">
          <span class="k">炼卡位明细</span>
          <div class="slot-list">${slots}</div>

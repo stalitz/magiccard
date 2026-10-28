@@ -852,9 +852,26 @@ def parse_state(xml_text: str) -> dict:
     out["now"] = now
 
     out["stoves"] = [
-        {"id": _i(s.get("id")), "endtime": _i(s.get("endtime")), "lv": _i(s.get("lv"))}
+        {"id": _i(s.get("id")), "endtime": _i(s.get("endtime")), "lv": _i(s.get("lv")),
+         "strong_lv": _i(s.get("strong_lv"))}
         for s in root.iter("stove")
     ]
+
+    # ★ 精灵（2026-10-28 实测）：`<elf bname type lost losttime hunger powertype
+    #   power exp hungertime lv>`。炉与精灵都已满级，炼卡时长系数的**唯一变量**就是
+    #   精灵喂没喂（`hunger=0` 喂饱）：它只影响「新投炉卡」的时长，在炉卡走
+    #   `btime+locktime` 不受影响。`hungertime` 是**下一次会饿的时刻**
+    #   （实测 1793635200 = 2026-11-03 00:00，未来时间点）。
+    #   总览页只展示状态，不参与任何调度决策。
+    elf = root.find("elf")
+    if elf is not None:
+        out["elf"] = {
+            "lv": _i(elf.get("lv")),
+            "power": _i(elf.get("power")),
+            "hunger": _i(elf.get("hunger")),
+            "hungertime": _i(elf.get("hungertime")),
+            "lost": _i(elf.get("lost")),
+        }
 
     def box(name: str) -> dict:
         b = root.find(name)
