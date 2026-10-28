@@ -138,6 +138,8 @@ class DPTickController:
         #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
         #   消融入口：MC_MAIN_RESERVE=0 关。
         self.main_reserve = os.environ.get("MC_MAIN_RESERVE", "1") == "1"
+        # （流水线一环 `pipe_sets` / `pipe_min_free` 的定义在下方 `buy_free` 段之后：
+        #   该策略假设「买卡不占 tick」，与 buy_free 是同一口径，不能独立开。）
         # 逐 op 执行日志（默认关；排查「为什么这一炉没开」用）
         self.dbg_op = os.environ.get("MC_DBG_OP") == "1"
         self._oplog: List[tuple] = []
@@ -172,6 +174,28 @@ class DPTickController:
         #   也不用花 tick」。把买卡从**解**里拿掉：solver 认为底卡即时可得（只受箱容），
         #   买卡不再占 shop 时间槽、也不再是独立排期节点。
         self.buy_free = os.environ.get("MC_BUY_FREE") == "1"
+        # ★★ 2026-10-28 流水线一环（修「多轮里当前轮排满 → ops 空 → 执行层停手」）：
+        #   多轮场景下 `_calc_sets` 常算出 1 套（1★ 按 `max(各 40 面持有)` 算，而
+        #   一套顶层要 3 张**不同** 40 面 → 箱里刚好各 1 张时 max=1）。此时当前那套
+        #   的顶层已在炉 → `net_plan(sets=1)` 净需求归零 → `_solve_plan` 返回空 ops
+        #   → 执行层整 tick 停手（不是「解出来排不上」，是「根本没解出活」）。
+        #   实锤 tid=178×3 + buy_free：1365 tick 里 **960 tick（70%）ops 为空**、
+        #   957 tick 零动作；其中 878 tick 只有 1 个主炉在忙、换卡箱**空 15 格**、
+        #   箱里 2370/2371/2372 三张 40 面已齐（本可立刻炼下一份顶层）→ 每轮 5.70h
+        #   vs 默认路径 5.05h（+1.91h）。默认路径掩盖了它：ops 里有 buy op 撑着非空。
+        #   修法 = 还有剩余轮次且换卡箱不紧时，sets 至少排 2（只多流水线一环，不铺满）。
+        #   ★ 必须留箱容门槛：sets>1 叠满箱 → collect 不触发 → rounds_sig 不变 →
+        #   永不重解 的历史死锁（见 `_union_need0` 注释）。
+        # ★★ 必须与 buy_free 绑定（四列 A/B 实锤，2026-10-28）：
+        #     BF  178×2 11.05→6.04 / 178×3 17.06→9.05 / 85×2 15.09→14.09 /
+        #         85×3 22.09→21.10（全正）；
+        #     但 AD 178×2 10.11→**11.10（+0.99 退化）**、178×3 15.15→11.11。
+        #     机理：AD 下 buy 仍是 solve 里的排期节点、占 shop 串行槽，sets=2 会让
+        #     两套共 6 张底卡同时排队 → 第一套的料反而到得更晚。buy_free 才使
+        #     「多排一环」零成本。故默认 = 跟随 buy_free；`MC_PIPE_SETS=1/0` 可强制。
+        _ps = os.environ.get("MC_PIPE_SETS")
+        self.pipe_sets = (self.buy_free if _ps is None else _ps == "1")
+        self.pipe_min_free = int(os.environ.get("MC_PIPE_MIN_FREE") or 6)
         if self.buy_free:
             # ★ 口径联动（2026-10-27）：solver 里 buy 与 refine 同拍（instant），
             #   执行层若还按「本 tick 买的料不能当喂料」就会系统性晚 1 tick 投炉，
@@ -235,6 +259,7 @@ class DPTickController:
         # JIT 门 + 腾箱统计（2026-10-25 紧箱根治，见 _jit_due/_box_compaction）
         self.jit_blocked = 0            # JIT 门拦下的买卡 op 数（未到需求不买）
         self.buy_fallback = 0           # 「ops 空、只剩底卡要买」时按 buy0_map 兜底的次数
+        self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时把 sets 提到 2 的次数
         self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
         self.compact_moved = 0          # 腾箱挪保险箱累计张数
         # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
@@ -299,7 +324,8 @@ class DPTickController:
                 "mats": mats, "mclass": mclass, "depth": depth, "cp": cp}
 
     def _union_need0(self, box_stock, pending, active, completed_rounds,
-                     max_rounds, credits=None, sets_fn=None, free_main=0):
+                     max_rounds, credits=None, sets_fn=None, free_main=0,
+                     box_free=0):
         """净需求：(非底卡炼几次, 底卡买几张)。
 
         直接复用 net_plan(box, pending, sets)（与贪心 Planner 完全同口径）：
@@ -342,7 +368,25 @@ class DPTickController:
                 left = int(max_rounds) - int(completed_rounds.get(t, 0))
                 if left > 0:
                     sets = min(sets, left)
+            else:
+                # ★ 生产默认 `max_rounds=0` = **不限轮次**（`AutoRefine.max_rounds`
+                #   语义，见 auto_refine.py:575）。这里必须视作「还有无限轮」，
+                #   否则流水线一环（pipe_sets）在生产恒不生效 —— bench 全用
+                #   mr=1/2/3 会掩盖这个口径差。
+                left = 99
             runs, buys = m.net_plan(avail, dict(pending), sets=sets)
+            # ★★ 2026-10-28 流水线一环（见 `__init__` 的 `pipe_sets` 注释）：
+            #   本轮的净需求（非底卡）已经归零 —— 顶层在炉/已炼完，但**还有剩余
+            #   轮次**且换卡箱不紧 → 现在就把下一环排进来。否则 ops 为空、执行层
+            #   整 tick 零动作，而箱里的 40 面恰好就是下一套的料（可立即开炉）。
+            #   只提一格（sets=2），不铺满：铺满会叠箱 → collect 不触发 → 死锁。
+            if (self.pipe_sets and left >= 2 and box_free >= self.pipe_min_free
+                    and sets < 2):
+                _nd = sum(n for c, n in runs.items() if not m.is_base(c))
+                if _nd <= 0:
+                    sets = 2
+                    runs, buys = m.net_plan(avail, dict(pending), sets=sets)
+                    self.pipe_sets_hits += 1
             for c, nd in runs.items():
                 if not m.is_base(c):
                     need[c] += nd
@@ -1463,7 +1507,8 @@ class DPTickController:
                                                 completed_rounds, max_rounds,
                                                 credits=credits,
                                                 sets_fn=self.sets_fn,
-                                                free_main=ws.main_free)
+                                                free_main=ws.main_free,
+                                                box_free=ws.change_free)
 
         # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
         # ★ collect_freed 只做统计，**不进买卡预算**（2026-10-26）：
