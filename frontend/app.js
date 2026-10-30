@@ -1736,6 +1736,23 @@ function renderExAuto(d) {
     const t = new Date(l.ts * 1000).toLocaleTimeString("zh-CN", { hour12: false });
     return `[${t}] ${l.ok ? "✓" : "✗"} ${l.action} ${l.detail || ""}`;
   }).join("\n");
+  // 锁卡持有人：自动换卡换不了锁卡，但列出来让用户去游戏里手动换
+  const lkEl = $("ex-autoex-locked");
+  if (lkEl) {
+    const lk = d.locked_holders || [];
+    if (lk.length) {
+      lkEl.classList.remove("hidden");
+      lkEl.innerHTML =
+        `<div style="margin:6px 0 2px;color:#b7791f;font-weight:600">🔒 以下卡友有你缺的卡但被锁（去游戏里手动换 / 等解锁）：</div>` +
+        lk.map((h) => `<div style="font-size:12px;padding:3px 0;border-top:1px dashed #eee">` +
+          `<b>${esc(h.nick)}</b> <span style="color:var(--muted)">QQ ${h.uin}</span>：` +
+          (h.cards || []).map((c) => `${esc(c.name)}(${c.price}) 🔒至 ${fmtClock(c.unlock)}`).join("、") +
+          `</div>`).join("");
+    } else {
+      lkEl.classList.add("hidden");
+      lkEl.innerHTML = "";
+    }
+  }
 }
 
 // 换卡页的操作日志：写进右栏常驻面板 #ex-msgs（原来是 prepend 到 #ex-body，
@@ -2088,6 +2105,65 @@ function peersForScan(manualOnly = false) {
   return { api: manualOnly ? [] : exState.apiPeers, manual };
 }
 
+/** 读扫描 SSE 流：对每条 hit 调 onHit(row)，流结束/汇总时调 onDone(summary)。 */
+async function readScanStream(resp, onHit, onDone) {
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let ix;
+    while ((ix = buf.indexOf("\n\n")) >= 0) {
+      const chunk = buf.slice(0, ix); buf = buf.slice(ix + 2);
+      for (const ln of chunk.split("\n")) {
+        if (!ln.startsWith("data:")) continue;
+        const j = ln.slice(5).trim(); if (!j) continue;
+        let ev; try { ev = JSON.parse(j); } catch { continue; }
+        if (ev.type === "hit") onHit && onHit(ev.row);
+        else if (ev.type === "done") onDone && onDone(ev.summary);
+        else if (ev.type === "__error__") exMsg("扫描异常：" + (ev.message || ""), "err");
+      }
+    }
+  }
+}
+
+/** 流式扫描收尾：把汇总写进计数行 + 错误块 + 规则块 + 空结果提示。 */
+function finishScanStream(list, summary) {
+  if (!summary) return;
+  const d = summary;
+  const tNames2 = (d.target_names && d.target_names.length)
+    ? d.target_names : [d.target_name].filter(Boolean);
+  const targetText = tNames2.length > 1
+    ? `${tNames2.join("、")} 等 ${tNames2.length} 套` : (tNames2[0] || "");
+  const priceTxt = d.price ? `面值 ${d.price} 的` : "全部面值的";
+  $("ex-cnt").textContent =
+    `「${targetText}」${priceTxt}卡：扫 ${d.scanned}/${d.peers_total} 人，` +
+    `${d.usable_users ?? d.hit_users} 人现在就能换` +
+    (d.locked_users ? `，另有 ${d.locked_users} 人只有已锁的卡（共 ${d.locked_n} 张）` : "") +
+    (d.stopped_early ? `，已凑够 ${d.usable_n} 个可换目标提前收工` : "") +
+    (d.errors_n ? `，${d.errors_n} 人读取失败` : "") + `（${d.elapsed}s）`;
+  if (d.errors_n) {
+    const err = document.createElement("div");
+    err.className = "ex-msg warn";
+    err.innerHTML = `${d.errors_n} 个卡友主页读取失败（可能对方未开卡主页/网络抖动）。<br>` +
+      d.errors.slice(0, 8).map((e) => `QQ ${e.uin}：${esc(e.error)}`).join("<br>");
+    list.insertBefore(err, list.firstChild);
+  }
+  const rule = document.createElement("div");
+  rule.className = "ex-msg info";
+  rule.style.background = "#eef4fa"; rule.style.color = "#2b6cb0";
+  rule.innerHTML = `换卡规则（实测）：对方换卡箱里未上锁的卡才能换；我付出的卡面值必须相同，并且——<b>只有付出的卡属于「商店能买到的套卡」时，其主题才必须在对方「想收套」里</b>；下架/绝版套（如纸寿千年、名家）商店买不到，<b>不受此限，同面值即可换</b>。对方<b>未设置想收套 = 不限制</b>，任何同面值卡都能换。`;
+  list.insertBefore(rule, list.firstChild);
+  if (!list.children.length) {
+    const tip = document.createElement("div");
+    tip.className = "empty-tip"; tip.style.padding = "30px 16px";
+    tip.innerHTML = `${d.errors_n ? "" : "扫描完成，但"}没人在换卡箱放出「${esc(targetText)}」的${priceTxt}卡。<br>换个时间再扫（换卡箱里的卡会被换走/上锁），或补充手动卡友、多选几个目标套。`;
+    list.appendChild(tip);
+  }
+}
+
 async function doScan(manualOnly = false) {
   const tids = exTargetTids();
   if (!tids.length) { exMsg("请先在上方搜并选择想收的套卡（可多选）", "err"); return; }
@@ -2102,13 +2178,24 @@ async function doScan(manualOnly = false) {
   const btn = $("ex-scan-btn");
   btn.disabled = true;
   btn.textContent = manualOnly ? "扫描中…" : `扫描中（自动拉取该套卡友）…`;
+  // 准备结果容器（流式追加，不等全部扫完）
+  clearResults();
+  const list = document.createElement("div");
+  list.id = "ex-result-list";
+  list.style.display = "flex";
+  list.style.flexDirection = "column";
+  list.style.gap = "10px";
+  $("ex-body").appendChild(list);
+  $("ex-empty").classList.add("hidden");
+  $("ex-reset").classList.remove("hidden");
+  const tNames = tids.map((t) => exState.themeNames[t] || `#${t}`);
   const names = exState.themeCards
     .filter((c) => exState.pickCards.has(c.id)).map((c) => c.name);
   const pickMsg = names.length ? `（只找有指定卡的：${names.join("、")}）` : "";
   const multiMsg = tids.length > 1 ? `${tids.length} 套合并扫描` : "拉取该套在玩玩家";
   exMsg((manualOnly
     ? `开始扫描 ${manual.length} 个手动卡友的换卡箱，约需 ${Math.max(3, Math.round(manual.length / 6))} 秒…`
-    : `开始扫描：${multiMsg}并逐个读取换卡箱（套装多了玩家池也会变大。服务器限流约 15 人/10 秒，请稍候…）`) + pickMsg, "info");
+    : `开始扫描：${multiMsg}并逐个读取换卡箱（扫出来会即时列出，不必等全部扫完。服务器限流约 15 人/10 秒，请稍候…）`) + pickMsg, "info");
   const t0 = Date.now();
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = setInterval(() => {
@@ -2116,7 +2203,7 @@ async function doScan(manualOnly = false) {
     $("ex-cnt").textContent = `扫描中…已 ${s} 秒（限流保护，勿重复点击）`;
   }, 1000);
   try {
-    const d = await (await fetch("/api/exchange/scan", {
+    const resp = await fetch("/api/exchange/scan", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         theme_id: tids[0],
@@ -2135,11 +2222,23 @@ async function doScan(manualOnly = false) {
         // 覆盖「没在玩目标套、但换卡箱里恰好有目标卡」的人；与套卡池零重叠
         include_friends: !!(($("ex-all-players") || {}).checked),
       }),
-    })).json();
+    });
+    if (!resp.ok || !resp.headers.get("content-type").includes("text/event-stream")) {
+      const d = await resp.json().catch(() => ({}));
+      if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+      if (!d.ok) throw new Error(d.message || "扫描失败");
+      exState.results = d; renderScan(d); return;
+    }
+    await readScanStream(resp, (row) => {
+      const hideLocked = !!($("ex-hide-locked") || {}).checked;
+      const usable = Number(row.usable ?? row.hits.filter((h) => (h.srcs || []).length).length);
+      if (hideLocked && !usable) return;
+      const pb = peerBlock(row, tNames);
+      list.appendChild(pb);
+      bindPeerEvents(pb);
+    }, (summary) => { exState.results = summary; });
     if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
-    if (!d.ok) throw new Error(d.message || "扫描失败");
-    exState.results = d;
-    renderScan(d);
+    finishScanStream(list, exState.results);
   } catch (e) {
     if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     exMsg("扫描失败：" + (e.message || e), "err");
@@ -2228,11 +2327,6 @@ function renderScan(d) {
 // 日志仍同步留档（exMsg），失败时还能一键「↻ 重扫此人」刷新对方换卡箱实时状态。
 function fmtClock(tsSec) {
   return new Date(tsSec * 1000).toLocaleTimeString("zh-CN", { hour12: false });
-}
-
-function scanTargetNames(d) {
-  const n = (d && d.target_names) || [];
-  return n.length ? n : exTargetTids().map((t) => exState.themeNames[t] || `#${t}`);
 }
 
 /** 单张命中卡的 HTML。tNames = 目标套名数组（多套扫描时用来标注卡属于哪套）。 */
@@ -2336,7 +2430,7 @@ async function rescanPeer(btn) {
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "重扫中…";
   try {
-    const d = await (await fetch("/api/exchange/scan", {
+    const resp = await fetch("/api/exchange/scan", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         theme_id: tids[0] || 0, theme_ids: tids,
@@ -2344,10 +2438,17 @@ async function rescanPeer(btn) {
         card_ids: [...exState.pickCards],
         peers: [uin], use_api: false, include_friends: false, concurrency: 1,
       }),
-    })).json();
-    const row = d && d.ok && (d.rows || [])[0];
+    });
+    let row = null;
+    if (resp.headers.get("content-type").includes("text/event-stream")) {
+      await readScanStream(resp, (r) => { if (r) row = r; }, () => {});
+    } else {
+      const d = await resp.json().catch(() => ({}));
+      row = d && d.ok && (d.rows || [])[0];
+    }
     if (row) {
-      const el = peerBlock(row, scanTargetNames(d));
+      const tNames = tids.map((t) => exState.themeNames[t] || `#${t}`);
+      const el = peerBlock(row, tNames);
       peerEl.replaceWith(el);
       bindPeerEvents(el);
       exMsg(`已重扫 QQ ${uin}：${row.usable || 0} 张可换${row.locked_n ? `，${row.locked_n} 张已锁` : ""}。`, "ok");

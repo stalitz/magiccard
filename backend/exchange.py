@@ -405,22 +405,22 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
     }
 
 
-async def scan_peers(session, theme_id: int, peers: list[str],
+async def _scan_iter(session, theme_id: int, peers: list[str],
                      price: int = 0, card_id: int = 0,
                      card_ids: list | None = None,
                      theme_ids: list | None = None,
-                     concurrency: int = 1, stop_after: int = 0) -> dict:
-    """受控速率扫描卡友，返回「对方换卡箱里有目标套卡且未锁」的命中。
+                     concurrency: int = 1, stop_after: int = 0):
+    """逐人扫描的异步生成器：每扫完一个人就 yield 一个事件 dict（用于 SSE 流式输出）。
 
-    theme_id 为主套（兼容单套用法），theme_ids 可再给若干套，两者合并去重成目标套集合 ——
-    现实动机：在炼某套卡的卡友，其换卡箱里往往也会有别的套的卡，一次扫描应该都捞出来。
-    注意搜索范围仍是这些套各自的玩家池（腾讯无按卡搜人接口），多套只是把池子并起来。
+    事件类型：
+      {"type":"progress","scanned":N,"peers_total":M,"usable_n":U,"errors_n":E}
+      {"type":"hit","row":{...}}       # 命中（含可换/已锁的卡友整块，同旧 scan_peers 的 row）
+      {"type":"done","summary":{...}}  # 收尾汇总（与旧 scan_peers 返回同构，含 rows/计数/错误）
 
-    实测服务器约 15 人/10s 窗口限流（-3001），故采用串行 + 0.7s 间隔，
-    触限后由 _scan_one 退避重试。80 人约 1~2 分钟 —— 这个速率已经贴着限流上限
-    （0.7s/人 ≈ 1.43 人/秒，阈值约 1.5 人/秒），**再快只会触发退避反而更慢**，
-    所以唯一的提速手段是少扫：stop_after=N 表示累计够 N 个「真正可换」的目标
-    （命中里 srcs 非空的）就提前收工，默认 0 = 全部扫完。
+    动机（用户 2026-10-30）：手动扫卡希望「扫出来直接列出来，不要等全扫完再列」，
+    所以改成流式 —— 前端每收到一个 hit 就追加一个卡友块，进度事件实时刷新计数。
+
+    速率/限流与旧实现一致：串行 + 0.7s 间隔 + 触限退避（见 _scan_one）。
     """
     idx = indexes()
     theme_names = {th["tid"]: th["name"] for th in idx["themes"]}
@@ -439,16 +439,28 @@ async def scan_peers(session, theme_id: int, peers: list[str],
     ]
     stats: dict = {"retries": 0}
     t0 = time.time()
-    results: list = []
-    stopped_early = False
+    rows: list = []
+    errors: list = []
+    ok_n = 0
     usable_n = 0          # 真正能换的目标数（有可付卡的命中）
+    stopped_early = False
     for i, u in enumerate(peers):
         r = await _scan_one(
             session, u, targets, price, picked, my_payable, idx,
             theme_names, stats)
-        results.append(r)
-        if r and r.get("hits"):
-            usable_n += sum(1 for h in r["hits"] if h.get("srcs"))
+        if r is None:
+            ok_n += 1
+        elif "error" in r:
+            errors.append(r)
+        else:
+            ok_n += 1
+            if r.get("hits"):
+                rows.append(r)
+                usable_n += sum(1 for h in r["hits"] if h.get("srcs"))
+                yield {"type": "hit", "row": r}
+        yield {"type": "progress", "scanned": ok_n,
+               "peers_total": len(peers), "usable_n": usable_n,
+               "errors_n": len(errors)}
         if stop_after and usable_n >= stop_after:
             stopped_early = True
             break
@@ -457,22 +469,12 @@ async def scan_peers(session, theme_id: int, peers: list[str],
             await asyncio.sleep(2)
         else:
             await asyncio.sleep(0.7)
-    rows, errors, ok_n = [], [], 0
-    for r in results:
-        if r is None:
-            ok_n += 1
-            continue
-        if "error" in r:
-            errors.append(r)
-            continue
-        ok_n += 1
-        if r.get("hits"):
-            rows.append(r)
     # 「有货但现在换不了」（命中的卡全被对方上锁）的人排到后面：
     # 他们的卡看得见、解不了锁，先让能立刻换的人占前排。sort 稳定，组内保持扫描顺序。
+    # （流式前端按扫描顺序追加，这里只影响汇总里的 rows 排序，供 rescan 等整取用）
     rows.sort(key=lambda r: 0 if r.get("usable") else 1)
     locked_n = sum(int(r.get("locked_n") or 0) for r in rows)
-    return {
+    summary = {
         "ok": True,
         "theme_id": theme_id,
         "theme_ids": sorted(targets),
@@ -497,6 +499,24 @@ async def scan_peers(session, theme_id: int, peers: list[str],
         "my_exch": my.get("exch", []) if my else [],
         "my_payable_n": len(my_payable),
     }
+    yield {"type": "done", "summary": summary}
+
+
+async def scan_peers(session, theme_id: int, peers: list[str],
+                     price: int = 0, card_id: int = 0,
+                     card_ids: list | None = None,
+                     theme_ids: list | None = None,
+                     concurrency: int = 1, stop_after: int = 0) -> dict:
+    """兼容封装：收集 _scan_iter 的全部事件，返回与旧版同构的完整 dict。
+
+    保留给不需要流式的调用方（如单卡友重扫、脚本）。主扫卡接口已改用 SSE 流式。
+    """
+    async for ev in _scan_iter(
+            session, theme_id, peers, price, card_id, card_ids,
+            theme_ids, concurrency, stop_after):
+        if ev["type"] == "done":
+            return ev["summary"]
+    return {}
 
 
 def _theme_name(idx, tid: int) -> str:

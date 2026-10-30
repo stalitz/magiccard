@@ -54,6 +54,10 @@ class AutoExchange:
         self.finished = False
         self.message = ""
         self.mine: list[dict] = []
+        # 锁卡持有人：换卡时看到「我缺的卡、但被对方锁着」的人。
+        # 自动换卡换不了锁卡，但应列出来让用户去游戏里手动换。
+        # 结构：uin -> {"uin","nick","cards": {cid: {id,name,price,unlock,theme_id,theme_name}}}
+        self.locked_holders: dict[str, dict] = {}
 
     # ---------- 日志 ----------
     def _log(self, action: str, ok: bool, detail: str = "") -> None:
@@ -163,26 +167,35 @@ class AutoExchange:
     # ---------- 主循环 ----------
     async def _try_peer(self, box: dict) -> int:
         idx = indexes()
+        theme_names = {th["tid"]: th["name"] for th in idx["themes"]}
         got = 0
         dry = bool(self.opts.get("dry_run"))
+        peer_locked: dict[int, dict] = {}   # 本卡友处「我缺且锁着」的卡：cid -> 卡信息
         for card in box.get("cards", []):
             cid = int(card.get("id") or 0)
             if self.need.get(cid, 0) <= 0:
                 continue
             self.seen_target += 1
-            if card.get("locked"):
-                self.miss_locked += 1
-                continue
             ci = idx["card_by_id"].get(cid)
             if ci is None:
                 continue
             price = int(ci[3])
+            name = str(ci[2]).strip()
+            if card.get("locked"):
+                self.miss_locked += 1
+                # 锁卡换不了，但记下来交给用户去游戏里手动换
+                peer_locked[cid] = {
+                    "id": cid, "name": name, "price": price,
+                    "unlock": int(card.get("unlock") or 0),
+                    "theme_id": int(ci[1]),
+                    "theme_name": theme_names.get(int(ci[1]), ""),
+                }
+                continue
             exch = [t for t in (box.get("exch") or []) if t]
             pay = self._pick_pay(price, exch)
             if not pay:
                 self.miss_no_pay += 1
                 continue
-            name = str(ci[2]).strip()
             desc = f"{name}({price}) ← 付 {pay['name']}"
             if dry:
                 self._log("试换", True, f"[模拟] {box.get('nick')}：{desc}")
@@ -199,11 +212,39 @@ class AutoExchange:
                 got += 1
                 self._log("换卡", True, f"{box.get('nick')}：{desc}")
                 await self._refresh_mine()   # 换完立即重读，避免本地计数漂移
+                self._prune_locked(cid)      # 这张已换到，从锁卡名单移除（若之前记过）
             else:
                 self.failed += 1
                 self._log("换卡", False,
                           f"{box.get('nick')}：{desc} → {r.get('message') or r.get('code')}")
+        # 落盘本卡友的锁卡记录：有则合并、无则清掉旧记录
+        self._update_locked_holder(box, peer_locked)
         return got
+
+    def _update_locked_holder(self, box: dict, peer_locked: dict) -> None:
+        """更新某卡友的锁卡记录：peer_locked 非空则合并；为空则删掉他的旧记录。"""
+        uin = str(box.get("uin"))
+        if peer_locked:
+            h = self.locked_holders.get(uin)
+            if h is None:
+                h = {"uin": uin, "nick": box.get("nick", uin), "cards": {}}
+                self.locked_holders[uin] = h
+            h["nick"] = box.get("nick", uin)
+            for cid, info in peer_locked.items():
+                h["cards"][cid] = info
+        else:
+            # 本次这位卡友没有「我缺且锁着」的卡 → 清掉本套旧记录
+            self.locked_holders.pop(uin, None)
+
+    def _prune_locked(self, cid: int) -> None:
+        """某张卡已换够（need 归零）后，从所有锁卡持有人里移除它；持有人清空则删掉。"""
+        if self.need.get(cid, 0) > 0:
+            return
+        for uin, h in list(self.locked_holders.items()):
+            if cid in h["cards"]:
+                del h["cards"][cid]
+                if not h["cards"]:
+                    del self.locked_holders[uin]
 
     async def _run(self) -> None:
         self.started_at = time.time()
@@ -302,6 +343,7 @@ class AutoExchange:
         self.seen_target = 0
         self.miss_no_pay = 0
         self.miss_locked = 0
+        self.locked_holders = {}
         self.finished = False
         self.message = ""
         self.opts = opts
@@ -347,6 +389,11 @@ class AutoExchange:
             "seen_target": self.seen_target,
             "miss_no_pay": self.miss_no_pay,
             "miss_locked": self.miss_locked,
+            "locked_holders": [
+                {"uin": h["uin"], "nick": h["nick"],
+                 "cards": [c for c in h["cards"].values()]}
+                for h in self.locked_holders.values()
+            ],
             "need_total": sum(self.need.values()),
             "need": need_rows,
             "elapsed": round(time.time() - self.started_at, 1) if self.started_at else 0,

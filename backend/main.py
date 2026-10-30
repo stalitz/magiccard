@@ -1059,14 +1059,22 @@ async def exchange_scan(body: dict):
     if not peers:
         return {"ok": False, "message": "没有可扫描的卡友（这些套都没人玩或名单为空）"}
     try:
-        return await ex.scan_peers(
-            _session, theme_id, peers,
-            price=int(body.get("price") or 0),
-            card_id=int(body.get("card_id") or 0),
-            card_ids=body.get("card_ids") or [],
-            theme_ids=extra,
-            concurrency=int(body.get("concurrency") or 5),
-            stop_after=int(body.get("stop_after") or 0))
+        async def gen():
+            try:
+                async for ev in ex._scan_iter(
+                        _session, theme_id, peers,
+                        price=int(body.get("price") or 0),
+                        card_id=int(body.get("card_id") or 0),
+                        card_ids=body.get("card_ids") or [],
+                        theme_ids=extra,
+                        concurrency=int(body.get("concurrency") or 5),
+                        stop_after=int(body.get("stop_after") or 0)):
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            except Exception as e:  # noqa: BLE001
+                yield f"data: {json.dumps({'type': '__error__', 'message': f'扫描异常：{e}'}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(
+            gen(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"扫描异常：{e}"}
 
