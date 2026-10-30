@@ -1080,6 +1080,9 @@
               <input type="checkbox" id="ex-all-players" checked>好友池
             </label>
             <button id="ex-peers-btn" class="btn sm">找该套卡友</button>
+            <span style="color:var(--muted);font-size:12px">查卡友页数</span>
+            <input type="text" id="ex-peers-pages" class="num" value="1" style="width:46px"
+                   title="每套查多少页卡友：默认 1 页≈100 人；0=不限页（一直翻到没人）；>0=最多这么多页。页数不足会自然停。多套时主套优先翻完，其余套逐页交替。">
             <button id="ex-scan-btn" class="btn sm primary">扫描卡友换卡箱</button>
           </div>
           <!-- 已选目标套（可多选）：在炼某套卡的卡友，换卡箱里也会有别的套的卡，
@@ -1143,7 +1146,8 @@
                       <span>面值</span><input type="text" id="ex-autoex-price" class="num" placeholder="全部" style="width:62px">
                       <span>每张</span><input type="text" id="ex-autoex-want" class="num" value="1" style="width:44px">
                       <span>张，最多查</span><input type="text" id="ex-autoex-max" class="num" value="0" style="width:52px" title="0=不限">
-                      <span>位卡友</span>
+                      <span>位卡友，卡友页数</span><input type="text" id="ex-autoex-pages" class="num" value="1" style="width:46px"
+                             title="自动搜卡友翻页深度：默认 1 页≈100 人；0=不限页；>0=每套最多这么多页。多套时主套优先翻完，其余套逐页交替。">
                       <label class="check" title="模拟运行只报告会换什么，不真发换卡请求"><input type="checkbox" id="ex-autoex-dry" checked> 模拟</label>
                       <button id="ex-autoex-start" class="btn sm primary">启动</button>
                       <button id="ex-autoex-stop" class="btn sm ghost" disabled>停止</button>
@@ -1735,7 +1739,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261028a"></script>
+<script src="/app.js?v=20261030a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

@@ -960,11 +960,13 @@ async def card_diagnose():
 # ---- 换卡（手动模式：设定目标套 → 搜卡友 → 扫换卡箱 → 手动换）----
 
 @app.get("/api/exchange/peers")
-async def exchange_peers(tid: int = 0, tids: str = ""):
+async def exchange_peers(tid: int = 0, tids: str = "", max_page: int = 1):
     """按主题搜「在玩该主题的卡友」（下架套也能搜），并列出手动名单。只读。
 
     tids 可给逗号分隔的多个套（如 "353,475"），返回这些套卡友的**并集去重**——
     多套用于「在炼某套的卡友，换卡箱里也有别的套的卡」这种场景。
+    max_page：0=不限页，>0=最多这么多页（每页≈100人），不足则自然停；默认 1。
+    多套时主套(tid)优先翻完，其余套逐页交替（见 exchange.gather_peers）。
     """
     if err := _require_login():
         return err
@@ -976,11 +978,8 @@ async def exchange_peers(tid: int = 0, tids: str = ""):
             tids_list.append(int(x))
     if tid and tid not in tids_list:
         tids_list.append(tid)
-    api: list[str] = []
-    for t in tids_list:
-        for u in await ex.theme_peers(_session, t):
-            if u not in api:
-                api.append(u)
+    api: list[str] = await ex.gather_peers(
+        _session, tids_list, priority_tid=tid, max_page=int(max_page))
     manual = ex.load_manual_peers()
     return {"ok": True, "tid": tid, "tids": tids_list, "api_peers": api,
             "manual_peers": manual, "api_n": len(api), "manual_n": len(manual)}
@@ -1033,10 +1032,11 @@ async def exchange_scan(body: dict):
     # 玩家池 = 各目标套「在玩该套」玩家的并集（去重）。
     # 多套的动机：在炼某套的卡友，换卡箱里往往也放着别的套的卡，一次扫描可以都捞出来。
     if body.get("use_api", True):
-        for t in targets:
-            for u in await ex.theme_peers(_session, t):
-                if u not in peers:
-                    peers.append(u)
+        mp = int(body.get("max_page", 1) or 1)
+        for u in await ex.gather_peers(
+                _session, targets, priority_tid=theme_id, max_page=mp):
+            if u not in peers:
+                peers.append(u)
     peers += [str(u).strip() for u in _as_list(body.get("manual_peers"))
               if str(u).strip().isdigit()]
     # 好友补充池（2026-09-14 加）：theme_peers 按套只给 ≤100 人，
@@ -1103,6 +1103,7 @@ async def exchange_auto_start(body: dict):
       pay_card_ids?: [..], # 指定「用作付出」的卡：只从这些卡里付，且可全部换完
                            # （不填=自动挑「多余的」卡，且每种至少保留 1 张）
       max_peers?: 0,       # 最多查几位卡友，0=不限
+      max_page?: 1,        # 查卡友翻页深度：0=不限页，>0=每套最多这么多页（每页≈100人）
       peers?: ["qq",..],   # 指定卡友；不填则按 tids 自动搜
       dry_run?: false,     # true=只模拟，不真发换卡请求
     }
@@ -1125,6 +1126,7 @@ async def exchange_auto_start(body: dict):
         pay_card_ids=[int(x) for x in (body.get("pay_card_ids") or [])
                       if str(x).strip().isdigit()],
         max_peers=int(body.get("max_peers") or 0),
+        max_page=int(body.get("max_page") or 1),
         peers=[str(p) for p in (body.get("peers") or []) if str(p).isdigit()],
         dry_run=bool(body.get("dry_run")),
     )

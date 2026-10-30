@@ -1656,6 +1656,7 @@ async function exAutoStart() {
     price: Number(price || 0),
     want: Number(($("ex-autoex-want").value || "1").trim() || 1),
     max_peers: Number(($("ex-autoex-max").value || "0").trim() || 0),
+    max_page: Number(($("ex-autoex-pages").value || "1").trim() || 1),
     dry_run: !!$("ex-autoex-dry").checked,
   };
   const srcTids = exTargetTids();
@@ -1678,7 +1679,8 @@ async function exAutoStart() {
     const tgtTxt = (body.card_ids && body.card_ids.length)
       ? `指定 ${body.card_ids.length} 张卡（跨套）`
       : `主套全部卡${body.price ? " 面值" + body.price : ""}`;
-    exMsg(`自动换卡已启动（${body.dry_run ? "模拟" : "真实"}，${srcTxt}，扫玩家箱换入：${tgtTxt}，每张 ${body.want} 张，`
+    const pageTxt = body.max_page > 0 ? `${body.max_page} 页` : "不限页";
+    exMsg(`自动换卡已启动（${body.dry_run ? "模拟" : "真实"}，${srcTxt}，卡友页数 ${pageTxt}，扫玩家箱换入：${tgtTxt}，每张 ${body.want} 张，`
       + `付出：${pay.length ? `指定 ${pay.length} 种（可全换完）` : "自动挑多余的（每种留 1 张）"}）`, "ok");
     $("ex-autoex-stop").disabled = false;
     if (exAutoTimer) clearInterval(exAutoTimer);
@@ -2007,8 +2009,9 @@ async function fetchPeers() {
   if (!tids.length) { exMsg("请先搜并选择想收的套卡（可多选）", "err"); return; }
   const btn = $("ex-peers-btn");
   btn.disabled = true; btn.textContent = "拉取中…";
+  const mp = Number(($("ex-peers-pages").value || "1").trim() || 1);
   try {
-    const d = await (await fetch(`/api/exchange/peers?tids=${encodeURIComponent(tids.join(","))}`)).json();
+    const d = await (await fetch(`/api/exchange/peers?tids=${encodeURIComponent(tids.join(","))}&max_page=${mp}`)).json();
     if (!d.ok) throw new Error(d.message || "拉取失败");
     exState.apiPeers = d.api_peers || [];
     exState.manualPeers = d.manual_peers || [];
@@ -2125,6 +2128,7 @@ async function doScan(manualOnly = false) {
         peers: manualOnly ? manual : [],
         use_api: !manualOnly,
         manual_peers: manual,
+        max_page: Number(($("ex-peers-pages").value || "1").trim() || 1),
         concurrency: 5,
         stop_after: Number(($("ex-stop") || {}).value) || 0,
         // 好友池（默认开，可记忆）：并入 card_user_list 的好友名单（~194 人，含小号），

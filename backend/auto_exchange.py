@@ -27,7 +27,8 @@ import time
 
 from .card_query import indexes, buyable_themes
 from .constants import EP_MAINPAGE
-from .exchange import parse_my_boxes, theme_peers, fetch_peer_box, do_exchange
+from .exchange import (parse_my_boxes, gather_peers,
+                       fetch_peer_box, do_exchange)
 
 
 class AutoExchange:
@@ -227,12 +228,13 @@ class AutoExchange:
             peers = list(self.opts.get("peers") or [])
             if not peers:
                 # 多选源套：把每个源套「在玩」的玩家池并起来、去重。
+                # 主套（tid）优先翻完，其余套逐页交替（见 exchange.gather_peers）。
                 src = self.src_tids or [int(self.opts.get("tid") or 0)]
                 src = [t for t in src if t > 0]
-                for t in src:
-                    for u in await theme_peers(self.s, t):
-                        if u not in peers:
-                            peers.append(u)
+                max_page = int(self.opts.get("max_page") or 1)
+                peers = await gather_peers(
+                    self.s, src, priority_tid=int(self.opts.get("tid") or 0),
+                    max_page=max_page)
             peers = [p for p in peers if p and str(p) != str(self.s.uin)]
             self.peers_total = len(peers)
             max_peers = int(self.opts.get("max_peers") or 0)

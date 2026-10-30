@@ -2,8 +2,9 @@
 
 机制（2026-09-07 实测，用真实登录态验证）：
 - 卡友来源：card_user_theme_list(tid) 返回一批「正在玩该主题」的玩家 node，
-  node 的 uin 属性为 `&#x7C;`(|) 分隔的多个 QQ，一次固定约 80~100 人；
+  node 的 uin 属性为 `&#x7C;`(|) 分隔的多个 QQ，**支持分页（page 参数），每页约 100 人**；
   服务器不限制 tid 是否下架，所以下架/绝版套也能搜到人。
+  theme_peers / gather_peers 的 max_page：0=不限页，>0=最多这么多页，不足则自然停。
 - 读他人主页：card_user_mainpage + opuin=对方 QQ → 返回对方 XML，换卡箱可见
   （不需要是 QQ 好友，能浏览即可）。
 - 换卡箱 changebox：
@@ -62,9 +63,12 @@ def save_manual_peers(peers: list[str]) -> list[str]:
 
 # ---------- 卡友检索 ----------
 
-async def theme_peers(session, tid: int) -> list[str]:
-    """按主题搜「在玩该主题的卡友」，返回 QQ 号去重列表。"""
-    r = await session.post(EP_THEME_LIST, uin=session.uin, tid=tid)
+async def _peers_page(session, tid: int, page: int) -> list[str]:
+    """拉取 card_user_theme_list(tid) 的第 page 页卡友（每页约 100 人）。
+
+    返回去重、且已排除自己的 QQ 列表；接口异常或该页无人时返回空列表。
+    """
+    r = await session.post(EP_THEME_LIST, uin=session.uin, tid=tid, page=page)
     if r.get("code") != 0:
         return []
     raw = r.get("raw", "")
@@ -77,6 +81,93 @@ async def theme_peers(session, tid: int) -> list[str]:
     if session.uin and session.uin in uins:
         uins.remove(session.uin)
     return uins
+
+
+async def theme_peers(session, tid: int, max_page: int = 1) -> list[str]:
+    """按主题搜「在玩该主题的卡友」，返回 QQ 号去重列表（单套）。
+
+    max_page：0=不限页（一直翻到没有新人为止）；>0=最多这么多页；
+    某套实际页数不足 max_page 时自然停止，不强行翻空页。
+    每页约 100 人；默认 1 页 = 只取第 0 页（≈100 人，等同旧行为）。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    page = 0
+    while True:
+        if max_page > 0 and page >= max_page:
+            break
+        got = await _peers_page(session, tid, page)
+        if not got:
+            break
+        new = [u for u in got if u not in seen]
+        if not new:
+            break
+        seen.update(new)
+        out.extend(new)
+        page += 1
+        await asyncio.sleep(0.15)   # 翻页礼貌间隔，避免触发服务端限流
+    return out
+
+
+async def gather_peers(session, tids: list[int], priority_tid: int = 0,
+                       max_page: int = 1) -> list[str]:
+    """多套搜卡友，带「主套优先 + 其余交替」的翻页策略。
+
+    - priority_tid（通常是主套 tid）：先**完整**翻完它的所有页（受 max_page 限制），
+      保证你真正要换的那套先拿满卡友池。
+    - 其余套：再**逐页交替**（1 页 1 页轮流）翻，直到各自达到 max_page 或自然翻完，
+      避免某一辅助套独占翻页时间。
+    多套动机：在炼某套卡的卡友，换卡箱里往往也放着别的套的卡，并池能多捞货；
+    但翻太深会很慢，故用 max_page 控深、用交替保证公平。
+    """
+    tids = [t for t in dict.fromkeys(tids) if t > 0]
+    if not tids:
+        return []
+    if priority_tid and priority_tid in tids:
+        ordered = [priority_tid] + [t for t in tids if t != priority_tid]
+    else:
+        ordered = tids
+
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _append(uins: list[str]) -> bool:
+        added = False
+        for u in uins:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+                added = True
+        return added
+
+    # 1) 主套：完整翻完
+    first = ordered[0]
+    page = 0
+    while True:
+        if max_page > 0 and page >= max_page:
+            break
+        got = await _peers_page(session, first, page)
+        if not got or not _append(got):
+            break
+        page += 1
+        await asyncio.sleep(0.15)
+    # 2) 其余套：逐页交替
+    others = ordered[1:]
+    if others:
+        page = 0
+        progress = True
+        while progress:
+            if max_page > 0 and page >= max_page:
+                break
+            progress = False
+            for t in others:
+                got = await _peers_page(session, t, page)
+                if got and _append(got):
+                    progress = True
+            page += 1
+            if progress:
+                await asyncio.sleep(0.15)
+    return out
 
 
 async def fetch_peer_box(session, opuin: str) -> dict:
