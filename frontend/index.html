@@ -1082,7 +1082,7 @@
             <button id="ex-peers-btn" class="btn sm">找该套卡友</button>
             <span style="color:var(--muted);font-size:12px">查卡友页数</span>
             <input type="text" id="ex-peers-pages" class="num" value="1" style="width:46px"
-                   title="每套查多少页卡友：默认 1 页≈100 人；0=不限页（一直翻到没人）；>0=最多这么多页。页数不足会自然停。多套时主套优先翻完，其余套逐页交替。">
+                   title="每套查多少页卡友：默认 1 页≈100 人；0=不限页（一直翻到没人）；>0=最多这么多页。页数不足会自然停。多套时主套优先翻完，其余套逐页交替。注意：部分主题（如「床」）腾讯接口无视翻页、每页都返回同一批人，此时翻页无效、最多约100人，工具会提示。">
             <button id="ex-scan-btn" class="btn sm primary">扫描卡友换卡箱</button>
           </div>
           <!-- 已选目标套（可多选）：在炼某套卡的卡友，换卡箱里也会有别的套的卡，
@@ -1166,6 +1166,7 @@
                     <div id="ex-autoex-need" style="padding:2px 2px 6px;font-size:12.5px;color:var(--muted)"></div>
                     <div id="ex-autoex-logs" style="font:12px/1.6 ui-monospace,Menlo,monospace;max-height:170px;overflow-y:auto;background:#f6f8fb;border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:#3a4757;white-space:pre-wrap"></div>
                     <div id="ex-autoex-locked" class="hidden"></div>
+                    <div id="ex-autoex-capped" class="hidden" style="margin-top:6px;font-size:12px;color:#b25e00;background:#fff4e6;border:1px solid #ffd8a8;border-radius:8px;padding:6px 10px"></div>
                   </div>
                 </div>
               </div>
@@ -1740,7 +1741,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261030b"></script>
+<script src="/app.js?v=20261030c"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

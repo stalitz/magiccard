@@ -110,8 +110,19 @@ async def theme_peers(session, tid: int, max_page: int = 1) -> list[str]:
 
 
 async def gather_peers(session, tids: list[int], priority_tid: int = 0,
-                       max_page: int = 1) -> list[str]:
+                       max_page: int = 1):
     """多套搜卡友，带「主套优先 + 其余交替」的翻页策略。
+
+    返回 (peers, capped_tids)：
+    - peers：去重后的卡友 QQ 列表。
+    - capped_tids：被服务端「封顶」的套——这些套的 card_user_theme_list 无视 page
+      参数、每页都返回同一批人（实测每页固定 100 人），翻页拿不到新人。
+      这是腾讯接口按主题决定的行为（如「床」1818 会封顶，老套「蜻蜓」178 不会），
+      工具侧无法突破，故如实上报让前端提示，而不是让用户以为页数设置坏了。
+      **判据**：无论 max_page 设多少，都强制探测第 2 页（page1）——若 page1 与 page0
+      完全相同即认定封顶（如床 1818，page0/page1 重叠 100%）；若 page1 有新人
+      （如蜻蜓 178，累计数千人）说明分页有效，不算封顶。这保证默认 max_page=1 时
+      也能正确识别封顶，避免「设了页数却还只查 100」的误判。
 
     - priority_tid（通常是主套 tid）：先**完整**翻完它的所有页（受 max_page 限制），
       保证你真正要换的那套先拿满卡友池。
@@ -122,7 +133,7 @@ async def gather_peers(session, tids: list[int], priority_tid: int = 0,
     """
     tids = [t for t in dict.fromkeys(tids) if t > 0]
     if not tids:
-        return []
+        return [], []
     if priority_tid and priority_tid in tids:
         ordered = [priority_tid] + [t for t in tids if t != priority_tid]
     else:
@@ -130,8 +141,9 @@ async def gather_peers(session, tids: list[int], priority_tid: int = 0,
 
     seen: set[str] = set()
     out: list[str] = []
+    capped: list[int] = []
 
-    def _append(uins: list[str]) -> bool:
+    def _add(uins: list[str]) -> bool:
         added = False
         for u in uins:
             if u not in seen:
@@ -140,34 +152,91 @@ async def gather_peers(session, tids: list[int], priority_tid: int = 0,
                 added = True
         return added
 
-    # 1) 主套：完整翻完
+    def _dup(a: list[str], b: list[str]) -> bool:
+        return bool(a) and bool(b) and set(a) == set(b)
+
+    async def _one(tid: int, page: int, base0: list[str] | None):
+        """取某套第 page 页，返回 (got, stop, capped)。
+
+        - got：本页 uin 列表；None = 空页（真正翻完）。
+        - stop：是否停止翻该套（空页 或 深页环形绕回）。腾讯的 card_user_theme_list
+          分页是**环形**的——翻到末页后再翻会绕回第 1 页（与 page0 完全相同），
+          而非返回空。所以必须用「深页 == page0」来判定翻完，否则会死循环
+          （一直绕回第 1 页反复抓）。
+        - capped：是否标记「服务端封顶」（仅当 page==1 就与 page0 完全相同，
+          即该套逻辑上只有 1 页，如「床」1818；蜻蜓 178 是多页套不会被误标）。
+        max_page==1 且非封顶时，page1 不并入 out（尊重「只查 1 页」）。
+        """
+        got = await _peers_page(session, tid, page)
+        if not got:
+            return None, True, False          # 空页 → 停，不封顶
+        if page == 0:
+            _add(got)
+            return got, False, False
+        if page == 1:
+            if _dup(got, base0):
+                return got, True, True        # 第 2 页就重复 = 服务端封顶（停+标）
+            if max_page != 1:
+                _add(got)
+            return got, False, False
+        # 深页：并入后 0 新增 = 腾讯环形分页绕回到任一早前页（或该页与前面重复）
+        # → 该套翻完，停，不标封顶。注意只和 page0 比会漏掉「绕回中间页」导致死循环。
+        if not _add(got):
+            return got, True, False
+        return got, False, False
+
+    # 1) 主套：完整翻完（始终探测 page1 判封顶，深页环形绕回即停）
     first = ordered[0]
     page = 0
+    base0 = None
     while True:
-        if max_page > 0 and page >= max_page:
+        if max_page > 0 and page > max_page:
             break
-        got = await _peers_page(session, first, page)
-        if not got or not _append(got):
+        got, stop, cap = await _one(first, page, base0)
+        if got is None:
             break
+        if page == 0:
+            base0 = got
+        if cap:
+            capped.append(first)
+            break
+        if stop:
+            break                            # 环形绕回 → 该套翻完，停（不标封顶）
         page += 1
         await asyncio.sleep(0.15)
-    # 2) 其余套：逐页交替
+
+    # 2) 其余套：逐页交替（同样始终探测 page1 判封顶，深页环形绕回即停）
     others = ordered[1:]
     if others:
+        bases = {t: None for t in others}
+        done: set[int] = set()              # 已翻完（封顶/绕回/空页）的套，后续跳过
         page = 0
         progress = True
         while progress:
-            if max_page > 0 and page >= max_page:
+            if max_page > 0 and page > max_page:
                 break
             progress = False
             for t in others:
-                got = await _peers_page(session, t, page)
-                if got and _append(got):
+                if t in done:
+                    continue
+                got, stop, cap = await _one(t, page, bases[t])
+                if got is None:
+                    done.add(t)              # 空页 → 翻完
+                    continue
+                if page == 0:
+                    bases[t] = got
+                    progress = True
+                elif cap:
+                    capped.append(t)
+                    done.add(t)              # 封顶 → 翻完
+                elif stop:
+                    done.add(t)              # 环形绕回 → 翻完（不标封顶）
+                else:
                     progress = True
             page += 1
             if progress:
                 await asyncio.sleep(0.15)
-    return out
+    return out, capped
 
 
 async def fetch_peer_box(session, opuin: str) -> dict:
@@ -409,6 +478,7 @@ async def _scan_iter(session, theme_id: int, peers: list[str],
                      price: int = 0, card_id: int = 0,
                      card_ids: list | None = None,
                      theme_ids: list | None = None,
+                     peers_capped: list | None = None,
                      concurrency: int = 1, stop_after: int = 0):
     """逐人扫描的异步生成器：每扫完一个人就 yield 一个事件 dict（用于 SSE 流式输出）。
 
@@ -498,6 +568,9 @@ async def _scan_iter(session, theme_id: int, peers: list[str],
         "rows": rows,
         "my_exch": my.get("exch", []) if my else [],
         "my_payable_n": len(my_payable),
+        # 被服务端翻页封顶的套（card_user_theme_list 无视 page，每页返回同一批人）。
+        # 空列表 = 翻页正常生效；非空 = 这些套最多只能拿到 ~100 人，页数设置对它们无效。
+        "peers_capped": list(peers_capped or []),
     }
     yield {"type": "done", "summary": summary}
 

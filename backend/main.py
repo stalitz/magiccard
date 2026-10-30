@@ -978,11 +978,12 @@ async def exchange_peers(tid: int = 0, tids: str = "", max_page: int = 1):
             tids_list.append(int(x))
     if tid and tid not in tids_list:
         tids_list.append(tid)
-    api: list[str] = await ex.gather_peers(
+    api, capped = await ex.gather_peers(
         _session, tids_list, priority_tid=tid, max_page=int(max_page))
     manual = ex.load_manual_peers()
     return {"ok": True, "tid": tid, "tids": tids_list, "api_peers": api,
-            "manual_peers": manual, "api_n": len(api), "manual_n": len(manual)}
+            "manual_peers": manual, "api_n": len(api), "manual_n": len(manual),
+            "peers_capped": capped}
 
 
 @app.post("/api/exchange/manual")
@@ -1033,10 +1034,13 @@ async def exchange_scan(body: dict):
     # 多套的动机：在炼某套的卡友，换卡箱里往往也放着别的套的卡，一次扫描可以都捞出来。
     if body.get("use_api", True):
         mp = int(body.get("max_page", 1) or 1)
-        for u in await ex.gather_peers(
-                _session, targets, priority_tid=theme_id, max_page=mp):
+        api_peers, peers_capped = await ex.gather_peers(
+            _session, targets, priority_tid=theme_id, max_page=mp)
+        for u in api_peers:
             if u not in peers:
                 peers.append(u)
+    else:
+        peers_capped = []
     peers += [str(u).strip() for u in _as_list(body.get("manual_peers"))
               if str(u).strip().isdigit()]
     # 好友补充池（2026-09-14 加）：theme_peers 按套只给 ≤100 人，
@@ -1067,6 +1071,7 @@ async def exchange_scan(body: dict):
                         card_id=int(body.get("card_id") or 0),
                         card_ids=body.get("card_ids") or [],
                         theme_ids=extra,
+                        peers_capped=peers_capped,
                         concurrency=int(body.get("concurrency") or 5),
                         stop_after=int(body.get("stop_after") or 0)):
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"

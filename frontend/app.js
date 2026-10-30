@@ -1753,6 +1753,19 @@ function renderExAuto(d) {
       lkEl.innerHTML = "";
     }
   }
+  // 翻页封顶提示（腾讯接口无视 page 的套）：说明为什么卡友数停在 ~100
+  const capEl = $("ex-autoex-capped");
+  if (capEl) {
+    const cap = d.peers_capped || [];
+    if (cap.length) {
+      const cn = cap.map((t) => exState.themeNames[t] || `#${t}`).join("、");
+      capEl.classList.remove("hidden");
+      capEl.innerHTML = `⚠️ 翻页无效：主题「${esc(cn)}」腾讯接口无视翻页、每页返回同一批人（每页固定 100 人），本套最多约 100 位卡友，页数设置对它无效（服务端限制）。`;
+    } else {
+      capEl.classList.add("hidden");
+      capEl.innerHTML = "";
+    }
+  }
 }
 
 // 换卡页的操作日志：写进右栏常驻面板 #ex-msgs（原来是 prepend 到 #ex-body，
@@ -2041,6 +2054,10 @@ async function fetchPeers() {
       ? `${tids.length} 套（${tids.map((i) => exState.themeNames[i] || "#" + i).join("、")}）`
       : `「${exState.themeNames[tids[0]] || "#" + tids[0]}」`;
     exMsg(`找到 ${auto} 个正在玩${nm}的卡友（多套已合并去重）${man ? `，加手动名单共 ${auto + man} 人` : ""}。点「扫描卡友换卡箱」开始扫描。`, "ok");
+    if (d.peers_capped && d.peers_capped.length) {
+      const cn = d.peers_capped.map((t) => exState.themeNames[t] || `#${t}`).join("、");
+      exMsg(`⚠️ 翻页无效：主题「${cn}」腾讯接口无视翻页、每页都返回同一批人（每页固定 100 人），本套最多约 100 位卡友，页数设置对它无效——这是服务端限制。可勾「包含好友」补足。`, "warn");
+    }
   } catch (e) {
     exMsg("拉取卡友失败：" + (e.message || e), "err");
   } finally {
@@ -2144,6 +2161,14 @@ function finishScanStream(list, summary) {
     (d.locked_users ? `，另有 ${d.locked_users} 人只有已锁的卡（共 ${d.locked_n} 张）` : "") +
     (d.stopped_early ? `，已凑够 ${d.usable_n} 个可换目标提前收工` : "") +
     (d.errors_n ? `，${d.errors_n} 人读取失败` : "") + `（${d.elapsed}s）`;
+  if (d.peers_capped && d.peers_capped.length) {
+    const nm = d.peers_capped.map((t) => exState.themeNames[t] || `#${t}`).join("、");
+    const cap = document.createElement("div");
+    cap.className = "ex-msg warn";
+    cap.style.background = "#fff4e6"; cap.style.color = "#b25e00";
+    cap.innerHTML = `⚠️ 翻页无效：主题「${esc(nm)}」的卡友列表，腾讯接口<b>无视翻页参数、每页都返回同一批人</b>（实测每页固定 100 人）。本套最多只能拿到约 100 位卡友，页数设置对它无效——这是服务端限制，非工具 bug。可勾选「包含好友」用好友池（~194 人）补足，或换会正常分页的套。`;
+    list.insertBefore(cap, list.firstChild);
+  }
   if (d.errors_n) {
     const err = document.createElement("div");
     err.className = "ex-msg warn";
@@ -2281,6 +2306,10 @@ function renderScan(d) {
     (d.stopped_early ? `，已凑够 ${d.usable_n} 个可换目标提前收工` : "") +
     (d.errors_n ? `，${d.errors_n} 人读取失败` : "") + `（${d.elapsed}s）`;
 
+  if (d.peers_capped && d.peers_capped.length) {
+    const nm = d.peers_capped.map((t) => exState.themeNames[t] || `#${t}`).join("、");
+    html += `<div class="ex-msg warn" style="background:#fff4e6;color:#b25e00">⚠️ 翻页无效：主题「${esc(nm)}」的卡友列表，腾讯接口<b>无视翻页参数、每页都返回同一批人</b>（实测每页固定 100 人）。本套最多只能拿到约 100 位卡友，页数设置对它无效——这是服务端限制，非工具 bug。可勾选「包含好友」用好友池（~194 人）补足，或换会正常分页的套。</div>`;
+  }
   if (d.errors_n) {
     html += `<div class="ex-msg warn">${d.errors_n} 个卡友主页读取失败（可能对方未开卡主页/网络抖动）。<br>${d.errors.slice(0, 8).map((e) => `QQ ${e.uin}：${esc(e.error)}`).join("<br>")}</div>`;
   }

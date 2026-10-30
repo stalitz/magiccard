@@ -58,6 +58,8 @@ class AutoExchange:
         # 自动换卡换不了锁卡，但应列出来让用户去游戏里手动换。
         # 结构：uin -> {"uin","nick","cards": {cid: {id,name,price,unlock,theme_id,theme_name}}}
         self.locked_holders: dict[str, dict] = {}
+        # 被服务端翻页封顶的套（card_user_theme_list 无视 page，每页返回同一批人）。
+        self.peers_capped: list[int] = []
 
     # ---------- 日志 ----------
     def _log(self, action: str, ok: bool, detail: str = "") -> None:
@@ -273,9 +275,10 @@ class AutoExchange:
                 src = self.src_tids or [int(self.opts.get("tid") or 0)]
                 src = [t for t in src if t > 0]
                 max_page = int(self.opts.get("max_page") or 1)
-                peers = await gather_peers(
+                peers, capped = await gather_peers(
                     self.s, src, priority_tid=int(self.opts.get("tid") or 0),
                     max_page=max_page)
+                self.peers_capped = capped
             peers = [p for p in peers if p and str(p) != str(self.s.uin)]
             self.peers_total = len(peers)
             max_peers = int(self.opts.get("max_peers") or 0)
@@ -344,6 +347,7 @@ class AutoExchange:
         self.miss_no_pay = 0
         self.miss_locked = 0
         self.locked_holders = {}
+        self.peers_capped = []
         self.finished = False
         self.message = ""
         self.opts = opts
@@ -394,6 +398,7 @@ class AutoExchange:
                  "cards": [c for c in h["cards"].values()]}
                 for h in self.locked_holders.values()
             ],
+            "peers_capped": list(self.peers_capped),
             "need_total": sum(self.need.values()),
             "need": need_rows,
             "elapsed": round(time.time() - self.started_at, 1) if self.started_at else 0,
