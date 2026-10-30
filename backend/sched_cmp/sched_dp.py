@@ -638,6 +638,14 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000):
     """求解 RCPSP 实例。
 
+    ⚠️ **不可重入、非线程安全**：实例数据是按约定写进模块级全局（`DUR/MATS/
+    MACHINES/N/BASEFREE/BASESET`，见下方 `global` 声明），dfs 内只读。当前调用方
+    全是同步单线程（`DPTickController._solve_plan` 在事件循环里直接调），
+    所以不会交错；但**不要**把 solve 放进线程池/多进程共享模块、也不要在
+    solve 执行中回调再解一次 —— 会导致两次求解互相污染。
+    （2026-10-30 评估确认：全仓 0 处 threading/Lock/executor，故暂不改实例字段
+    ——动 6 个全局的每个读点收益为零、回归面却覆盖整个求解器。）
+
     ★ 滚动重规划入口（init_* 三参数）：从**当前真实状态**起算，而非从零开始。
       · init_stock      当前库存 {type_idx: 张数}
       · init_running    在炉 [(type_idx, 剩余秒[, 机器类])]（相对当前时刻的剩余时间；
