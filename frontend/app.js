@@ -127,25 +127,11 @@ function showBadge(o) {
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
-// ---------- 操作日志（持久化到 sessionStorage，按标签页隔离：刷新/重开同标签仍在，关标签即清） ----------
-const LOG_KEY = "mc_op_log";
+// ---------- 操作日志（落盘到服务器，按账号隔离：刷新/重开/换标签都在） ----------
 const LOG_MAX = 300;
+let _opEntries = [];
 
-function logLoad() {
-  try {
-    const raw = sessionStorage.getItem(LOG_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-function logSave(entries) {
-  try {
-    sessionStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-LOG_MAX)));
-  } catch {}
-}
 function logRender(entries) {
-  // 渲染到所有带 data-op-log 的容器（总览 #log + 灵宠页全局日志镜像），实现「一份全局日志、多处可见」。
   const boxes = document.querySelectorAll("[data-op-log]");
   boxes.forEach((box) => {
     box.innerHTML = "";
@@ -171,37 +157,54 @@ function logRender(entries) {
     box.scrollTop = box.scrollHeight;
   });
 }
-function logClear() {
-  try { sessionStorage.removeItem(LOG_KEY); } catch {}
-  logRender([]);
+// 把一条日志异步落盘到服务器（按当前账号隔离）。未登录（无 token）时跳过。
+function persistLog(kind, e) {
+  const tok = sessionStorage.getItem("mc_token");
+  if (!tok) return;
+  try {
+    fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, ts: e.ts, msg: e.msg, cls: e.cls }),
+    }).catch(() => {});
+  } catch {}
 }
 function log(msg, cls = "info") {
   const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  const entries = logLoad();
-  entries.push({ ts, msg, cls });
-  logSave(entries);
-  logRender(entries);
+  const e = { ts, msg, cls };
+  _opEntries.push(e);
+  if (_opEntries.length > LOG_MAX) _opEntries = _opEntries.slice(-LOG_MAX);
+  logRender(_opEntries);
+  persistLog("op", e);
 }
-function logHistory() {
-  logRender(logLoad());
+// 登录后从服务器拉取本账号历史日志（刷新/重开/换标签都在）；与本地已有条目合并去重。
+async function logHistory() {
+  try {
+    const r = await fetch("/api/log?kind=op");
+    const d = await r.json();
+    if (d && Array.isArray(d.entries)) {
+      const seen = new Set(_opEntries.map((e) => e.ts + "|" + e.msg));
+      for (const e of d.entries) {
+        const key = e.ts + "|" + e.msg;
+        if (!seen.has(key)) { _opEntries.push(e); seen.add(key); }
+      }
+      if (_opEntries.length > LOG_MAX) _opEntries = _opEntries.slice(-LOG_MAX);
+      logRender(_opEntries);
+    }
+  } catch {}
+}
+function logClear() {
+  _opEntries = [];
+  logRender([]);
+  // 不清服务器：界面日志按账号持久化保留在 <token>_ui.log，重开仍在
 }
 
 // ---------- 每日比赛页专属日志（右栏，2026-09-26）
 // 与上面的总览页全局日志完全独立：只记「每日比赛页里各玩法」的操作与结果，
 // 别的页（炼卡/挖地/换卡/猫窝…）的 log() 不会混进来，比赛页的也不会跑到全局日志里。
-const MLOG_KEY = "mc_match_log";
 const MLOG_MAX = 200;
+let _matchEntries = [];
 
-function mlogLoad() {
-  try {
-    const raw = sessionStorage.getItem(MLOG_KEY);
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
-}
-function mlogSave(entries) {
-  try { sessionStorage.setItem(MLOG_KEY, JSON.stringify(entries.slice(-MLOG_MAX))); } catch {}
-}
 // 渲染到所有带 data-mlog 的容器（结构上就是比赛页右栏一个，多挂一个也认）
 function mlogRender(entries) {
   const boxes = document.querySelectorAll("[data-mlog]");
@@ -235,19 +238,32 @@ function mlogRender(entries) {
   }
 }
 function mlogClear() {
-  try { sessionStorage.removeItem(MLOG_KEY); } catch {}
+  _matchEntries = [];
   mlogRender([]);
 }
-// msg 里带玩法名（如「[竞技场] …」），直接落到比赛页右栏
+// msg 里带玩法名（如「[竞技场] …」），直接落到比赛页右栏；同时落盘服务器（按账号隔离）
 function mlog(msg, cls = "info") {
   const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  const entries = mlogLoad();
-  entries.push({ ts, msg, cls });
-  mlogSave(entries);
-  mlogRender(entries);
+  const e = { ts, msg, cls };
+  _matchEntries.push(e);
+  if (_matchEntries.length > MLOG_MAX) _matchEntries = _matchEntries.slice(-MLOG_MAX);
+  mlogRender(_matchEntries);
+  persistLog("match", e);
 }
-function mlogHistory() {
-  mlogRender(mlogLoad());
+async function mlogHistory() {
+  try {
+    const r = await fetch("/api/log?kind=match");
+    const d = await r.json();
+    if (d && Array.isArray(d.entries)) {
+      const seen = new Set(_matchEntries.map((e) => e.ts + "|" + e.msg));
+      for (const e of d.entries) {
+        const key = e.ts + "|" + e.msg;
+        if (!seen.has(key)) { _matchEntries.push(e); seen.add(key); }
+      }
+      if (_matchEntries.length > MLOG_MAX) _matchEntries = _matchEntries.slice(-MLOG_MAX);
+      mlogRender(_matchEntries);
+    }
+  } catch {}
 }
 // 比赛页读接口：成功静默（60s 轮询会刷屏），只有失败才落一条，避免日志里全是「读取成功」
 function mlogFail(name, r) {

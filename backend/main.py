@@ -25,7 +25,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth_qr import QRLogin
-from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, SESSION_FILE
+from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, SESSION_FILE, LOG_DIR
+import json
+from collections import deque
 from . import card_query as cq
 from . import card_plan
 from . import economy as ec
@@ -61,6 +63,9 @@ SESSIONS: dict[str, LoginSession] = {}         # token -> LoginSession
 LOGIN_FLOWS: dict[str, QRLogin] = {}           # lid（登录流程 id）-> QRLogin
 LOGIN_CACHES: dict[str, dict] = {}             # lid -> {"b64","ts"}
 AUTOS: dict[str, AutoRefine] = {}              # token -> 自动炼卡引擎（per-account）
+_UI_LOGS: dict[str, "deque"] = {}             # token -> 界面操作日志（落盘，按账号隔离）
+_MATCH_LOGS: dict[str, "deque"] = {}          # token -> 比赛页日志（落盘，按账号隔离）
+_UI_LOG_MAX = 500
 _current_session: ContextVar = ContextVar("mc_session", default=None)
 
 
@@ -117,6 +122,27 @@ def _default_session() -> LoginSession | None:
     return SESSIONS.get(DEFAULT_TOKEN)
 
 
+def _load_ui_logs() -> None:
+    """启动时按 token 加载各账号的界面日志（与 SESSIONS 一一对应），落盘于 LOG_DIR/<token>_<kind>.log。"""
+    for token in SESSIONS:
+        for kind, store in (("op", _UI_LOGS), ("match", _MATCH_LOGS)):
+            dq: "deque" = deque(maxlen=_UI_LOG_MAX)
+            p = LOG_DIR / f"{token}_{kind}.log"
+            if p.exists():
+                try:
+                    for line in p.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            dq.append(json.loads(line))
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception:  # noqa: BLE001
+                    pass
+            store[token] = dq
+
+
 def _resolve_session(request: Request) -> LoginSession | None:
     # 多账号：优先认 X-MC-Token 请求头（前端存 sessionStorage，按标签页隔离）；
     # cookie 仅作兼容兜底（旧前端 / 直连 API）。两者都没有 → 默认账号。
@@ -138,6 +164,7 @@ def _cur_token() -> str:
 _qr = QRLogin()
 _session = SessionProxy()
 _load_sessions()
+_load_ui_logs()
 
 # 礼物箱→变卡 自动循环（单例）
 
@@ -269,6 +296,44 @@ async def logout(request: Request):
         s.clear()
         SESSIONS.pop(s.token, None)
     return {"ok": True}
+
+
+@app.post("/api/log")
+async def ui_log_post(request: Request):
+    token = request.headers.get("X-MC-Token") or request.cookies.get("mc_token")
+    if not token or token not in SESSIONS:
+        return {"ok": True, "ignored": True}
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "error": "bad_json"}
+    kind = body.get("kind", "op")
+    if kind not in ("op", "match"):
+        return {"ok": False, "error": "bad_kind"}
+    msg = str(body.get("msg", ""))
+    cls = str(body.get("cls", "info"))
+    ts = str(body.get("ts", ""))
+    store = _UI_LOGS if kind == "op" else _MATCH_LOGS
+    dq = store.setdefault(token, deque(maxlen=_UI_LOG_MAX))
+    entry = {"ts": ts, "msg": msg, "cls": cls}
+    dq.append(entry)
+    try:
+        with (LOG_DIR / f"{token}_{kind}.log").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True}
+
+
+@app.get("/api/log")
+async def ui_log_get(request: Request, kind: str = "op"):
+    token = request.headers.get("X-MC-Token") or request.cookies.get("mc_token")
+    if not token or token not in SESSIONS:
+        return {"entries": []}
+    if kind not in ("op", "match"):
+        return {"entries": []}
+    store = _UI_LOGS if kind == "op" else _MATCH_LOGS
+    return {"entries": list(store.get(token, deque(maxlen=_UI_LOG_MAX)))}
 
 
 def _require_login():
