@@ -127,13 +127,13 @@ function showBadge(o) {
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
-// ---------- 操作日志（持久化到 localStorage，刷新/重开仍在） ----------
+// ---------- 操作日志（持久化到 sessionStorage，按标签页隔离：刷新/重开同标签仍在，关标签即清） ----------
 const LOG_KEY = "mc_op_log";
 const LOG_MAX = 300;
 
 function logLoad() {
   try {
-    const raw = localStorage.getItem(LOG_KEY);
+    const raw = sessionStorage.getItem(LOG_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -141,7 +141,7 @@ function logLoad() {
 }
 function logSave(entries) {
   try {
-    localStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-LOG_MAX)));
+    sessionStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-LOG_MAX)));
   } catch {}
 }
 function logRender(entries) {
@@ -172,7 +172,7 @@ function logRender(entries) {
   });
 }
 function logClear() {
-  try { localStorage.removeItem(LOG_KEY); } catch {}
+  try { sessionStorage.removeItem(LOG_KEY); } catch {}
   logRender([]);
 }
 function log(msg, cls = "info") {
@@ -194,13 +194,13 @@ const MLOG_MAX = 200;
 
 function mlogLoad() {
   try {
-    const raw = localStorage.getItem(MLOG_KEY);
+    const raw = sessionStorage.getItem(MLOG_KEY);
     const arr = raw ? JSON.parse(raw) : [];
     return Array.isArray(arr) ? arr : [];
   } catch { return []; }
 }
 function mlogSave(entries) {
-  try { localStorage.setItem(MLOG_KEY, JSON.stringify(entries.slice(-MLOG_MAX))); } catch {}
+  try { sessionStorage.setItem(MLOG_KEY, JSON.stringify(entries.slice(-MLOG_MAX))); } catch {}
 }
 // 渲染到所有带 data-mlog 的容器（结构上就是比赛页右栏一个，多挂一个也认）
 function mlogRender(entries) {
@@ -235,7 +235,7 @@ function mlogRender(entries) {
   }
 }
 function mlogClear() {
-  try { localStorage.removeItem(MLOG_KEY); } catch {}
+  try { sessionStorage.removeItem(MLOG_KEY); } catch {}
   mlogRender([]);
 }
 // msg 里带玩法名（如「[竞技场] …」），直接落到比赛页右栏
@@ -418,6 +418,7 @@ $("qr-refresh").onclick = () => loadQr("refresh");
 $("logout").onclick = async () => {
   try { await fetch("/api/logout"); } catch {}
   sessionStorage.removeItem("mc_token");
+  try { logClear(); mlogClear(); } catch {}
   location.reload();
 };
 
