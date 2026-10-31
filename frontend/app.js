@@ -2,7 +2,22 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20260915h";
+const APP_VER = "20261031a";
+
+// 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
+// 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
+// 全局劫持 fetch，自动把 token 注入 X-MC-Token 请求头；无 token 时不带（走扫码登录）。
+(function () {
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    const tok = sessionStorage.getItem("mc_token");
+    if (tok) {
+      init.headers = Object.assign({}, init.headers, { "X-MC-Token": tok });
+    }
+    return _fetch(input, init);
+  };
+})();
 
 let pollTimer = null;
 let stateTimer = null;
@@ -326,12 +341,14 @@ async function pollOnce() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = setInterval(pollOnce, POLL_FAST); }
   } else if (s === "ok") {
     log(`登录成功！账号 ${res.uin}`, "ok");
+    if (res.token) sessionStorage.setItem("mc_token", res.token);  // 落 sessionStorage：按标签页隔离
     showDash(res.uin);
   } else if (s === "expired") {
     // 兜底1：先探测一次会话，避免「漏掉确认态 0 但 cookie 其实已到」被误判为失败
     try {
       const me = await (await fetch("/api/me")).json();
       if (me && me.logged_in) {
+        if (me.token) sessionStorage.setItem("mc_token", me.token);
         log("检测到实际已登录（确认窗口被漏掉），进入主面板", "ok");
         showDash(me.uin);
         return;
@@ -400,6 +417,7 @@ document.querySelectorAll(".tab").forEach((t) => {
 $("qr-refresh").onclick = () => loadQr("refresh");
 $("logout").onclick = async () => {
   try { await fetch("/api/logout"); } catch {}
+  sessionStorage.removeItem("mc_token");
   location.reload();
 };
 
@@ -5890,10 +5908,15 @@ function initFriendPoolPref() {
 (async () => {
   initFriendPoolPref();
   log(`前端已加载 v${APP_VER}`, "info");
-  let me = null;
-  try {
-    me = await (await fetch("/api/me")).json();
-    if (me.logged_in) {
+  const storedTok = sessionStorage.getItem("mc_token");
+  if (storedTok) {
+    // 有本地 token 才去探后端登录态；没有则直接走扫码（避免 cookie 兜底导致的跨标签自动登录）。
+    let me = null;
+    try {
+      me = await (await fetch("/api/me")).json();  // 自动带 X-MC-Token 头
+    } catch {}
+    if (me && me.logged_in) {
+      if (me.token) sessionStorage.setItem("mc_token", me.token);
       log(`检测到已有登录态（${me.uin}）`, "ok");
       showDash(me.uin);
       // 支持 URL hash 直接打开某个子页（默认 #overview）。
@@ -5905,11 +5928,12 @@ function initFriendPoolPref() {
       }
       return;
     }
-    // 未登录 / 会话已过期：直接弹出扫码（无需手动点退出）
-    if (me.expired) log("检测到会话已过期（skey 失效），请重新扫码登录", "warn");
-  } catch {}
+    // token 失效：清掉本地记录，重新扫码
+    sessionStorage.removeItem("mc_token");
+    if (me && me.expired) log("检测到会话已过期（skey 失效），请重新扫码登录", "warn");
+  }
   showLogin();
-  loadQr(me && me.expired ? "会话已过期（skey 失效），请重新扫码登录" : undefined);
+  loadQr(storedTok ? "会话已过期（skey 失效），请重新扫码登录" : undefined);
 })();
 
 // ---------- 灵宠探险 自动循环 ----------

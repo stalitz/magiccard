@@ -55,7 +55,7 @@ logger = logging.getLogger("mc.api")
 app = FastAPI(title="魔法卡片助手")
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
-# ---- 多账号会话层（同端口多窗口各登各的号，靠 cookie 路由）----
+# ---- 多账号会话层（同端口多窗口各登各的号：前端 sessionStorage + X-MC-Token 头，按标签页隔离）----
 DEFAULT_TOKEN = "default"                      # 无 cookie / 旧前端兼容
 SESSIONS: dict[str, LoginSession] = {}         # token -> LoginSession
 LOGIN_FLOWS: dict[str, QRLogin] = {}           # lid（登录流程 id）-> QRLogin
@@ -118,12 +118,12 @@ def _default_session() -> LoginSession | None:
 
 
 def _resolve_session(request: Request) -> LoginSession | None:
-    token = request.cookies.get("mc_token")
+    # 多账号：优先认 X-MC-Token 请求头（前端存 sessionStorage，按标签页隔离）；
+    # cookie 仅作兼容兜底（旧前端 / 直连 API）。两者都没有 → 默认账号。
+    token = request.headers.get("X-MC-Token") or request.cookies.get("mc_token")
     if token and token in SESSIONS:
         return SESSIONS[token]
-    if not token:
-        return _default_session()
-    return None
+    return _default_session()
 
 
 def _cur_session() -> LoginSession | None:
@@ -202,7 +202,7 @@ async def login_poll(lid: str = ""):
         LOGIN_FLOWS.pop(lid, None)
         LOGIN_CACHES.pop(lid, None)
         resp = JSONResponse({
-            "status": "ok", "uin": res.get("uin"),
+            "status": "ok", "uin": res.get("uin"), "token": token,
             "skey_domains": sorted({k for k in res["cookies"] if "skey" in k.lower()}),
             "qrsig_tail": (q.qrsig or "")[-8:],
         })
@@ -253,13 +253,13 @@ async def me():
         st = await _session.get_state()
     except Exception as e:  # noqa: BLE001
         # 连接层失败：保持登录态，仅本次不校验（用户 2026-09-11：连接断了≠过期）
-        return {"logged_in": True, "uin": _session.uin, "probe": "conn_error",
+        return {"logged_in": True, "uin": _session.uin, "token": _session.token, "probe": "conn_error",
                 "note": f"会话探测失败（连接/网络），保持原登录态：{e}"}
     if _session_expired(st):
         _session.clear()
         return {"logged_in": False, "expired": True, "probe": "expired",
                 "code": st.get("code"), "raw": str(st.get("raw", ""))[:120]}
-    return {"logged_in": True, "uin": _session.uin, "probe": "ok"}
+    return {"logged_in": True, "uin": _session.uin, "token": _session.token, "probe": "ok"}
 
 
 @app.api_route("/api/logout", methods=["GET", "POST"])
