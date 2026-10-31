@@ -34,8 +34,10 @@ from . import prop_dict as pd
 from . import spirite_maps as spm
 from .constants import EP_SPIRITE
 from .spirite_maps import MAP_IDS
+from .mc_api import LOG_UIN, engine_logger
 
-log = logging.getLogger(__name__)
+# 灵宠引擎日志统一走 engine_logger（落对应 <uin>.log，不进全局），与界面滚动日志同源
+log = engine_logger
 
 #: 大地图（pass_id）候选编号，取自 `spirite_maps.MAP_IDS`（1..11）。
 #: 用户确认「最后 1 关是第 11 关 悬崖之巅」，故上界 11；权威定义在 spirite_maps.py。
@@ -100,6 +102,10 @@ class SpiriteAuto:
         self.logs.append({"ts": int(time.time()), "action": action,
                           "ok": ok, "detail": detail})
         del self.logs[:-200]
+        try:
+            LOG_UIN.set(getattr(self.s, "uin", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
         log.info("[spirite-auto] %s %s %s", action, ok, detail)
 
     # ---------- 接口封装 ----------
@@ -181,6 +187,11 @@ class SpiriteAuto:
 
     async def _loop(self) -> None:
         """按 opts['mode'] 分发到三套玩法各自的循环。"""
+        # 后台任务：把日志归属标到当前账号，整段运行都写进对应 <uin>.log
+        try:
+            LOG_UIN.set(getattr(self.s, "uin", "") or "")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             mode = self.opts.get("mode") or "map"
             if mode == "island":
@@ -563,16 +574,18 @@ class SpiriteAuto:
         }
 
 
-#: 四套玩法各自一个独立引擎，互不干扰（各自一个 asyncio 任务、各自的 running 标志）。
+#: 四套玩法 × 各账号，各自一个独立引擎，互不干扰（各自一个 asyncio 任务、各自的 running 标志）。
 MODES = ("map", "island", "across", "invite")
-_ENGINES: dict[str, "SpiriteAuto"] = {}
+_ENGINES: dict = {}  # (token, mode) -> SpiriteAuto
 
 
 def get_engine(session, mode: str = "map") -> SpiriteAuto:
-    """取（或重建）某玩法各自的独立引擎。三套玩法互不干扰。"""
+    """取（或重建）某玩法各自的独立引擎。多账号 × 多玩法互不干扰。"""
     mode = str(mode) if str(mode) in MODES else "map"
-    eng = _ENGINES.get(mode)
-    if eng is None or eng.s is not session:
-        eng = SpiriteAuto(session)
-        _ENGINES[mode] = eng
+    real = getattr(session, "_real", session)
+    key = (getattr(real, "token", ""), mode)
+    eng = _ENGINES.get(key)
+    if eng is None or eng.s is not real:
+        eng = SpiriteAuto(real)
+        _ENGINES[key] = eng
     return eng

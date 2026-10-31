@@ -7,11 +7,15 @@
   * 登录态用 qq.com 的 skey 算 g_tk（与 magicCard(2016) 源码一致）
 """
 import asyncio
+import os
 import html
 import json
 import logging
 import re
+import sys
+import threading
 import xml.etree.ElementTree as ET
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
@@ -19,14 +23,83 @@ import httpx
 
 from . import prop_dict as pd
 
+# 当前日志所属账号（uin）。请求中间件与后台引擎任务各自 set，
+# 用于把日志分流到对应 <uin>.log；为空时只写全局日志。
+LOG_UIN: ContextVar[str] = ContextVar("mc_log_uin", default="")
+
 logger = logging.getLogger("mc.api")
 # 直接挂 handler：uvicorn 的 --log-level warning 不会自动带上本模块的 logger
 if not logger.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] mc.api: %(message)s"))
-    logger.addHandler(_h)
+    class _UinFilter(logging.Filter):
+        def filter(self, record):
+            record.uin = LOG_UIN.get() or "-"
+            return True
+
+    PORT = os.environ.get("PORT", "8000")
+    LOG_DIR = Path(os.environ.get("MC_LOG_DIR", f"/tmp/mc_logs/{PORT}"))
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 中性格式（mc.api 与 mc.engine 共用）：不再带 mc.api 前缀，避免引擎流水被误标为接口日志
+    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] [%(uin)s]: %(message)s")
+
+    # 全局聚合日志（与 qq 无关的总览，所有账号都写这里）
+    _gh = logging.FileHandler(LOG_DIR / "global.log", encoding="utf-8")
+    _gh.setFormatter(_fmt)
+
+    # 按账号分流：仅当 LOG_UIN 有值时写入对应 <LOG_DIR>/<uin>.log
+    class _PerAccountHandler(logging.Handler):
+        def __init__(self, base: Path):
+            super().__init__()
+            self.base = base
+            self._files: dict[str, logging.FileHandler] = {}
+            self._lock = threading.Lock()
+
+        def emit(self, record):
+            uin = LOG_UIN.get()
+            if not uin:
+                return
+            try:
+                h = self._files.get(uin)
+                if h is None:
+                    fh = logging.FileHandler(self.base / f"{uin}.log", encoding="utf-8")
+                    fh.setFormatter(_fmt)
+                    with self._lock:
+                        h = self._files.get(uin)
+                        if h is None:
+                            self._files[uin] = fh
+                            h = fh
+                        else:
+                            fh.close()
+                h.emit(record)
+                h.flush()
+            except Exception:  # noqa: BLE001
+                self.handleError(record)
+
+    _ph = _PerAccountHandler(LOG_DIR)
+    _ph.setFormatter(_fmt)
+
+    # 实时总览（stdout -> server.sh 重定向到 /tmp/mc_<PORT>.log）
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setFormatter(_fmt)
+
+    _uf = _UinFilter()
+    for _h in (_gh, _ph, _sh):
+        _h.addFilter(_uf)
+        logger.addHandler(_h)
     logger.setLevel(logging.INFO)
     logger.propagate = False
+
+# 引擎运行日志（自动炼卡/换卡/灵宠的步骤流水）：只进对应账号的 <uin>.log + stdout，
+# 不挂 _gh（全局日志保持与 qq 无关的总览）。前端界面那条滚动日志由此落盘，重启可查。
+engine_logger = logging.getLogger("mc.engine")
+if not engine_logger.handlers:
+    # 复用同一个按账号 handler（避免同时开两个 fd 写同一文件），以及 stdout 总览
+    _eh = _ph
+    _esh = _sh
+    for _h in (_eh, _esh):
+        engine_logger.addHandler(_h)
+    engine_logger.setLevel(logging.INFO)
+    engine_logger.propagate = False
 
 from .constants import (  # noqa: F401
     MC_BASE_URL, QZONE_BASE_URL, EP_MAINPAGE, EP_REFINE, EP_CANCEL, EP_REFINED_GET, EP_STEAL_GET,
@@ -36,7 +109,12 @@ from .constants import (  # noqa: F401
     calc_gtk, err_msg,
 )
 
-SESSION_FILE = Path("/tmp/mc_session.json")
+# 多开支持：默认 /tmp/mc_session.json；可通过 MC_SESSION_FILE 环境变量覆盖，
+# 让每个后端实例持有独立的登录态文件（配合 server.sh 的端口参数实现多窗口各登各的号）。
+SESSION_FILE = Path(os.environ.get("MC_SESSION_FILE", "/tmp/mc_session.json"))
+# 同端口多账号：每个账号一个独立文件，落在 SESSIONS_DIR 下，按 token 命名。
+# 单账号（无 token）仍退化为 SESSION_FILE，完全向后兼容。
+SESSIONS_DIR = Path(os.environ.get("MC_SESSIONS_DIR", "/tmp/mc_sessions"))
 
 # 连接层可重试异常：keep-alive 死连接、服务端提前断连、连接超时等。
 RETRYABLE = (
@@ -51,7 +129,7 @@ RETRYABLE = (
 class LoginSession:
     """持有登录态（cookie）并代理魔法卡片接口。生产环境应做多用户/持久化。"""
 
-    def __init__(self) -> None:
+    def __init__(self, token: str = "") -> None:
         # trust_env=False：腾讯服务国内直连可达，不走环境代理（避免后台进程继承的代理端口失效导致 ConnectError）
         self.client = httpx.AsyncClient(
             timeout=15,
@@ -62,6 +140,9 @@ class LoginSession:
         self._reset_lock = asyncio.Lock()
         self.uin: Optional[str] = None
         self.logged_in: bool = False
+        # 多账号：token 标识本账号；persist_file 为该账号的落盘路径（None 时退化为 SESSION_FILE）
+        self.token = token
+        self.persist_file: Optional[Path] = None
 
     def load_cookies(self, cookies: dict) -> None:
         # 重建整个 jar：restore() 已按 .qq.com 塞入旧的同名 cookie（skey 等），
@@ -79,7 +160,9 @@ class LoginSession:
 
     def _save(self) -> None:
         try:
-            SESSION_FILE.write_text(
+            target = self.persist_file or SESSION_FILE
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
                 json.dumps(
                     {"uin": self.uin, "cookies": dict(self.client.cookies)},
                     ensure_ascii=False,
@@ -106,11 +189,16 @@ class LoginSession:
                 out[name] = v
         return out
 
-    def restore(self) -> bool:
-        """从本地文件恢复登录态（重启后端不丢登录）。"""
+    def restore(self, path: Optional[Path] = None) -> bool:
+        """从本地文件恢复登录态（重启后端不丢登录）。
+
+        path 省略时按 self.persist_file / SESSION_FILE 退化；多账号启动时
+        由 main 逐文件加载并显式传入。
+        """
+        target = path or self.persist_file or SESSION_FILE
         try:
-            if SESSION_FILE.exists():
-                d = json.loads(SESSION_FILE.read_text())
+            if target.exists():
+                d = json.loads(target.read_text())
                 for k, v in d.get("cookies", {}).items():
                     self.client.cookies.set(k, v, domain=".qq.com")
                 raw = d.get("uin", "")
@@ -124,7 +212,7 @@ class LoginSession:
         self.uin = None
         self.logged_in = False
         try:
-            SESSION_FILE.unlink()
+            (self.persist_file or SESSION_FILE).unlink()
         except Exception:  # noqa: BLE001
             pass
 

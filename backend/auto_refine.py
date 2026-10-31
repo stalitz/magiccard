@@ -64,6 +64,7 @@ from . import buylog
 from .constants import (EP_BUY, EP_COLLECTION_ADD, EP_COLLECTION_GET, EP_MAINPAGE,
                         EP_REFINE, EP_STEAL, EP_USER_LIST, err_msg, scale_secs,
                         TIME_SCALE)
+from .mc_api import LOG_UIN, engine_logger
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 
@@ -929,6 +930,12 @@ class AutoRefine:
         if not ok:
             self.stats["errors"] += 1
         self.log[:] = self.log[-200:]
+        # 落盘到对应账号的 <uin>.log（不进 global），重启可查 —— 这就是界面那条滚动日志的存档
+        try:
+            LOG_UIN.set(getattr(self.s, "uin", "") or "")
+            engine_logger.info("%s %s %s", "✓" if ok else "✗", action, detail)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _log_state_delta(self) -> None:
         """翻牌/上交之后，把主界面数值字段的变化记一行——用来给「未知道具」对号。"""

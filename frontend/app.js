@@ -270,6 +270,8 @@ function showDash(uin) {
   if ($("auto-refresh").checked) stateTimer = setInterval(loadState, 60000);
 }
 
+let currentLid = "";   // 当前登录流程 id：每个窗口各自 begin 独立取码，互不干扰
+
 // ---------- 二维码登录 ----------
 async function loadQr(reason) {
   // 防御：按钮 onclick=loadQr 会把 PointerEvent 当 reason 传入，导致
@@ -285,7 +287,9 @@ async function loadQr(reason) {
   }
   try {
     log("正在获取二维码…", "info");
-    const r = await fetch("/api/login/qr?force=1");
+    const b = await (await fetch("/api/login/begin")).json();
+    currentLid = b.lid || "";
+    const r = await fetch("/api/login/qr?lid=" + encodeURIComponent(currentLid) + "&force=1");
     const d = await r.json();
     $("qr-img").src = d.qr;
     setQrStatus(msg, cls);
@@ -310,7 +314,7 @@ async function pollOnce() {
   if (loggedIn) return;
   let res;
   try {
-    res = await (await fetch("/api/login/poll")).json();
+    res = await (await fetch("/api/login/poll?lid=" + encodeURIComponent(currentLid || ""))).json();
   } catch { return; }
   const s = res.status;
   if (s === "scanned") {
@@ -1658,6 +1662,7 @@ async function exAutoStart() {
     max_peers: Number(($("ex-autoex-max").value || "0").trim() || 0),
     max_page: Number(($("ex-autoex-pages").value || "1").trim() || 1),
     dry_run: !!$("ex-autoex-dry").checked,
+    include_friends: !!($("ex-autoex-friends") || {}).checked,
   };
   const srcTids = exTargetTids();
   if (srcTids.length) body.tids = srcTids;
@@ -2123,7 +2128,7 @@ function peersForScan(manualOnly = false) {
 }
 
 /** 读扫描 SSE 流：对每条 hit 调 onHit(row)，流结束/汇总时调 onDone(summary)。 */
-async function readScanStream(resp, onHit, onDone) {
+async function readScanStream(resp, onHit, onDone, onProgress) {
   const reader = resp.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -2140,6 +2145,7 @@ async function readScanStream(resp, onHit, onDone) {
         let ev; try { ev = JSON.parse(j); } catch { continue; }
         if (ev.type === "hit") onHit && onHit(ev.row);
         else if (ev.type === "done") onDone && onDone(ev.summary);
+        else if (ev.type === "progress") onProgress && onProgress(ev);
         else if (ev.type === "__error__") exMsg("扫描异常：" + (ev.message || ""), "err");
       }
     }
@@ -2221,11 +2227,14 @@ async function doScan(manualOnly = false) {
   exMsg((manualOnly
     ? `开始扫描 ${manual.length} 个手动卡友的换卡箱，约需 ${Math.max(3, Math.round(manual.length / 6))} 秒…`
     : `开始扫描：${multiMsg}并逐个读取换卡箱（扫出来会即时列出，不必等全部扫完。服务器限流约 15 人/10 秒，请稍候…）`) + pickMsg, "info");
+  exState.scanProgress = null;
   const t0 = Date.now();
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = setInterval(() => {
     const s = Math.round((Date.now() - t0) / 1000);
-    $("ex-cnt").textContent = `扫描中…已 ${s} 秒（限流保护，勿重复点击）`;
+    const p = exState.scanProgress;
+    const head = p && p.peers_total ? `已扫 ${p.scanned}/${p.peers_total} 人 · ` : "";
+    $("ex-cnt").textContent = `扫描中…${head}已 ${s} 秒（限流保护，勿重复点击）`;
   }, 1000);
   try {
     const resp = await fetch("/api/exchange/scan", {
@@ -2245,7 +2254,8 @@ async function doScan(manualOnly = false) {
         stop_after: Number(($("ex-stop") || {}).value) || 0,
         // 好友池（默认开，可记忆）：并入 card_user_list 的好友名单（~194 人，含小号），
         // 覆盖「没在玩目标套、但换卡箱里恰好有目标卡」的人；与套卡池零重叠
-        include_friends: !!(($("ex-all-players") || {}).checked),
+        // 仅扫手动时强制关闭：该模式字面只扫手动指定的 QQ，不叠加好友池
+        include_friends: !manualOnly && !!($("ex-all-players") || {}).checked,
       }),
     });
     if (!resp.ok || !resp.headers.get("content-type").includes("text/event-stream")) {
@@ -2261,7 +2271,8 @@ async function doScan(manualOnly = false) {
       const pb = peerBlock(row, tNames);
       list.appendChild(pb);
       bindPeerEvents(pb);
-    }, (summary) => { exState.results = summary; });
+    }, (summary) => { exState.results = summary; },
+    (pr) => { exState.scanProgress = pr; });
     if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     finishScanStream(list, exState.results);
   } catch (e) {

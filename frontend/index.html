@@ -1149,6 +1149,7 @@
                       <span>位卡友，卡友页数</span><input type="text" id="ex-autoex-pages" class="num" value="1" style="width:46px"
                              title="自动搜卡友翻页深度：默认 1 页≈100 人；0=不限页；>0=每套最多这么多页。多套时主套优先翻完，其余套逐页交替。">
                       <label class="check" title="模拟运行只报告会换什么，不真发换卡请求"><input type="checkbox" id="ex-autoex-dry" checked> 模拟</label>
+                      <label class="check" title="默认开启。并入你的好友名单（card_user_list，约 194 人＝QQ 好友里玩过本游戏的人，含小号）。它与按套找出的卡友池零重叠，能补上「没在玩该套、但换卡箱里恰好放着目标卡」的人。扫描人数变多，耗时略增。"><input type="checkbox" id="ex-autoex-friends" checked> 好友池</label>
                       <button id="ex-autoex-start" class="btn sm primary">启动</button>
                       <button id="ex-autoex-stop" class="btn sm ghost" disabled>停止</button>
                     </div>
@@ -1741,7 +1742,7 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261030c"></script>
+<script src="/app.js?v=20261030g"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

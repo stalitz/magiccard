@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .card_query import indexes, cname, cprice, buyable_themes
 from .constants import (
-    EP_MAINPAGE, EP_THEME_LIST, EP_EXCHANGE_CARD,
+    EP_MAINPAGE, EP_THEME_LIST, EP_EXCHANGE_CARD, EP_USER_LIST,
 )
 
 PEER_FILE = Path(__file__).resolve().parent.parent / "data" / "exchange_peers.json"
@@ -107,6 +107,28 @@ async def theme_peers(session, tid: int, max_page: int = 1) -> list[str]:
         page += 1
         await asyncio.sleep(0.15)   # 翻页礼貌间隔，避免触发服务端限流
     return out
+
+
+async def fetch_friend_pool(session) -> list[str]:
+    """拉取登录者的好友名单（card_user_list，约 194 人）作为补充玩家池。
+
+    与按套搜出的「在玩该套」卡友池零重叠（好友未必在玩该套，但其换卡箱里
+    可能恰好放着目标卡）。自动排除自己（按去前导 0 后的号码比对）。
+    接口异常时返回空列表、不影响主流程——这是补充池，丢了也不致命。
+    """
+    try:
+        r_all = await session.post(EP_USER_LIST)
+        me = str(getattr(session, "uin", "") or "").lstrip("0")
+        out: list[str] = []
+        for m in re.finditer(r'uin="(\d+)"', r_all.get("raw", "")):
+            u = m.group(1)
+            if me and u.lstrip("0") == me:
+                continue  # 跳过自己
+            if u not in out:
+                out.append(u)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
 
 
 async def gather_peers(session, tids: list[int], priority_tid: int = 0,

@@ -27,8 +27,9 @@ import time
 
 from .card_query import indexes, buyable_themes
 from .constants import EP_MAINPAGE
-from .exchange import (parse_my_boxes, gather_peers,
+from .exchange import (parse_my_boxes, gather_peers, fetch_friend_pool,
                        fetch_peer_box, do_exchange)
+from .mc_api import LOG_UIN, engine_logger
 
 
 class AutoExchange:
@@ -69,6 +70,12 @@ class AutoExchange:
         })
         if len(self.logs) > 300:
             self.logs = self.logs[-300:]
+        # 落盘到对应账号的 <uin>.log（不进 global），重启可查 —— 界面那条滚动日志的存档
+        try:
+            LOG_UIN.set(getattr(self.s, "uin", "") or "")
+            engine_logger.info("%s %s %s", "✓" if ok else "✗", action, detail)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------- 我方卡箱 ----------
     async def _refresh_mine(self) -> None:
@@ -279,6 +286,18 @@ class AutoExchange:
                     self.s, src, priority_tid=int(self.opts.get("tid") or 0),
                     max_page=max_page)
                 self.peers_capped = capped
+                # 好友补充池：与卡友池零重叠，能补上「没在玩该套、但换卡箱里
+                # 恰好放着目标卡」的好友（含小号）。默认开，由前端勾选控制。
+                if self.opts.get("include_friends"):
+                    fp = await fetch_friend_pool(self.s)
+                    added = 0
+                    for u in fp:
+                        if u not in peers:
+                            peers.append(u)
+                            added += 1
+                    if added:
+                        self._log("好友池", True,
+                                  f"并入好友名单 {added} 人（与卡友池不重复）")
             peers = [p for p in peers if p and str(p) != str(self.s.uin)]
             self.peers_total = len(peers)
             max_peers = int(self.opts.get("max_peers") or 0)
@@ -406,11 +425,14 @@ class AutoExchange:
         }
 
 
-_auto_ex: AutoExchange | None = None
+_AUTO_EX: dict = {}  # token -> AutoExchange（多账号隔离）
 
 
 def get_engine(session) -> AutoExchange:
-    global _auto_ex
-    if _auto_ex is None or _auto_ex.s is not session:
-        _auto_ex = AutoExchange(session)
-    return _auto_ex
+    real = getattr(session, "_real", session)
+    tok = getattr(real, "token", "")
+    eng = _AUTO_EX.get(tok)
+    if eng is None or eng.s is not real:
+        eng = AutoExchange(real)
+        _AUTO_EX[tok] = eng
+    return eng

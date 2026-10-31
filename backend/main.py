@@ -14,16 +14,18 @@ import json
 import logging
 import re
 import time
+import uuid
 from collections import Counter
+from contextvars import ContextVar
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .auth_qr import QRLogin
-from .mc_api import LoginSession
+from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, SESSION_FILE
 from . import card_query as cq
 from . import card_plan
 from . import economy as ec
@@ -53,13 +55,89 @@ logger = logging.getLogger("mc.api")
 app = FastAPI(title="魔法卡片助手")
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
-# 单用户 demo：登录态持久化到本地文件，重启不丢
-_qr = QRLogin()
-_session = LoginSession()
-_session.restore()
+# ---- 多账号会话层（同端口多窗口各登各的号，靠 cookie 路由）----
+DEFAULT_TOKEN = "default"                      # 无 cookie / 旧前端兼容
+SESSIONS: dict[str, LoginSession] = {}         # token -> LoginSession
+LOGIN_FLOWS: dict[str, QRLogin] = {}           # lid（登录流程 id）-> QRLogin
+LOGIN_CACHES: dict[str, dict] = {}             # lid -> {"b64","ts"}
+AUTOS: dict[str, AutoRefine] = {}              # token -> 自动炼卡引擎（per-account）
+_current_session: ContextVar = ContextVar("mc_session", default=None)
 
-# 自动炼卡引擎（单例：同一时刻只跑一套卡）
-_auto: AutoRefine | None = None
+
+class SessionProxy:
+    """全局 _session 的替身：每次属性访问转发到「当前请求 cookie 对应的真实 LoginSession」。
+
+    路由层 200+ 处写 `_session.xxx`，本类让它们零改动地按请求的 cookie 动态路由到
+    正确的账号；并发请求靠 ContextVar 隔离，互不串号。
+    """
+
+    def __getattr__(self, name):
+        s = _current_session.get()
+        if s is None:
+            if name == "logged_in":
+                return False
+            raise AttributeError(name)
+        return getattr(s, name)
+
+    def __setattr__(self, name, value):
+        s = _current_session.get()
+        if s is None:
+            raise AttributeError(name)
+        setattr(s, name, value)
+
+    @property
+    def _real(self):
+        return _current_session.get()
+
+
+def _load_sessions() -> None:
+    """启动时加载所有账号：迁移旧的单体文件为 default，再扫描 SESSIONS_DIR。"""
+    global SESSIONS
+    # 向后兼容：旧版单文件 /tmp/mc_session.json -> 迁成 default 账号
+    default_file = SESSIONS_DIR / f"{DEFAULT_TOKEN}.json"
+    if SESSION_FILE.exists() and not default_file.exists():
+        try:
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            # 复制而非移动：保留源文件作备份，避免迁移后目标被清（如 probe 判过期）
+            # 导致原登录态不可恢复。
+            default_file.write_text(SESSION_FILE.read_text())
+        except Exception:  # noqa: BLE001
+            pass
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    for f in SESSIONS_DIR.glob("*.json"):
+        token = f.stem
+        s = LoginSession(token=token)
+        s.persist_file = f
+        if s.restore(f):
+            SESSIONS[token] = s
+            logger.info("load session token=%s uin=%s", token, s.uin)
+
+
+def _default_session() -> LoginSession | None:
+    return SESSIONS.get(DEFAULT_TOKEN)
+
+
+def _resolve_session(request: Request) -> LoginSession | None:
+    token = request.cookies.get("mc_token")
+    if token and token in SESSIONS:
+        return SESSIONS[token]
+    if not token:
+        return _default_session()
+    return None
+
+
+def _cur_session() -> LoginSession | None:
+    return _current_session.get()
+
+
+def _cur_token() -> str:
+    s = _current_session.get()
+    return s.token if s else DEFAULT_TOKEN
+
+
+_qr = QRLogin()
+_session = SessionProxy()
+_load_sessions()
 
 # 礼物箱→变卡 自动循环（单例）
 
@@ -75,48 +153,64 @@ _qr_gen_lock = asyncio.Lock()
 _home_all_running = False
 
 
-@app.get("/api/login/qr")
-async def login_qr(force: int = 0):
-    """取二维码。
+@app.get("/api/login/begin")
+async def login_begin():
+    """开一个独立的登录流程（每个窗口各自取码，互不干扰）。返回 lid。"""
+    lid = uuid.uuid4().hex
+    LOGIN_FLOWS[lid] = QRLogin()
+    return {"lid": lid}
 
-    关键修复（2026-09-11，用户报告「一扫就失效但手机已登录」）：
-    - force=1 **始终**重新生成新码，不复用缓存。
-      之前用 `(force and _qr.used)` 短路复用——但当上一会话的 qrsig 已被手机确认
-      （腾讯侧标记为 consumed）、而我们漏掉了 code 0 窗口导致 `_qr.used` 仍是 False
-      时，跨页面复用的就是一张"已死"的码，用户扫它必然 67 → 误报"已失效"。
-    - 加 _qr_gen_lock 单飞：连续点击刷新按钮 / 初始化 + forceLogin 并发触发时，
-      串行化 get_qr，确保前端拿到的码与 poll 用的 _qr.qrsig 始终一致。
-    - 响应里带 qrsig_tail，前端可与 poll 响应对照排错。
-    """
+
+@app.get("/api/login/qr")
+async def login_qr(force: int = 0, lid: str = ""):
+    """取二维码。lid 为空走 default 全局流程（兼容旧前端单账号）。"""
+    q = LOGIN_FLOWS.get(lid) or _qr
+    if lid and q is _qr:
+        return {"error": "invalid lid"}
+    cache = LOGIN_CACHES.setdefault(lid, {"b64": "", "ts": 0.0})
     async with _qr_gen_lock:
         now = time.time()
-        valid = _qr_cache["b64"] and (now - _qr_cache["ts"]) <= QR_TTL
+        valid = cache["b64"] and (now - cache["ts"]) <= QR_TTL
         need_new = (not valid) or bool(force)
         if need_new:
-            png = await _qr.get_qr()
-            _qr_cache["b64"] = base64.b64encode(png).decode()
-            _qr_cache["ts"] = now
-            logger.info("login_qr new qrsig=%s force=%s", (_qr.qrsig or "")[-8:], force)
+            png = await q.get_qr()
+            cache["b64"] = base64.b64encode(png).decode()
+            cache["ts"] = now
+            logger.info("login_qr new qrsig=%s lid=%s force=%s", (q.qrsig or "")[-8:], lid, force)
     return {
-        "qr": f"data:image/png;base64,{_qr_cache['b64']}",
-        "age": round(time.time() - _qr_cache["ts"], 1),
-        "qrsig_tail": (_qr.qrsig or "")[-8:],
+        "qr": f"data:image/png;base64,{cache['b64']}",
+        "age": round(time.time() - cache["ts"], 1),
+        "qrsig_tail": (q.qrsig or "")[-8:],
     }
 
 
 @app.get("/api/login/poll")
-async def login_poll():
-    """轮询扫码状态；确认后把 cookie 载入会话。"""
-    res = await _qr.poll()
+async def login_poll(lid: str = ""):
+    """轮询扫码状态；确认后创建账号、签发 mc_token cookie、持久化。"""
+    q = LOGIN_FLOWS.get(lid) or _qr
+    if lid and q is _qr:
+        return {"error": "invalid lid"}
+    if not q.qrsig:
+        return {"status": "error", "msg": "请先获取二维码"}
+    res = await q.poll()
     if res.get("status") == "ok":
-        _session.load_cookies(res["cookies"])
-        # 登录成功后作废二维码缓存，避免下次进登录页复用已扫/已确认过的旧 sig
-        _qr_cache["b64"] = ""
-        skey_domains = sorted({k for k in res["cookies"] if "skey" in k.lower()})
-        return {"status": "ok", "uin": res.get("uin"), "skey_domains": skey_domains,
-                "qrsig_tail": (_qr.qrsig or "")[-8:]}
+        token = uuid.uuid4().hex
+        s = LoginSession(token=token)
+        s.persist_file = SESSIONS_DIR / f"{token}.json"
+        s.load_cookies(res["cookies"])          # 内部 _save 落到 persist_file
+        SESSIONS[token] = s
+        LOGIN_FLOWS.pop(lid, None)
+        LOGIN_CACHES.pop(lid, None)
+        resp = JSONResponse({
+            "status": "ok", "uin": res.get("uin"),
+            "skey_domains": sorted({k for k in res["cookies"] if "skey" in k.lower()}),
+            "qrsig_tail": (q.qrsig or "")[-8:],
+        })
+        resp.set_cookie("mc_token", token, httponly=True, path="/",
+                        max_age=60 * 60 * 24 * 30)
+        return resp
     # 非 ok 也带 qrsig_tail，前端可与 login_qr 响应对照，确认前后端用的是同一张码
-    res["qrsig_tail"] = (_qr.qrsig or "")[-8:]
+    res["qrsig_tail"] = (q.qrsig or "")[-8:]
     return res
 
 
@@ -169,8 +263,11 @@ async def me():
 
 
 @app.api_route("/api/logout", methods=["GET", "POST"])
-async def logout():
-    _session.clear()
+async def logout(request: Request):
+    s = _cur_session()
+    if s is not None:
+        s.clear()
+        SESSIONS.pop(s.token, None)
     return {"ok": True}
 
 
@@ -334,9 +431,10 @@ async def _free_slots() -> dict | None:
 async def auto_status():
     if err := _require_login():
         return err
-    if _auto is None:
+    eng = AUTOS.get(_cur_token())
+    if eng is None:
         return {"running": False}
-    return _auto.status()
+    return eng.status()
 
 
 @app.post("/api/auto/start")
@@ -360,7 +458,6 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     不再像旧版那样按「全套从零」展开——旧口径会把已持有卡那份素材需求全额压到
     最底层，补缺口时多炼近 10 倍。
     """
-    global _auto  # 必须声明：下面会给模块级单例赋值，否则读取时 UnboundLocalError
     if err := _require_login():
         return err
     ids = [int(x) for x in re.split(r"[,\s]+", (tids or "").strip()) if x.strip().isdigit()]
@@ -370,7 +467,7 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     if not ids:
         return {"ok": False, "message": "请至少选一套卡（tid 或 tids）"}
     try:
-        eng = AutoRefine(_session, ids, buy=bool(buy), max_rounds=rounds)
+        eng = AutoRefine(_cur_session(), ids, buy=bool(buy), max_rounds=rounds)
     except Exception as exc:  # noqa: BLE001  (tid 不存在等)
         return {"ok": False, "message": f"无法加载该套卡计划：{exc}"}
     # DP 调度（2026-10-24 界面开关）：勾选后炼卡环节走 engine_v2 DPTickController
@@ -465,9 +562,10 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
                                 f"装不下，永远集不齐。请换张数更少的套"
                                 f"（1★ 有 9 张的：蜻蜓款款飞 / 瓢虫物语 / 橡皮泥的记忆 /"
                                 f" 果味酸奶 / 七夕情人节），或先清理保险箱再启动")}
-    if _auto is not None and _auto.running:
-        _auto.stop()
-    _auto = eng
+    tok = _cur_token()
+    if tok in AUTOS and AUTOS[tok].running:
+        AUTOS[tok].stop()
+    AUTOS[tok] = eng
     eng.seed_state(stock, pending)   # 面板先显示启动时的实时口径，tick 后会刷新
     eng.start()
     return {"ok": True, "plan": plan, "plans": plans, "free": free, "need": need, **eng.status()}
@@ -478,13 +576,14 @@ async def auto_queue_add(tid: int):
     """运行中往队列追加一套卡（不用停引擎）。"""
     if err := _require_login():
         return err
-    if _auto is None or not _auto.running:
+    eng = AUTOS.get(_cur_token())
+    if eng is None or not eng.running:
         return {"ok": False, "message": "引擎未在运行，请先用「启动」把第一套跑起来"}
     try:
-        plan = _auto.add_theme(tid)
+        plan = eng.add_theme(tid)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": f"无法加载该套卡计划：{exc}"}
-    return {"ok": True, "plan": plan, "queue": _auto.queue, ** _auto.status()}
+    return {"ok": True, "plan": plan, "queue": eng.queue, ** eng.status()}
 
 
 @app.get("/api/auto/plan")
@@ -493,7 +592,7 @@ async def auto_plan(tid: int):
     if err := _require_login():
         return err
     try:
-        eng = AutoRefine(_session, tid)
+        eng = AutoRefine(_cur_session(), tid)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
     mp = await _session.post(EP_MAINPAGE, code="", opuin=_session.uin)
@@ -516,8 +615,9 @@ async def auto_plan(tid: int):
 
 @app.post("/api/auto/stop")
 async def auto_stop():
-    if _auto is not None:
-        _auto.stop()
+    tok = _cur_token()
+    if tok in AUTOS:
+        AUTOS[tok].stop()
     return {"ok": True, "running": False}
 
 
@@ -1045,20 +1145,13 @@ async def exchange_scan(body: dict):
               if str(u).strip().isdigit()]
     # 好友补充池（2026-09-14 加）：theme_peers 按套只给 ≤100 人，
     # card_user_list 给登录者的好友名单（实测 194 人），与套卡池零交集，可互补。
-    # 名单里含自己（要排除）以及若干小号/僵尸号，小号同样是有效换卡对象。
+    # 名单里含自己（fetch_friend_pool 已排除）以及若干小号/僵尸号，小号同样是有效换卡对象。
     friends_added = 0
     if body.get("include_friends") or body.get("include_all_players"):
-        try:
-            r_all = await _session.post(EP_USER_LIST)
-            me = str(getattr(_session, "uin", "") or "").lstrip("0")
-            for m in re.finditer(r'uin="(\d+)"', r_all.get("raw", "")):
-                u = m.group(1)
-                if me and u.lstrip("0") == me:
-                    continue  # 跳过自己
+        for u in await ex.fetch_friend_pool(_session):
+            if u not in peers:
                 peers.append(u)
                 friends_added += 1
-        except Exception:  # noqa: BLE001
-            pass  # 补充池失败不影响主流程
     peers = list(dict.fromkeys(peers))
     if not peers:
         return {"ok": False, "message": "没有可扫描的卡友（这些套都没人玩或名单为空）"}
@@ -1142,6 +1235,7 @@ async def exchange_auto_start(body: dict):
         max_page=int(body.get("max_page") or 1),
         peers=[str(p) for p in (body.get("peers") or []) if str(p).isdigit()],
         dry_run=bool(body.get("dry_run")),
+        include_friends=bool(body.get("include_friends")),
     )
     return r
 
@@ -1317,6 +1411,22 @@ async def cat_travel():
         }
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"查询异常：{e}"}
+
+
+@app.middleware("http")
+async def session_middleware(request, call_next):
+    """按 cookie 把「当前账号」注入 ContextVar；路由里经 SessionProxy 透明取用。
+
+    并发请求各自在自己的 task 内 set/reset，互不串号（contextvar 语义）。
+    """
+    s = _resolve_session(request)
+    tok = _current_session.set(s)
+    utok = LOG_UIN.set(s.uin if s else "")
+    try:
+        return await call_next(request)
+    finally:
+        _current_session.reset(tok)
+        LOG_UIN.reset(utok)
 
 
 @app.middleware("http")
