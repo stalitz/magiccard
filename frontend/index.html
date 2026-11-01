@@ -911,6 +911,8 @@
           <div class="qr-box"><img id="qr-img" alt="扫码登录"></div>
           <div id="qr-status" class="status">请使用手机 QQ 扫码</div>
           <button id="qr-refresh" class="btn block">刷新二维码</button>
+          <button id="qq-quick" class="btn primary block hidden">QQ 内浏览器一键登录（实验）</button>
+          <div id="qq-quick-hint" class="hint hidden">仅在手机 QQ 内置浏览器中可用；腾讯可能不放行第三方域名的登录回跳，失败时请用上方扫码。</div>
         </div>
         <div id="tab-quick" class="panel hidden">
           <div id="quick-info" class="status"><span class="spinner"></span>正在检测本机 QQ…</div>
@@ -1831,7 +1833,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261101a"></script>
+<script src="/app.js?v=20261101b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

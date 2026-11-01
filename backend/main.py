@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 
 from .auth_qr import QRLogin
 from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, SESSION_FILE, LOG_DIR
@@ -255,6 +255,38 @@ async def login_quick():
                   "纯 web + 薄代理在 macOS 上无法读取其登录令牌。可点击「唤起本机 QQ」尝试，"
                   "但登录仍需在腾讯自己的登录页完成。当前环境建议使用扫码登录。",
     }
+
+
+# QQ 内浏览器一键登录回跳页（实验）：腾讯若放行第三方域名回跳并带上登录态，
+# 则建会话；否则 query 为空，自动跳回首页走扫码。__TOKEN__ 用 replace 避免 .format 误吞花括号。
+_MOBILE_CB_HTML = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>登录中…</title></head><body><script>
+try { sessionStorage.setItem('mc_token', '__TOKEN__'); } catch(e){}
+location.replace('/');
+</script></body></html>"""
+
+
+@app.get("/api/login/mobile_cb")
+async def login_mobile_cb(request: Request):
+    """QQ 内浏览器一键登录回跳（实验）。
+
+    仅当腾讯在回跳 URL 的 query 中带上登录态（skey/uin 等）时才建会话；
+    纯第三方域名腾讯通常不放行，此时回跳为空 -> 自动跳回首页走扫码。
+    """
+    q = request.query_params
+    skey = q.get("skey") or q.get("p_skey")
+    uin = q.get("uin") or q.get("p_uin") or ""
+    if skey and uin:
+        token = uuid.uuid4().hex
+        s = LoginSession(token=token)
+        s.persist_file = SESSIONS_DIR / f"{token}.json"
+        cookies = {k: v for k, v in q.items()
+                   if k in ("skey", "p_skey", "uin", "p_uin", "luin", "lskey", "nickname")}
+        s.load_cookies(cookies)
+        SESSIONS[token] = s
+        return HTMLResponse(_MOBILE_CB_HTML.replace("__TOKEN__", token))
+    return RedirectResponse(url="/")
 
 
 def _session_expired(d: dict) -> bool:

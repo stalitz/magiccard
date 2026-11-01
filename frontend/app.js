@@ -305,6 +305,26 @@ let currentLid = "";   // 当前登录流程 id：每个窗口各自 begin 独�
 
 // ---------- 二维码登录 ----------
 async function loadQr(reason) {
+  // QQ 内浏览器（手机 QQ 打开本页）：显示实验性一键登录按钮
+  const _ua = navigator.userAgent || "";
+  const _isQQMB = /MQQBrowser/i.test(_ua) && /QQ\//i.test(_ua)
+               && /Mobile|Android|iPhone|iPad|iPod/i.test(_ua);
+  const _qqBtn = document.getElementById("qq-quick");
+  const _qqHint = document.getElementById("qq-quick-hint");
+  if (_qqBtn) {
+    _qqBtn.classList.toggle("hidden", !_isQQMB);
+    if (_qqHint) _qqHint.classList.toggle("hidden", !_isQQMB);
+    if (_isQQMB && !_qqBtn.dataset.bound) {
+      _qqBtn.dataset.bound = "1";
+      _qqBtn.onclick = () => {
+        const cb = location.origin + "/api/login/mobile_cb";
+        const u = "https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=1104735529"
+                + "&u1=" + encodeURIComponent(cb)
+                + "&style=20&low_login=0&pt_no_auth=0&s_url=" + encodeURIComponent(cb);
+        location.href = u;
+      };
+    }
+  }
   // 防御：按钮 onclick=loadQr 会把 PointerEvent 当 reason 传入，导致
   // setQrStatus 显示 "[object PointerEvent]"（2026-09-11 用户报告）。
   // 统一把非字符串 reason 收敛成可读文案。
