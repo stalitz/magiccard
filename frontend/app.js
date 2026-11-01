@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261031a";
+const APP_VER = "20261101a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -440,7 +440,7 @@ $("logout").onclick = async () => {
 
 // ---------- 子页切换 ----------
 function switchPane(pane) {
-  document.querySelectorAll(".subnav .btn").forEach((b) =>
+  document.querySelectorAll(".subnav .btn, .mobile-nav .btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.pane === pane));
   $("pane-overview").classList.toggle("hidden", pane !== "overview");
   $("pane-lib").classList.toggle("hidden", pane !== "lib");
@@ -468,7 +468,7 @@ function switchPane(pane) {
   if (pane === "match") { initMatchOnce(); initHomeOnce(); }
   else matchStopPoll();
 }
-document.querySelectorAll(".subnav .btn").forEach((b) => {
+document.querySelectorAll(".subnav .btn, .mobile-nav .btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
 });
 

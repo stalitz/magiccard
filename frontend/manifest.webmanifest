@@ -1,0 +1,18 @@
+{
+  "name": "魔法卡片助手",
+  "short_name": "魔法卡片",
+  "description": "QQ 空间魔法卡片自动练卡助手",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#eef1f6",
+  "theme_color": "#12b7f5",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

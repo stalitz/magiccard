@@ -2,7 +2,13 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#12b7f5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="魔法卡片">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.svg">
 <title>魔法卡片助手</title>
 <style>
   :root{
@@ -812,6 +818,75 @@
 /* 骨架屏 shimmer（猫咪旅行首次加载占位，2026-09-29） */
 .skel{height:11px;border-radius:4px;display:inline-block;vertical-align:middle;background:linear-gradient(90deg,#e3e8ee 25%,#f2f5f9 45%,#e3e8ee 65%);background-size:200% 100%;animation:skel_shimmer 1.2s linear infinite}
 @keyframes skel_shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+  /* 移动端底部导航：桌面默认隐藏（≤768px 才显示，替代顶部 subnav） */
+  .mobile-nav { display: none; }
+
+  /* ===== 移动端适配（≤768px）；桌面端（>768px）完全保持原样 ===== */
+  @media (max-width: 768px) {
+    /* iOS：输入框聚焦整页放大修复（字号≥16px 阈值） */
+    input, select, textarea, button { font-size: 16px; }
+    /* 100vh → 动态视口高度，避免移动端地址栏遮挡底部 */
+    html, body { height: 100dvh; overflow: hidden; }
+    .app { height: 100dvh; }
+    body { font-size: 14px; }
+
+    /* 顶部通栏：压缩间距 */
+    .topbar { gap: 8px; padding: 0 12px; height: 48px; }
+    .topbar .brand { font-size: 15px; }
+    .topbar .sub { display: none; }
+
+    /* 主内容区：去大 padding，给底部导航留位 */
+    .content { padding: 8px 10px 64px; gap: 8px; }
+    .main-col { gap: 8px; }
+
+    /* 桌面 subnav 在移动端隐藏（由底部导航替代） */
+    .dash-bar .subnav { display: none; }
+    .dash-bar { gap: 8px; padding: 6px 8px; flex-wrap: wrap; }
+    .dash-bar .who { font-size: 12px; }
+
+    /* 放大点击区，手指好点 */
+    .btn, button { min-height: 38px; }
+    .btn.sm { min-height: 34px; padding: 7px 12px; }
+    .cb-card .cbacts button { padding: 8px 0; }
+    .tab { padding: 10px; }
+
+    /* 多栏在手机上强制单列堆叠 */
+    .cards-grid,
+    .lib-body,
+    .lib-body.dg-cols,
+    .lib-body.dg-cols.cols-2,
+    .ex-grid, .sp-grid, .au-grid,
+    .match-pane { grid-template-columns: minmax(0,1fr) !important; grid-template-rows: auto !important; grid-template-areas: none !important; }
+    .match-pane { flex-direction: column; }
+    .mlog-col { flex: 1 1 auto; }
+
+    /* 浮层限宽居中 */
+    .modal-box { width: min(720px, 94vw); }
+    .allfaces { width: 94vw; }
+    .kw-suggest { width: 94vw; }
+
+    /* 登录卡片手机上满宽、二维码够大 */
+    .login-card { width: 100%; max-width: 420px; margin: 0 12px; }
+    .qr-box img, #qr-img { width: 240px; height: 240px; max-width: 70vw; }
+
+    /* 底部导航：固定底部、可横滑 */
+    .mobile-nav {
+      display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 80;
+      background: #fff; border-top: 1px solid var(--line);
+      padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+      box-shadow: 0 -2px 10px rgba(20,40,80,.08);
+    }
+    .mobile-nav .mn-btn {
+      flex: 0 0 auto; min-width: 56px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 2px;
+      background: none; border: none; cursor: pointer; padding: 4px 2px;
+      color: var(--muted); font-size: 10px;
+    }
+    .mobile-nav .mn-btn .mn-ico { font-size: 20px; line-height: 1; }
+    .mobile-nav .mn-btn.active { color: var(--qq-blue); }
+  }
 </style>
 </head>
 <body>
@@ -1742,7 +1817,21 @@
     </div>
   </div>
 </div>
-<script src="/app.js?v=20261031c"></script>
+
+  <!-- 移动端底部导航（桌面隐藏；≤768px 显示，替代顶部 subnav） -->
+  <nav class="mobile-nav" id="mobile-nav">
+    <button class="mn-btn active" data-pane="overview"><span class="mn-ico">🏠</span><span class="mn-tx">总览</span></button>
+    <button class="mn-btn" data-pane="lib"><span class="mn-ico">📚</span><span class="mn-tx">卡库</span></button>
+    <button class="mn-btn" data-pane="cardbox"><span class="mn-ico">🗃️</span><span class="mn-tx">卡箱</span></button>
+    <button class="mn-btn" data-pane="auto"><span class="mn-ico">⚙️</span><span class="mn-tx">炼卡</span></button>
+    <button class="mn-btn" data-pane="exchange"><span class="mn-ico">🔄</span><span class="mn-tx">换卡</span></button>
+    <button class="mn-btn" data-pane="spirite"><span class="mn-ico">🐾</span><span class="mn-tx">灵宠</span></button>
+    <button class="mn-btn" data-pane="travel"><span class="mn-ico">🐱</span><span class="mn-tx">旅行</span></button>
+    <button class="mn-btn" data-pane="dig"><span class="mn-ico">⛏️</span><span class="mn-tx">挖地</span></button>
+    <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
+  </nav>
+
+<script src="/app.js?v=20261101a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
