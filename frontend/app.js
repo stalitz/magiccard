@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261101a";
+const APP_VER = "20261102b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -276,7 +276,61 @@ function showLogin() {
   $("login-view").classList.remove("hidden");
   $("dash-view").classList.add("hidden");
   $("top-user").textContent = "";
+  loadSessionList();
 }
+
+// 登录页列出已登录的会话，供点选沿用（免扫码）—— 后端 /api/login/sessions
+async function loadSessionList() {
+  const box = $("session-pick");
+  const list = $("session-list");
+  if (!box || !list) return;
+  try {
+    const d = await (await fetch("/api/login/sessions")).json();
+    const arr = (d && d.sessions) || [];
+    if (!arr.length) { box.classList.add("hidden"); return; }
+    list.innerHTML = "";
+    for (const s of arr) {
+      const row = document.createElement("div");
+      row.className = "session-item";
+      const u = document.createElement("span");
+      u.className = "si-uin";
+      u.textContent = "QQ " + (s.masked_uin || s.uin);
+      const btn = document.createElement("button");
+      btn.className = "btn primary si-use";
+      btn.textContent = "沿用";
+      btn.onclick = () => resumeToken(s.token);
+      row.appendChild(u); row.appendChild(btn);
+      list.appendChild(row);
+    }
+    box.classList.remove("hidden");
+  } catch (e) {
+    box.classList.add("hidden");
+  }
+}
+
+// 沿用某个已登录会话：把 token 写入本标签 sessionStorage 并探活进入主面板
+async function resumeToken(token) {
+  sessionStorage.setItem("mc_token", token);
+  try {
+    const me = await (await fetch("/api/me")).json();
+    if (me && me.logged_in) {
+      if (me.token) sessionStorage.setItem("mc_token", me.token);
+      showDash(me.uin);
+      let hp = (location.hash || "").replace("#", "");
+      if (hp === "lottery") hp = "overview";
+      if (hp && ["overview","lib","cardbox","auto","exchange","spirite"].includes(hp))
+        setTimeout(() => switchPane(hp), 50);
+      return;
+    }
+    sessionStorage.removeItem("mc_token");
+    log("该会话已失效，请重新登录", "warn");
+    loadSessionList();
+  } catch (e) {
+    sessionStorage.removeItem("mc_token");
+    log("沿用失败：" + e, "err");
+  }
+}
+
 // 会话失效时强制回到扫码登录（清除已登录标记、停掉轮询、弹出二维码）
 function forceLogin(reason) {
   loggedIn = false;
@@ -380,10 +434,14 @@ async function pollOnce() {
     if (res.token) sessionStorage.setItem("mc_token", res.token);  // 落 sessionStorage：按标签页隔离
     showDash(res.uin);
   } else if (s === "expired") {
-    // 兜底1：先探测一次会话，避免「漏掉确认态 0 但 cookie 其实已到」被误判为失败
+    // 兜底1：先探测一次会话，避免「漏掉确认态 0 但 cookie 其实已到」被误判为失败。
+    // 关键闸（2026-11-02 修）：仅在「本标签确实收到过 scanned（用户真扫了码）」时，
+    // 才接受 /api/me 的登录态。否则（冷启动、从未扫码）后端对无 token 请求会返回
+    // default 账号的 logged_in=true（legacy 兼容），若此处无脑接受就会「新开标签不扫码
+    // 却自动登成另一个账号」。冷启动必须拒绝顶包，只降速继续轮询等待真实扫码。
     try {
       const me = await (await fetch("/api/me")).json();
-      if (me && me.logged_in) {
+      if (me && me.logged_in && sawScanned) {
         if (me.token) sessionStorage.setItem("mc_token", me.token);
         log("检测到实际已登录（确认窗口被漏掉），进入主面板", "ok");
         showDash(me.uin);
@@ -460,7 +518,7 @@ $("logout").onclick = async () => {
 
 // ---------- 子页切换 ----------
 function switchPane(pane) {
-  document.querySelectorAll(".subnav .btn, .mobile-nav .btn").forEach((b) =>
+  document.querySelectorAll(".subnav .btn, .mobile-nav .mn-btn").forEach((b) =>
     b.classList.toggle("active", b.dataset.pane === pane));
   $("pane-overview").classList.toggle("hidden", pane !== "overview");
   $("pane-lib").classList.toggle("hidden", pane !== "lib");
@@ -488,7 +546,7 @@ function switchPane(pane) {
   if (pane === "match") { initMatchOnce(); initHomeOnce(); }
   else matchStopPoll();
 }
-document.querySelectorAll(".subnav .btn, .mobile-nav .btn").forEach((b) => {
+document.querySelectorAll(".subnav .btn, .mobile-nav .mn-btn").forEach((b) => {
   b.onclick = () => switchPane(b.dataset.pane);
 });
 
@@ -3285,6 +3343,7 @@ async function autoStart() {
     const d = await (await fetch(`/api/auto/start?${qs}`, { method: "POST" })).json();
     if (d.ok) {
       log(`自动炼卡启动：${d.plan.name}（${d.plan.base_cards} 张底卡 / 集齐 1 轮需 ${d.plan.need_slots} 格）${dp ? " · DP 调度" : ""}`, "ok");
+      (d.warnings || []).forEach((w) => log("注意：" + w, "warn"));
       autoLogCleared = false;
       startAutoPoll();
     } else {

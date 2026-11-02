@@ -40,6 +40,14 @@
     padding-top:7vh;min-width:0}
   .login-card{width:min(460px,100%);background:var(--panel);border-radius:12px;
     box-shadow:0 8px 30px rgba(20,40,80,.10);overflow:hidden}
+  .session-pick{padding:16px 22px 4px;border-bottom:1px solid var(--line)}
+  .session-pick .sp-title{font-size:13px;color:var(--muted);margin-bottom:10px}
+  .session-list{display:flex;flex-direction:column;gap:8px}
+  .session-item{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+  .session-item .si-uin{font-size:14px;color:var(--text);font-variant-numeric:tabular-nums}
+  .session-item .si-use{font-size:13px;padding:6px 14px}
+  .session-pick .sp-or{text-align:center;font-size:12px;color:var(--muted);margin:12px 0 4px}
   .login-card .head{padding:18px 22px;font-size:16px;font-weight:600;color:var(--text);
     border-bottom:1px solid var(--line)}
   .tabs{display:flex;border-bottom:1px solid var(--line)}
@@ -851,14 +859,32 @@
     .cb-card .cbacts button { padding: 8px 0; }
     .tab { padding: 10px; }
 
-    /* 多栏在手机上强制单列堆叠 */
+    /* 移动端：所有多栏网格容器改为纵向 flex 堆叠 + 自身可滚动，
+       彻底避免窄屏下 grid-template-areas 残留 + 受限高度导致的溢出叠加（视觉重叠）。 */
     .cards-grid,
     .lib-body,
     .lib-body.dg-cols,
     .lib-body.dg-cols.cols-2,
     .ex-grid, .sp-grid, .au-grid,
-    .match-pane { grid-template-columns: minmax(0,1fr) !important; grid-template-rows: auto !important; grid-template-areas: none !important; }
-    .match-pane { flex-direction: column; }
+    .lib-body.au-grid, .lib-body.ex-grid, .lib-body.sp-grid {
+      display: flex !important; flex-direction: column !important;
+      grid-template-columns: none !important; grid-template-rows: none !important;
+      grid-template-areas: none !important;
+      gap: 8px; overflow-y: auto; min-height: 0; min-width: 0;
+    }
+    /* 网格列/子块在手机上按内容高度纵向排列，不再争高度 */
+    .cards-grid > *, .lib-body > *, .ex-grid > *, .sp-grid > *, .au-grid > *, .match-pane > * {
+      flex: 0 0 auto; min-width: 0; min-height: 0;
+    }
+    /* 比赛页：只改方向 + 清理 grid 残留，不强制 display！
+       否则 display:flex!important 会盖掉 .hidden（特异性相同、后定义者胜），
+       导致比赛页（含子 tab 栏）泄漏到所有界面。display 仍由 .pane 提供。 */
+    .match-pane {
+      flex-direction: column !important;
+      grid-template-columns: none !important; grid-template-rows: none !important;
+      grid-template-areas: none !important;
+      overflow-y: auto; min-height: 0; min-width: 0;
+    }
     .mlog-col { flex: 1 1 auto; }
 
     /* 浮层限宽居中 */
@@ -903,6 +929,11 @@
     <div id="login-view" class="login-holder hidden">
       <div class="login-card">
         <div class="head">登录</div>
+        <div id="session-pick" class="session-pick hidden">
+          <div class="sp-title">已登录的账号 · 点选沿用（免扫码）</div>
+          <div id="session-list" class="session-list"></div>
+          <div class="sp-or">— 或扫码 / 快速登录 —</div>
+        </div>
         <div class="tabs">
           <button class="tab active" data-tab="qr">二维码登录</button>
           <button class="tab" data-tab="quick">快速登录</button>
@@ -1833,7 +1864,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261101b"></script>
+<script src="/app.js?v=20261102b"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

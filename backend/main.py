@@ -289,6 +289,23 @@ async def login_mobile_cb(request: Request):
     return RedirectResponse(url="/")
 
 
+@app.get("/api/login/sessions")
+async def login_sessions():
+    """列出当前所有已登录会话（供登录页选择沿用）。
+
+    自用部署：token 直接返回给前端复用（与 /api/login/poll 成功返回 token 同一机制）；
+    前端把选中 token 存入 sessionStorage 即沿用该账号，无需重新扫码。
+    """
+    out = []
+    for token, s in SESSIONS.items():
+        if s.logged_in and s.uin:
+            u = s.uin
+            masked = (u[:3] + "****" + u[-4:]) if len(u) > 7 else u
+            out.append({"token": token, "uin": u, "masked_uin": masked})
+    out.sort(key=lambda x: x["uin"])
+    return {"sessions": out}
+
+
 def _session_expired(d: dict) -> bool:
     """腾讯侧会话失效（skey 过期）的判据：返回码 -1001 或提示「重新登陆」。"""
     if not isinstance(d, dict) or d.get("ok"):
@@ -306,6 +323,10 @@ async def me():
       - 探测时连接层抛异常（本地连接断了 / 腾讯不可达）→ probe=conn_error，保持登录态
       - 腾讯正常响应但业务码 -1001 / 请重新登陆 → probe=expired，清登录态
     """
+    # 无 token 且无 default 账号（多账号隔离部署、未登录态）：直接返回未登录，
+    # 避免 SessionProxy 路由到 None 抛 AttributeError -> 500（2026-11-02 修）。
+    if _current_session.get() is None:
+        return {"logged_in": False}
     if not _session.logged_in:
         return {"logged_in": False}
     try:
@@ -648,24 +669,45 @@ async def auto_start(tid: int = 0, tids: str = "", buy: int = 1, rounds: int = 0
     #   否则引擎会每 tick 买底卡 → 箱满 → 腾位卖掉 → 再买（真机实测 1★ tid=85
     #   在 18+168 全满时 bought=636 张 / refined=20 次 / errors=6862，炉子却全空）。
     cap2 = free["change"] + free["store"]
+    warnings: list[str] = []
     for t in ids:
         pl = eng.plans[t]
         missing = [c for c in pl.ids if stock.get(c, 0) < 1]
-        if len(missing) > cap2:
+        if len(missing) <= cap2:
+            continue
+        # ★ 2026-11-02 用户指正（DP 模式）：上面这条只数「**此刻**空位」，忽略了
+        #   「箱内囤的卡被炼成更高面值后腾出的格子」（3 张进 1 张出，每炉净腾 2 格）。
+        #   真机现场：经典女套装(13 张)缺 10 张，两箱空位 7（保险箱 47/47 全满、
+        #   换卡箱 7 格），静态口径 7 < 10 → 判「永远集不齐」直接拒绝启动；但箱里
+        #   囤的 40 面卡足够先炼一张顶层卡腾位，而 DP 本来就会自己排这个消耗动作
+        #   （DP 侧有真实 box_cap 约束 + box_relaxed + _make_room，决策前还会重读状态）。
+        #   → DP 模式降级为**软警告放行**；不勾 DP（贪心）保留硬拦 —— 历史上
+        #   「买底卡→箱满→卖卡→再买」的爆箱死循环（bought=636/errors=6862）全部
+        #   出在贪心路径。
+        if not eng.dp_mode:
             return {"ok": False, "plans": plans, "free": free,
                     "need": len(pl.ids), "missing": len(missing),
                     "message": (f"{pl.name}：一套要 {len(pl.ids)} 张卡**同时持有**才能上交，"
                                 f"现在还缺 {len(missing)} 张，而两箱合计只有 {cap2} 个空位 —— "
                                 f"装不下，永远集不齐。请换张数更少的套"
                                 f"（1★ 有 9 张的：蜻蜓款款飞 / 瓢虫物语 / 橡皮泥的记忆 /"
-                                f" 果味酸奶 / 七夕情人节），或先清理保险箱再启动")}
+                                f" 果味酸奶 / 七夕情人节），或先清理保险箱再启动；"
+                                f"也可以勾上「DP 调度」——DP 会先炼高阶卡消耗箱内囤卡腾位")}
+        keep = set(pl.ids)
+        burnable = sum(n for c, n in stock.items() if c not in keep)
+        gain = burnable * 2 // 3      # 3 张进 1 张出 → 每炉净腾 2 格
+        warnings.append(
+            f"{pl.name}：还缺 {len(missing)} 张、当前两箱仅 {cap2} 个空位，"
+            f"但箱内另有 {burnable} 张非本套卡可炼掉腾位（约 {gain} 格）——"
+            f"DP 会先消耗再补缺口；若长时间空转，请手动清一下保险箱")
     tok = _cur_token()
     if tok in AUTOS and AUTOS[tok].running:
         AUTOS[tok].stop()
     AUTOS[tok] = eng
     eng.seed_state(stock, pending)   # 面板先显示启动时的实时口径，tick 后会刷新
     eng.start()
-    return {"ok": True, "plan": plan, "plans": plans, "free": free, "need": need, **eng.status()}
+    return {"ok": True, "plan": plan, "plans": plans, "free": free, "need": need,
+            **eng.status(), "warnings": warnings}
 
 
 @app.post("/api/auto/queue/add")
