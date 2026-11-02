@@ -1064,7 +1064,7 @@ class AutoRefine:
         #      变出来的 40 面卡直接进卡箱 → 下面第 2 步重读状态时就当素材了，
         #      于是本来要「买 10 面卡 + 自己炼」的那一步可以直接省掉。
         if self.gift_drain:
-            await self._gift_drain(steps)
+            await self._gift_drain(steps, rd_now[0] if rd_now else st)
 
         # 2) 重新取状态（收卡后库存变了）。mainpage 偶发 code=-1（服务端抖动），
         #    重试一次再放弃，避免白丢一个 tick。
@@ -1396,6 +1396,15 @@ class AutoRefine:
                 continue
             if a.kind == "buy":
                 tid_c = owner.get(a.cid) or self.queue[0]
+                # ★ 2026-11-02 最高优先级规则：箱位只够凑齐本套时，DP 的「囤备用」
+                #   预买一律延后（每张净占 1 格），下个 tick 重解时会再来；但若这张
+                #   正是「凑齐还缺的卡」，则放行 —— 它本身就是凑齐的一部分。
+                if (not self._is_collect_essential(a.cid, stock)
+                        and self._collect_tight(st, stock) > 0):
+                    self._log("买卡", True,
+                              f"{card_name(a.cid)}（DP预买）暂缓：两箱空位只够凑齐本套，"
+                              f"先不囤卡，等上交释放格位")
+                    continue
                 for _ in range(max(1, a.n)):
                     if self._free_change(st) <= 0:
                         self._log("买卡", False,
@@ -1755,6 +1764,42 @@ class AutoRefine:
             n += sum(1 for c in plan.ids if stock.get(c, 0) < 1)
         return n
 
+    def _is_collect_essential(self, cid: int, stock: Counter) -> bool:
+        """这张卡是不是「队列里某套凑齐还缺的卡」（箱内还没有这张）。
+
+        最高优先级规则的**另一半**：凑齐还缺的卡必须允许进箱，任何闸门都不许
+        延后它 —— 延后它等于延后整套。
+        """
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if plan and cid in plan.ids and stock.get(cid, 0) < 1:
+                return True
+        return False
+
+    def _free2(self, st: dict) -> int:
+        """两箱合计空位。保险箱看 `cur`（已开通格），`max` 是没开通的上限。"""
+        store = (st.get("cap") or {}).get("store") or {}
+        store_free = max(0, int(store.get("cur", 0)) - int(store.get("used", 0)))
+        return self._free_change(st) + store_free
+
+    def _collect_tight(self, st: dict, stock: Counter) -> int:
+        """★ 最高优先级规则（用户 2026-11-02 定调）
+
+        「当任何操作会卡住集齐一套卡时，都要延后。」
+
+        返回**必须给凑齐预留的格数**（= 凑齐还缺几张 distinct 卡）。只有两箱
+        空位 ≤ 这个缺口（零余量边界态）时才 > 0，表示此刻任何多占 1 格的
+        「非凑齐必需」操作，都会让这一套永远凑不齐，必须延后。
+
+        空位充裕（或已凑齐、队列为空）时一律返回 0 —— 正常情况绝不做延后。
+        用户明确：「正常卡箱空位够时，不需要这样，这会让时间拉长」。所以这条
+        规则只在边界态生效，代价（拉长时间）只落在真的装不下的场合。
+        """
+        need = self._collect_need(stock)
+        if need <= 0:
+            return 0
+        return need if self._free2(st) <= need else 0
+
     def _should_defer_take(self, cid: int, st: dict, stock: Counter) -> bool:
         """箱位紧时是否该把这张**已炼成**的卡先留在炉里、暂不取出。
 
@@ -1772,29 +1817,20 @@ class AutoRefine:
           ③ 两箱合起来装不下「凑齐还缺的张数」→ 才值得延后
              （空位充裕时取出来无所谓，别白白让炉位空转）。
         """
-        for tid in self.queue:
-            plan = self.plans.get(tid)
-            if plan and cid in plan.ids and stock.get(cid, 0) < 1:
-                return False                      # ① 必需卡，照常取
+        if self._is_collect_essential(cid, stock):
+            return False                          # ① 必需卡，照常取
         # ② 炉里多余待收卡积压到 4 张就照常取（别把炉位长期占死）
         n_extra = 0
         for c2 in st.get("stove") or []:
             c2id = int(c2.get("id") or 0)
             if c2id <= 0 or int(c2.get("flag") or 0) != 2:
                 continue
-            if any(pl and c2id in pl.ids and stock.get(c2id, 0) < 1
-                   for pl in self.plans.values()):
+            if self._is_collect_essential(c2id, stock):
                 continue                          # 它自己是必需卡，不算积压
             n_extra += 1
         if n_extra >= 4:
             return False
-        need = self._collect_need(stock)
-        if need <= 0:
-            return False                          # 已凑齐/无缺口，取出来也无妨
-        free2 = self._free_change(st) + max(
-            0, int((st.get("cap") or {}).get("store", {}).get("cur", 0))
-            - int((st.get("cap") or {}).get("store", {}).get("used", 0)))
-        return free2 <= need                      # ③ 空位刚好只够凑齐 → 延后
+        return self._collect_tight(st, stock) > 0  # ③ 边界态才延后
 
     # ---------- 腾位（换卡箱满了买不进底卡时）★ 2026-10-03 用户定调 ----------
     async def _make_room(self, tid: int, need: int, st: dict, steps: list[dict],
@@ -1985,6 +2021,11 @@ class AutoRefine:
             return None
         if need_buy:
             free_box = self._free_change(st)
+            # ★ 2026-11-02 最高优先级规则（「任何会卡住集齐的操作都要延后」）
+            #   不适用本处：买素材**同一 tick 立刻投炉**（下面 _submit_one 直接
+            #   _payload + EP_REFINE），净增占用 = 0，只要投炉成功就不会挤掉凑齐
+            #   所需的格位；素材本身要不要留由 _spare/keep 保证（套内卡留 1 张）。
+            #   真需要拦的是「买了囤着不用」的动作 —— 收益见 DP 预买与收卡两处闸门。
             # ★ 2026-10-26：给「已炼成待收」的炉预留 2 格取卡空位（真机取卡要 2 格）。
             #   不留 → 买卡把换卡箱塞满 → 收卡永远被拒 → 炉位不释放 →
             #   箱里的 10 面烧不掉 → 箱永远满（真机死锁，用户当场报）。
@@ -2164,7 +2205,7 @@ class AutoRefine:
         self._log_change_attempts(r.get("attempts"), "卡变明细")
         return rd
 
-    async def _gift_drain(self, steps: list[dict]) -> None:
+    async def _gift_drain(self, steps: list[dict], st: dict | None = None) -> None:
         """礼物箱快满 → 收礼 + 变卡（自动炼卡的可选环节，见 gf.drain_gift_box）。
 
         只在「箱件数 ≥ upper」时才动，变卡约 50% 成功、失败不阻塞 —— 所以这里
@@ -2172,6 +2213,9 @@ class AutoRefine:
 
         ★ 2026-10-18 修：分布变卡（同 _drain_box_gift），把礼物卡按缺失种类分散变出，
           不再只变同一张。
+        ★ 2026-11-02 最高优先级规则：箱位只够凑齐本套时**整套延后**。收礼变卡
+          是唯一会把「箱外卡凭空搬进箱」的操作（每变一张净 +1 格），变出来的
+          若对凑齐零贡献，就会挤掉凑齐所需的最后一格。
         """
         specs = self._change_specs(self._stock, self._pending)
         if not specs:
@@ -2179,6 +2223,19 @@ class AutoRefine:
                               "dst": None,
                               "message": "这一套的 40 面卡已够（或没有 40 面候选），收礼变卡跳过"}
             return
+        if st is not None:
+            tight = self._collect_tight(st, self._stock)
+            # 只要有一个变卡目标本身就是「凑齐还缺的卡」，就照常变（它在帮凑齐）；
+            # 全部是多余的才延后。
+            if tight > 0 and not any(self._is_collect_essential(c, self._stock)
+                                     for c, _n, _t in specs):
+                self._log("礼物变卡", True,
+                          f"暂缓：两箱空位只够凑齐这一套（还差 {tight} 格），"
+                          f"变出的卡对凑齐零贡献，会挤掉凑齐所需格位，等上交后再变")
+                self.gift_last = {"ok": True, "skipped": True, "took": 0, "changed": 0,
+                                  "dst": None,
+                                  "message": "箱位只够凑齐本套，收礼变卡暂缓"}
+                return
         dst_ids = [cid for cid, _need, _tid in specs]
         dst_need = {cid: need for cid, need, _tid in specs}
         try:
