@@ -972,6 +972,13 @@ class AutoRefine:
         stock_now: Counter = Counter()
         for x in st["change"] + st["store"]:
             stock_now[int(x["id"])] += 1
+        # 炉内在途（在炼 + 已炼成待收）——判「这张到底是不是凑齐必需」要连在途一起
+        # 算，否则「炉里那第二张 81 是炼 82 的素材」会被误判成多余（见
+        # `_is_collect_essential` 判据②）。
+        pending_now: Counter = Counter()
+        for x in st["stove"]:
+            if int(x.get("id") or 0) > 0:
+                pending_now[int(x["id"])] += 1
         for c in st["stove"]:
             if int(c.get("flag") or 0) == 2 and c["id"] > 0:
                 slot = c["slot"]
@@ -983,7 +990,7 @@ class AutoRefine:
                 #   底卡），零余量；炉里却还躺着多余的 80 和第二张 82 —— 各取一张就
                 #   占 1 格，最后买底卡少一格凑不齐。这张 80 放着不取，等整箱上交
                 #   （释放全部格位）后再取，代价只是占一个炉位。
-                if self._should_defer_take(int(c["id"]), st, stock_now):
+                if self._should_defer_take(int(c["id"]), st, stock_now, pending_now):
                     nm = card_name(c["id"])
                     need_n = self._collect_need(stock_now)
                     self._log("收卡", True,
@@ -1011,6 +1018,7 @@ class AutoRefine:
                     continue
                 # 取进换卡箱：同步本地库存与箱占用，供后续这类「够不够装下」的判断用
                 stock_now[int(c["id"])] += 1
+                pending_now[int(c["id"])] = max(0, pending_now[int(c["id"])] - 1)
                 st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                 self.stats["refined"] += 1
                 # 取「自己炉子」的卡 → 获得 1 次翻牌机会，立即翻一次（5选1奖，不翻就浪费）
@@ -1764,16 +1772,47 @@ class AutoRefine:
             n += sum(1 for c in plan.ids if stock.get(c, 0) < 1)
         return n
 
-    def _is_collect_essential(self, cid: int, stock: Counter) -> bool:
-        """这张卡是不是「队列里某套凑齐还缺的卡」（箱内还没有这张）。
+    def _is_collect_essential(self, cid: int, stock: Counter,
+                              pending: Counter | None = None) -> bool:
+        """这张卡是不是「凑齐这一套所必需」的供给 —— 必取，任何闸门都不许延后它。
 
-        最高优先级规则的**另一半**：凑齐还缺的卡必须允许进箱，任何闸门都不许
-        延后它 —— 延后它等于延后整套。
+        两道判据（任一命中即必需）：
+
+        ① 箱内还缺这种卡（distinct 口径）—— 最直白的情形。
+
+        ② **这张卡是「一路向上合成」的前置**（用户 2026-11-02 指出的反例）：
+           「有一种操作看似是增加占位，但实际是腾箱的前置。比如一堆下级卡占了
+             箱位，那炼好了缺的那个最低层卡，其实可以一路向上合成，最终达到腾箱，
+             但取炼好的卡却实际会占位更多；如果这个不取，就没法一路向上合成。」
+           典型（真机 tid=54）：凑齐要 79/80/81 各 2 张（1 张进集卡册 + 1 张当
+           炼 82「整套搭配」的素材），箱里只有各 1 张。炉里炼好的第二张 81 **不是**
+           distinct 缺口（81 已有 1 张，判据① 不命中），但它正是炼 82 的必需素材；
+           不取出来就没法投炉，整套永远停在原地 —— 取它占 1 格，换来 6 张 40 面
+           合成 1 张 150 面，净腾 5 格。
+           判法：把这张从「在途」里扣掉，再跑一遍 `net_plan` 的净需求树（它会把
+           合成要消耗的素材**张数**一路传导到底卡）；需求树又把这张卡算回来
+           （runs/buy 里出现）→ 缺了它凑不齐 → 必需。
+           这样「取出来只为占格」与「取出来能继续往上合」就被区分开了。
         """
         for tid in self.queue:
             plan = self.plans.get(tid)
             if plan and cid in plan.ids and stock.get(cid, 0) < 1:
-                return True
+                return True                                   # ① distinct 缺
+        base_pd = self._pending if pending is None else pending
+        pd = Counter(base_pd or Counter())
+        if pd.get(cid, 0) <= 0:
+            return False        # 箱里不缺这种卡、它也不在途 → 帮不上凑齐
+        pd[cid] -= 1            # 假设这一张不到货，看需求树是否还缺它
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if not plan:
+                continue
+            try:
+                runs, buy = plan.net_plan(stock, pd, sets=1)
+            except Exception:   # noqa: BLE001  净需求算不出来就别拦（宁可照取）
+                continue
+            if runs.get(cid, 0) > 0 or buy.get(cid, 0) > 0:
+                return True                                   # ② 向上合成的前置
         return False
 
     def _free2(self, st: dict) -> int:
@@ -1800,7 +1839,8 @@ class AutoRefine:
             return 0
         return need if self._free2(st) <= need else 0
 
-    def _should_defer_take(self, cid: int, st: dict, stock: Counter) -> bool:
+    def _should_defer_take(self, cid: int, st: dict, stock: Counter,
+                           pending: Counter | None = None) -> bool:
         """箱位紧时是否该把这张**已炼成**的卡先留在炉里、暂不取出。
 
         ★ 2026-11-02 用户指正（真机经典女套装 tid=54）：两箱空位 7，凑齐还差 7 格
@@ -1810,14 +1850,20 @@ class AutoRefine:
           卡箱可能就不够了, 你能看出这种情况, 把40卡放着不取, 等上交后再取吗」。
           这类卡的正确处理是**留炉里**，等本套上交（整箱格位一次性释放）后再取。
 
+        ⚠️ 但「看似占位、实为腾箱前置」的卡绝不能延后 —— 判据 ① 已按
+          `_is_collect_essential` 的净需求树口径覆盖（既认 distinct 缺口，也认
+          「一路向上合成」要消耗的素材张数）。用户 2026-11-02 补充的正是这一点：
+          「炼好了缺的那个最低层卡，其实可以一路向上合成，最终达到腾箱，但取
+           炼好的卡却实际会占位更多，如果这个不取，就没法一路向上合成。」
+
         判据（三道闸，缺一不可，任何一道不满足就照常取）：
-          ① 这张卡是「还缺的必需卡」（本套 distinct 里箱内没有的）→ 必取，不延后；
+          ① 这张卡是「凑齐所必需的供给」（含向上合成的素材）→ 必取，不延后；
           ② 炉里「多余待收卡」还没堆到 4 张（卡位共 7 个，留 4 张以内不影响投炉）
              → 才允许继续延后，避免多余卡把炉位长期堆死；
           ③ 两箱合起来装不下「凑齐还缺的张数」→ 才值得延后
              （空位充裕时取出来无所谓，别白白让炉位空转）。
         """
-        if self._is_collect_essential(cid, stock):
+        if self._is_collect_essential(cid, stock, pending):
             return False                          # ① 必需卡，照常取
         # ② 炉里多余待收卡积压到 4 张就照常取（别把炉位长期占死）
         n_extra = 0
@@ -1825,7 +1871,7 @@ class AutoRefine:
             c2id = int(c2.get("id") or 0)
             if c2id <= 0 or int(c2.get("flag") or 0) != 2:
                 continue
-            if self._is_collect_essential(c2id, stock):
+            if self._is_collect_essential(c2id, stock, pending):
                 continue                          # 它自己是必需卡，不算积压
             n_extra += 1
         if n_extra >= 4:
