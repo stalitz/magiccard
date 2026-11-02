@@ -969,11 +969,30 @@ class AutoRefine:
 
         # 1) 收卡：flag=2 已完成
         self._pai_happened = False
+        stock_now: Counter = Counter()
+        for x in st["change"] + st["store"]:
+            stock_now[int(x["id"])] += 1
         for c in st["stove"]:
             if int(c.get("flag") or 0) == 2 and c["id"] > 0:
                 slot = c["slot"]
                 opu = c.get("opuin")
                 is_self = not (opu and str(opu) != str(self.s.uin))
+                # ★ 2026-11-02 用户指正（真机经典女套装）：箱位刚好只够凑齐这一套时，
+                #   把「对凑齐零贡献」的多余卡先留在炉里，别取出来占格。
+                #   现场：两箱空位 7，凑齐还差 7 格（1 张 150「整套搭配」+ 6 张 10 面
+                #   底卡），零余量；炉里却还躺着多余的 80 和第二张 82 —— 各取一张就
+                #   占 1 格，最后买底卡少一格凑不齐。这张 80 放着不取，等整箱上交
+                #   （释放全部格位）后再取，代价只是占一个炉位。
+                if self._should_defer_take(int(c["id"]), st, stock_now):
+                    nm = card_name(c["id"])
+                    need_n = self._collect_need(stock_now)
+                    self._log("收卡", True,
+                              f"{nm} 暂缓取出：两箱空位只够凑齐这一套"
+                              f"（还差 {need_n} 格、空 {self._free_change(st)} 格），"
+                              f"先留炉里，等上交后再取")
+                    steps.append({"action": "收卡", "ok": True,
+                                  "detail": f"{nm} 暂缓（空位留给凑齐）"})
+                    continue
                 r = await self._take_card(slot, opu, is_self)
                 if not r.get("ok") and self._is_box_full(r):
                     # ★ 2026-10-26 真机死锁（用户报「买 10 面把卡箱占满、取不出 40 面」）：
@@ -990,6 +1009,9 @@ class AutoRefine:
                 self._log("收卡", bool(r.get("ok")), f"{nm} {r.get('message')}")
                 if not r.get("ok"):
                     continue
+                # 取进换卡箱：同步本地库存与箱占用，供后续这类「够不够装下」的判断用
+                stock_now[int(c["id"])] += 1
+                st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                 self.stats["refined"] += 1
                 # 取「自己炉子」的卡 → 获得 1 次翻牌机会，立即翻一次（5选1奖，不翻就浪费）
                 if is_self:
@@ -1150,7 +1172,11 @@ class AutoRefine:
                 #   9 格还是用户藏品卡 → 少一个取卡空位 → 「请空出两个卡箱的位置」。
                 #   现要求：本套 **pending 必须为空**（炉里一张都没有）+ 非底卡
                 #   **全部在箱**，才买底卡；买完同一个 tick 就上交，占用只剩几秒。
-                if any(pending.get(c, 0) > 0 for c in plan.ids):
+                # ★ 2026-11-02 用户指正（补丁）：pending 判据此前是「本套**任何**卡在炉里
+                #   就不买底卡」—— 于是箱位紧时按 `_should_defer_take` 故意留在炉里的
+                #   那张多余 40 面，会反过来把收尾买底卡**永远堵死**（两处规则互相打架）。
+                #   现在只把「凑齐还缺、必须从炉里出来」的卡算作阻塞；多余卡留炉里不阻塞。
+                if any(pending.get(c, 0) > 0 and stock.get(c, 0) < 1 for c in plan.ids):
                     continue
                 miss_comp = [c for c in plan.ids if c in plan.comp and stock.get(c, 0) < 1]
                 miss_base = [c for c in plan.ids if c not in plan.comp and stock.get(c, 0) < 1]
@@ -1718,6 +1744,57 @@ class AutoRefine:
         """换卡箱剩余可放格数 = 已开通格 cur - 已放卡数 used（max-cur 是未开通格）。"""
         c = st["cap"].get("change", {})
         return c.get("cur", 0) - c.get("used", 0)
+
+    def _collect_need(self, stock: Counter) -> int:
+        """队列里各套「凑齐还缺多少张 distinct 卡」（箱内没有的）。"""
+        n = 0
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if not plan:
+                continue
+            n += sum(1 for c in plan.ids if stock.get(c, 0) < 1)
+        return n
+
+    def _should_defer_take(self, cid: int, st: dict, stock: Counter) -> bool:
+        """箱位紧时是否该把这张**已炼成**的卡先留在炉里、暂不取出。
+
+        ★ 2026-11-02 用户指正（真机经典女套装 tid=54）：两箱空位 7，凑齐还差 7 格
+          （1 张 150「整套搭配」+ 6 张 10 面底卡），**零余量**。而炉里还躺着一张
+          多余的 80 面卡和第二张 82 —— 它们对凑齐零贡献，取出来各占 1 格，最后
+          买底卡就差一格，整套永远凑不齐。用户原话：「如果你取一个40卡出来,
+          卡箱可能就不够了, 你能看出这种情况, 把40卡放着不取, 等上交后再取吗」。
+          这类卡的正确处理是**留炉里**，等本套上交（整箱格位一次性释放）后再取。
+
+        判据（三道闸，缺一不可，任何一道不满足就照常取）：
+          ① 这张卡是「还缺的必需卡」（本套 distinct 里箱内没有的）→ 必取，不延后；
+          ② 炉里「多余待收卡」还没堆到 4 张（卡位共 7 个，留 4 张以内不影响投炉）
+             → 才允许继续延后，避免多余卡把炉位长期堆死；
+          ③ 两箱合起来装不下「凑齐还缺的张数」→ 才值得延后
+             （空位充裕时取出来无所谓，别白白让炉位空转）。
+        """
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if plan and cid in plan.ids and stock.get(cid, 0) < 1:
+                return False                      # ① 必需卡，照常取
+        # ② 炉里多余待收卡积压到 4 张就照常取（别把炉位长期占死）
+        n_extra = 0
+        for c2 in st.get("stove") or []:
+            c2id = int(c2.get("id") or 0)
+            if c2id <= 0 or int(c2.get("flag") or 0) != 2:
+                continue
+            if any(pl and c2id in pl.ids and stock.get(c2id, 0) < 1
+                   for pl in self.plans.values()):
+                continue                          # 它自己是必需卡，不算积压
+            n_extra += 1
+        if n_extra >= 4:
+            return False
+        need = self._collect_need(stock)
+        if need <= 0:
+            return False                          # 已凑齐/无缺口，取出来也无妨
+        free2 = self._free_change(st) + max(
+            0, int((st.get("cap") or {}).get("store", {}).get("cur", 0))
+            - int((st.get("cap") or {}).get("store", {}).get("used", 0)))
+        return free2 <= need                      # ③ 空位刚好只够凑齐 → 延后
 
     # ---------- 腾位（换卡箱满了买不进底卡时）★ 2026-10-03 用户定调 ----------
     async def _make_room(self, tid: int, need: int, st: dict, steps: list[dict],
