@@ -1105,11 +1105,19 @@ class DPTickController:
         #   剩 800~7900s，引擎除买卡外零动作）。
         #   ablation「保底一波 3★ 赚 2.2h」是在 200 格箱上跑的，前提是「囤得起」；
         #   紧箱里这个前提不成立（囤 → 爆箱 → 停摆，代价远超 2.2h）。
-        # ★★ 2026-11-03 用户再次定调（「当卡没集齐时，卡箱一个 10 面的卡都不要买，
-        #   因为放那也没用，纯占位」）：取消 `change_free ≥ 6` 这个「箱宽松就囤一波」
-        #   的口子。**没有空主炉、也没有 1 tick 内会空出的主炉 → 额度恒 0**。
-        #   那 3 张在炉空出来之前没有任何消费者，箱宽松也一样是占位（宽松时更该
-        #   把空位留给出炉的卡落位）。
+        # ★★ 2026-11-03 用户定调：「卡没集齐时，卡箱一个 10 面的卡都不要买，放那也
+        #   没用，纯占位；只有收了最后一张在炼的卡时，才需要一次把 10 面买齐上交。」
+        #   → 额度只剩「本 tick 真能吸收的炉数」这一项：`abs_slots == 0`（无空主炉、
+        #   也无 prebuy_look 内会空出的主炉）时额度恒 0，与箱宽不宽松无关（宽松时
+        #   更该把格位留给出炉的卡落位）。
+        #   ★ 唯一一次批量买 10 面 = `_album_prebuy`（非底卡全在箱、本套无在途，见下）。
+        #   ⚠️ 别在此基础上再加「该 op 的非底卡喂料必须已在箱才买」这类前置过滤：
+        #     2026-11-03 试过，`jit_need` 在链条初期恒空 → 走兜底路径 → 一次只投
+        #     1 炉（原为 4 炉），1★85 4.45→5.04h（+47 tick，`_probe_buywave_trace.py`
+        #     实测是 78 tick 的空炉死等，**不是**买卡物流的 3 tick）。下方 jit_need
+        #     取的「头 n_wave 个 refine op」本来就等于本 tick 能投的炉（3 主 + 1 偷），
+        #     买的料同 tick 即被消耗，不存在囤积 —— 真机躺箱的根因只是 abs_slots==0
+        #     时的保底，收紧它即可。
         if abs_slots == 0:
             base_quota = 0
         if self.prebuy_floor is None:
@@ -1135,41 +1143,15 @@ class DPTickController:
         #   放到 2×due_window(8) → **3★ 277h done=0 死锁**（多预买 → 箱满 → 头 op
         #   发不出 → 零动作）；收到 base_quota//3(1~3) → 2★ 27.02h 退化（买不上料、
         #   炉空转）。故取 due_window：紧箱场景「多买」与「少买」两侧都有悬崖。
-        # ★★ 2026-11-03 用户铁律（「你怎么还在买底卡」的收口）：
-        #   「当卡没集齐时，卡箱一个 10 面的卡都不要买，因为放那也没用，纯占位；
-        #     只有收了最后一张在炼的卡时，才需要一次把 10 面买齐上交。」
-        #   落到代码 = 买料只服务「**本 tick 真能投出去**的炉」：
-        #   ① 该 refine op 的非底卡喂料必须已在箱/在途 —— 否则这炉根本发不出去，
-        #      为它买的 10 面只会躺箱（真机原话：买了 8 张 10 面，4 个 40 面炉还要
-        #      20~95 分钟才出）；
-        #   ② 额度仍按「本 tick 能吸收的炉数 × 3」，箱位/速率逐张闸。
-        #   ★ 没有做「整波买不齐就整波不买」：真机换卡箱长期只剩 1~2 格，整波要 3 格
-        #    会永久卡住（想腾箱得先买、想买得先腾箱 → 死锁）。逐张买 + ①的时机过滤
-        #    已经消除了「买了投不出去」这个根因。
-        #   实测代价（18/200、单套 1 轮、45s/tick，`_bench_wave.py`）：
-        #     1★85 4.45→5.04h、2★290 14.43→15.01h、3★59 45.41→45.01h。
-        #   1★/2★ 慢这一档 = 原来「为还没到的炉提前备一波料」的物流补偿被拿掉了，
-        #   换来的是箱里不再躺着投不出去的 10 面（真机爆箱/卖完又买的根源）。
-        n_wave = max(due_window, 1)
-        waves: List[Dict[int, int]] = []
+        n_wave = max(due_window, base_quota // 3)
         got = 0
         for j in range(plan["cursor"], len(ops)):
             if issued[j] or ops[j]["kind"] != "refine":
                 continue
-            cid_j = ops[j]["cid"]
-            mj = self._owner[cid_j]
-            feeders_j = mj.feeders(cid_j)
-            if any((f not in self._base_cids) and box_stock.get(f, 0) < 1
-                   and pending.get(f, 0) < 1 for f in feeders_j):
-                continue            # 非底卡喂料未齐 → 本 tick 投不出去，不买它的料
-            lack: Dict[int, int] = {}
-            for f in feeders_j:
+            mj = self._owner[ops[j]["cid"]]
+            for f in mj.feeders(ops[j]["cid"]):
                 if f in self._base_cids:
                     jit_need[f] = jit_need.get(f, 0) + 1
-                    if (box_stock.get(f, 0) + pending.get(f, 0)
-                            + bought_this_tick.get(f, 0)) < 1:
-                        lack[f] = 1
-            waves.append(lack)
             got += 1
             if got >= n_wave:
                 break
@@ -1178,8 +1160,8 @@ class DPTickController:
         #   的配方缺口）即时补料，买多少用多少。base_quota 仍是「投得出去的量」的
         #   上限（炉满 → 只保一波），箱空位仍是硬约束。
         if self.buy_free and not self.buy_keepop:
-            _album_lack: Dict[int, int] = {}
-            if not waves and buy0_map:
+            _need = jit_need
+            if not _need and buy0_map:
                 # ★★ 2026-10-27 修（`tests/_probe_bf_idle.py` 实锤）：ops 里没有
                 #   refine（只剩「买底卡」这件事）时，`jit_need` 从 refine op 反推
                 #   出来就是空的 → 一张不买 → 空主炉干等（85 三套实测：t=20.0h
@@ -1191,6 +1173,7 @@ class DPTickController:
                 #   （85 两轮：买 104→128 张、炼 25→30、15.07→21.05h，慢 40%）。
                 #   改按用户铁律：**非底卡全在箱（只差底卡就能上交）** 才买那套
                 #   缺的底卡，各买 1 张 —— 与 `_album_prebuy` 同判据、同粒度。
+                _lack: Dict[int, int] = {}
                 for t in (active or ()):
                     m = self.models[t]
                     if not all(box_stock.get(c, 0) >= 1
@@ -1201,36 +1184,25 @@ class DPTickController:
                             continue
                         if (box_stock.get(c, 0) + pending.get(c, 0)
                                 + bought_this_tick.get(c, 0)) < 1:
-                            _album_lack[c] = _album_lack.get(c, 0) + 1
-                if _album_lack:
+                            _lack[c] = _lack.get(c, 0) + 1
+                if _lack:
+                    _need = _lack
                     self.buy_fallback += 1
-            if _album_lack:
-                # ---- 情形 B：一套的非底卡已在箱 → **一次把缺的底卡买齐**，买完即上交
-                #      （这是用户规则里唯一一次「批量买 10 面」的时机）
-                for cid in sorted(_album_lack):
-                    if n_buy >= buy_cap or box_free_local <= 0:
-                        break
+            for cid in sorted(_need, key=lambda c: (-_need[c], c)):
+                if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
+                    break
+                have = (box_stock.get(cid, 0) + pending.get(cid, 0)
+                        + bought_this_tick.get(cid, 0))
+                want = _need[cid] - have
+                while (want > 0 and n_buy < buy_cap and box_free_local > 0
+                       and n_base < base_quota):
                     actions.append(Action(kind="buy", cid=cid, n=1,
-                                         note=f"DP上交前买齐底卡 {cid}"))
+                                         note=f"DP即时买底料 {cid}"))
                     bought_this_tick[cid] += 1
                     box_free_local -= 1
                     n_base += 1
                     n_buy += 1
-            else:
-                # ---- 情形 A：只为「本 tick 真能投出去的炉」买料（逐张，额度内）----
-                for lack in waves:
-                    if not lack:
-                        continue            # 这一炉料已齐（pass 2 直接投）
-                    for cid in sorted(lack):
-                        if (n_base >= base_quota or n_buy >= buy_cap
-                                or box_free_local <= 0):
-                            break
-                        actions.append(Action(kind="buy", cid=cid, n=1,
-                                             note=f"DP即时买底料 {cid}"))
-                        bought_this_tick[cid] += 1
-                        box_free_local -= 1
-                        n_base += 1
-                        n_buy += 1
+                    want -= 1
         for i, op in enumerate(ops):
             if self.buy_free and not self.buy_keepop:
                 break                   # 买卡已由 jit_need 通道处理（ops 里无 buy）
