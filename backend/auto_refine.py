@@ -601,6 +601,11 @@ class AutoRefine:
         self.live_plans: list[dict] = []     # 队列里每套的实时净需求
         self._stock: Counter = Counter()     # 最近一次读到库存（status 里算实时净需求用）
         self._pending: Counter = Counter()
+        # 净需求树缓存（2026-11-03）：`_is_collect_essential` 每个 tick 会对多张卡
+        # 反复问「需求树还要不要它」，每次重跑 net_plan 太浪费 —— 按「箱内+在炉」
+        # 签名缓存，家底一变（买卡/出炉/上交）自动失效重算。
+        self._net_sig: tuple | None = None
+        self._net_cache: dict = {}           # id(plan) -> (runs, buy) | None
         self._change_rot: Counter = Counter()  # 每张 40 面卡本会话被变出的累计次数（轮转防死盯一张）
         self.state_delta: list[dict] = []    # 最近一次跨 tick 状态字段差分
         self.last_pai_raw = ""               # 最近一次翻牌的原始响应（溯源用）
@@ -1372,6 +1377,11 @@ class AutoRefine:
                 slot2cid[(sl[0], sl[1])] = cid
         # 本 tick 买过卡 → slots 快照过期（买的卡还没有 slot 记录）。带 feed_cids 的
         # refine 要按 cid 现查真实槽位，故买完必须重读一次（每 tick 至多 1 次）。
+        # ★ 逃逸阀（2026-11-03）：本 tick 若**没有任何炼卡动作**（DP 只给了买卡/腾箱），
+        #   延后买卡就是纯自杀 —— 不买的直接结果是下个 tick 依然没素材、依然没动作，
+        #   于是永远冻在「空位只够凑齐」的边界态（云端 4821992 实测 35 分钟零动作）。
+        #   边界态保格位的前提是**真有东西要投炉**；没有可投的，格位留着也是空着。
+        has_refine = any(a.kind == "refine" for a in actions)
         slots_dirty = False
         for a in actions:
             if a.kind == "collect":
@@ -1407,7 +1417,9 @@ class AutoRefine:
                 # ★ 2026-11-02 最高优先级规则：箱位只够凑齐本套时，DP 的「囤备用」
                 #   预买一律延后（每张净占 1 格），下个 tick 重解时会再来；但若这张
                 #   正是「凑齐还缺的卡」，则放行 —— 它本身就是凑齐的一部分。
-                if (not self._is_collect_essential(a.cid, stock)
+                # ★ 2026-11-03 逃逸阀：本 tick 没有炼卡动作时不延后（见 has_refine 说明）。
+                if (has_refine
+                        and not self._is_collect_essential(a.cid, stock)
                         and self._collect_tight(st, stock) > 0):
                     self._log("买卡", True,
                               f"{card_name(a.cid)}（DP预买）暂缓：两箱空位只够凑齐本套，"
@@ -1772,47 +1784,71 @@ class AutoRefine:
             n += sum(1 for c in plan.ids if stock.get(c, 0) < 1)
         return n
 
-    def _is_collect_essential(self, cid: int, stock: Counter,
-                              pending: Counter | None = None) -> bool:
-        """这张卡是不是「凑齐这一套所必需」的供给 —— 必取，任何闸门都不许延后它。
+    def _net_now(self, plan, stock: Counter, pd: Counter):
+        """本套在「箱内 + 在炉」这套家底下的净需求树 `(runs, buy)`。
 
-        两道判据（任一命中即必需）：
-
-        ① 箱内还缺这种卡（distinct 口径）—— 最直白的情形。
-
-        ② **这张卡是「一路向上合成」的前置**（用户 2026-11-02 指出的反例）：
-           「有一种操作看似是增加占位，但实际是腾箱的前置。比如一堆下级卡占了
-             箱位，那炼好了缺的那个最低层卡，其实可以一路向上合成，最终达到腾箱，
-             但取炼好的卡却实际会占位更多；如果这个不取，就没法一路向上合成。」
-           典型（真机 tid=54）：凑齐要 79/80/81 各 2 张（1 张进集卡册 + 1 张当
-           炼 82「整套搭配」的素材），箱里只有各 1 张。炉里炼好的第二张 81 **不是**
-           distinct 缺口（81 已有 1 张，判据① 不命中），但它正是炼 82 的必需素材；
-           不取出来就没法投炉，整套永远停在原地 —— 取它占 1 格，换来 6 张 40 面
-           合成 1 张 150 面，净腾 5 格。
-           判法：把这张从「在途」里扣掉，再跑一遍 `net_plan` 的净需求树（它会把
-           合成要消耗的素材**张数**一路传导到底卡）；需求树又把这张卡算回来
-           （runs/buy 里出现）→ 缺了它凑不齐 → 必需。
-           这样「取出来只为占格」与「取出来能继续往上合」就被区分开了。
+        按家底签名缓存：同一 tick 里 `_is_collect_essential` 会被多张卡反复问
+        （炉内 7 张待收 × 6 种待买底卡），每张重跑一次 `net_plan` 纯属浪费。
+        家底一变（买卡落箱 / 出炉 / 上交）签名就变，缓存自动失效重算。
         """
-        for tid in self.queue:
-            plan = self.plans.get(tid)
-            if plan and cid in plan.ids and stock.get(cid, 0) < 1:
-                return True                                   # ① distinct 缺
-        base_pd = self._pending if pending is None else pending
-        pd = Counter(base_pd or Counter())
-        if pd.get(cid, 0) <= 0:
-            return False        # 箱里不缺这种卡、它也不在途 → 帮不上凑齐
-        pd[cid] -= 1            # 假设这一张不到货，看需求树是否还缺它
-        for tid in self.queue:
-            plan = self.plans.get(tid)
-            if not plan:
-                continue
+        sig = (tuple(sorted(stock.items())),
+               tuple(sorted((int(k), int(v)) for k, v in pd.items() if v)))
+        if self._net_sig != sig:
+            self._net_sig, self._net_cache = sig, {}
+        key = id(plan)
+        if key not in self._net_cache:
             try:
-                runs, buy = plan.net_plan(stock, pd, sets=1)
-            except Exception:   # noqa: BLE001  净需求算不出来就别拦（宁可照取）
-                continue
+                self._net_cache[key] = plan.net_plan(stock, pd, sets=1)
+            except Exception:       # noqa: BLE001  算不出来就别拦（宁可照取/照买）
+                self._net_cache[key] = None
+        return self._net_cache[key]
+
+    def _is_collect_essential(self, cid: int, stock: Counter,
+                              pending: Counter | None = None,
+                              as_take: bool = False) -> bool:
+        """这张卡是不是「凑齐这一套所必需」的供给 —— 必取、必买，任何闸门都不许延后。
+
+        判据 = **净需求树还要不要它**（2026-11-03 修正，见下）。
+
+        `as_take` 区分两种提问语义（这是旧版踩过的坑）：
+          · **买卡**（默认 False）：「箱内 + 在炉之外，还要不要再买/炼这张？」
+            直接用当前家底跑需求树 —— 箱里 3 张但配方要 7 张，buy 里还剩 4 张 → 必需。
+          · **取卡**（True）：「如果这张**不取出来**（少一张在途），凑齐还缺不缺它？」
+            先把这张从在途扣掉再跑 —— 炉里那张 82 正是凑齐要的 1 张，扣掉后需求树
+            又要它 → 必需（必取）；而箱里已有 1 张 82 时，炉里多余的第二张扣掉后
+            需求树不再要 → 非必需（可留炉里等上交）。
+
+        旧口径（distinct：箱里没有这张卡才算缺）在两个真机场景都会误判：
+
+        · **箱里有几张但配方要更多**（2026-11-03 云端 4821992 / tid=321「珍稀动物」）：
+          整套 47 张底卡，`小头鼠海豚` 一个 id 就要 7 张（1 张进集卡册 + 6 张当三个
+          40 面中间卡的共用素材）。箱里已有 3 张 → distinct 判「不缺」→ 每次 DP 预买
+          都被最高优先级规则延后 → 底卡进不来 → 素材不齐、偷炉没料、主炉出锅无卡可投，
+          引擎连续 35 分钟零动作（日志只有 153 条「DP预买暂缓」）。
+        · **「一路向上合成」的前置**（用户 2026-11-02 指出的反例）：凑齐要 79/80/81
+          各 2 张（1 进册 + 1 当炼 82 的素材），箱里各 1 张时第二张 81 不是 distinct
+          缺口，却正是炼 82 的必需品；不取就没法一路向上合成，整套永远停住。
+
+        所以改成问「把箱内 + 在炉的家底全算进去之后，`net_plan` 的 runs/buy 里还要
+        不要这张卡」—— 需求树会把每个中间卡要消耗的素材**张数**一路传导到底卡，
+        上述两种情形都会命中；而「箱里已够本套用」的囤货、跨套遗留卡不在需求树里，
+        照旧可以被延后（这正是规则该管的部分）。
+        """
+        base_pd = self._pending if pending is None else pending
+        pd = Counter(base_pd or Counter()) if as_take else (
+            base_pd if isinstance(base_pd, Counter) else Counter(base_pd or {}))
+        if as_take and pd.get(cid, 0) > 0:
+            pd[cid] -= 1        # 假设这一张不到货（还在炉里），看需求树是否还缺它
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if not plan or cid not in plan.ids:
+                continue        # 不是本套的卡 → 帮不上凑齐
+            net = self._net_now(plan, stock, pd)
+            if net is None:
+                return True     # 需求树算不出来就别拦（宁可照取/照买）
+            runs, buy = net
             if runs.get(cid, 0) > 0 or buy.get(cid, 0) > 0:
-                return True                                   # ② 向上合成的前置
+                return True     # 需求树还要它（含「箱里有几张但不够」与合成素材）
         return False
 
     def _free2(self, st: dict) -> int:
@@ -1863,7 +1899,7 @@ class AutoRefine:
           ③ 两箱合起来装不下「凑齐还缺的张数」→ 才值得延后
              （空位充裕时取出来无所谓，别白白让炉位空转）。
         """
-        if self._is_collect_essential(cid, stock, pending):
+        if self._is_collect_essential(cid, stock, pending, as_take=True):
             return False                          # ① 必需卡，照常取
         # ② 炉里多余待收卡积压到 4 张就照常取（别把炉位长期占死）
         n_extra = 0
@@ -1871,7 +1907,7 @@ class AutoRefine:
             c2id = int(c2.get("id") or 0)
             if c2id <= 0 or int(c2.get("flag") or 0) != 2:
                 continue
-            if self._is_collect_essential(c2id, stock, pending):
+            if self._is_collect_essential(c2id, stock, pending, as_take=True):
                 continue                          # 它自己是必需卡，不算积压
             n_extra += 1
         if n_extra >= 4:
@@ -2419,12 +2455,25 @@ class AutoRefine:
         if not friends:
             return None
         now = time.time()
+        # ★ 2026-11-03 修：`card_user_list` 返回的好友列表里**包含自己**（uin 不带前导 0，
+        #   而 self.s.uin 是 "0004821992"），旧版只按字符串比 `busy`、且从不排除自己 →
+        #   真机实测发出 `card_stove_steal` 给 opuin=4821992（自己），被服务端拒：
+        #   「魔法学院规定不允许偷自己家的炉子！」→ 偷炉冷却 120s、好友还被拉黑 30 分钟，
+        #   等于偷炉功能整个失效。统一按数值口径判「是不是我」。
+        me = str(self.s.uin or "")
+        me_n = me.lstrip("0") or me
+
+        def _is_me(u) -> bool:
+            u = str(u or "")
+            return bool(u) and (u.lstrip("0") or u) == me_n
+
         busy = {str(c.get("opuin")) for c in st.get("stove", [])
-                if c.get("opuin") and str(c.get("opuin")) != str(self.s.uin)}
+                if c.get("opuin") and not _is_me(c.get("opuin"))}
         # 优先用「常去好友」：未被失败缓存、其炉上没挂着我未取回的卡，且确实有空主炉
         # （探测失败 -1 时仍交给服务端裁决，别因为探测抖动放弃常去好友）
         pref = self.preferred_steal_friend
-        if pref and pref not in busy and self._friend_fail.get(pref, 0) <= now:
+        if (pref and not _is_me(pref) and pref not in busy
+                and self._friend_fail.get(pref, 0) <= now):
             if await self._friend_stove_empty(pref) != 0:
                 return pref
         # 否则按「等级高优先」扫描：从 exp 降序列表头部取前 N 个，第一个有空主炉就借
@@ -2434,6 +2483,8 @@ class AutoRefine:
         window = ordered[:self.steal_search_depth]
         chosen = None
         for uin in window:
+            if _is_me(uin):
+                continue
             if self._friend_fail.get(uin, 0) > now:
                 continue
             if uin in busy:
