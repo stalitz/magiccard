@@ -585,6 +585,19 @@ class DPTickController:
         """
         if not (ws.change_free <= 2 or ws.box_free <= 4):
             return 0
+        # ★★ 2026-11-03 真机 4821992：腾位的**唯一目的**是让「买料的卡」或
+        #   「出炉落箱的卡」进得来。两者都没有时腾位纯属白折腾 —— 真机实测
+        #   13:11:15 在「3 主炉全在炼（剩 800~7900s）+ 无炉到点待收」的状态下
+        #   卖掉 3 张 10 面底卡（斯比克斯鹦鹉/小头鼠海豚/古巴鳄），而它们正是
+        #   后续 40 面链的素材 → 等一下又要买回来（用户看到的「买了一堆底卡
+        #   又卖掉」）。腾出的位在本 tick 无人接管，就该原样留着。
+        due_collect = sum(1 for f in ws.furnaces if f.endtime - ws.now <= EPS)
+        soon_main = sum(1 for f in ws.furnaces
+                        if not f.steal
+                        and 0 < f.endtime - ws.now
+                        <= self.prebuy_look * TICK_SECS + EPS)
+        if self._main_cap(ws) + soon_main == 0 and due_collect == 0:
+            return 0
         n_sold = n_moved = 0
         n_free_change = 0        # 换卡箱净腾位：卖换卡箱的卡 + 挪箱
         # 保留门槛：窗口内需求（protect），缺省退回空（= 只保 due）
