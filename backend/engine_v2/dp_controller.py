@@ -652,6 +652,44 @@ class DPTickController:
                 change_of[cid] -= 1
                 n_moved += 1
                 n_free_change += 1       # 挪箱把卡从换卡箱搬走，腾出买卡位
+        # ---- 3) 挪「不属于任何在炼套」的杂卡进保险箱（2026-11-03）----
+        # 真机 4821992：换卡箱 18 格里 11 张是别的主题的 130~610 面历史卡，
+        # `change_free` 长期 0~2 → 买卡预算恒 0 → `_run_plan` 卡在第一个 buy op，
+        # 表面就是「引擎在跑但一分钟也不动」。这些卡不是任何在炼套的素材
+        # （`_owner` 里没有），留着只占格里，买卡根本买不进来。
+        # 用户 2026-10-03 定调「优先移保险箱」、2026-10-21 定调「高面值卡永不自动卖」：
+        # 这里只挪（无损），按面额降序（大面额最不可能当素材）；保险箱满就如实停下。
+        if ws.store_free > 0 and ws.change_free <= 2:
+            cards_map = next(iter(self.models.values())).cards if self.models else {}
+            store_used3 = {s for (_c, s, _st) in ws.slots if _st == 1}
+            store_free3 = ws.store_free
+            junk: list[tuple[int, int, int]] = []
+            for cid, slot, slottype in list(ws.slots):
+                if cid <= 0 or slottype != 0:
+                    continue
+                if self._owner.get(cid) is not None:
+                    continue                  # 在炼套的卡：上一段处理，别动
+                c = cards_map.get(cid)
+                face = int(c[3] or 0) if c else 0
+                junk.append((face, cid, slot))
+            junk.sort(reverse=True)
+            # 目标：腾到够一次「买 3 张底卡立即投炉」即可，别把换卡箱清空
+            want = max(0, 4 - ws.change_free)
+            for face, cid, slot in junk:
+                if store_free3 <= 0 or want <= 0:
+                    break
+                dest = next((s for s in range(1, ws.store_cur + 1)
+                             if s not in store_used3), None)
+                if dest is None:
+                    break
+                actions.append(Action(kind="move", cid=cid, slot=slot,
+                                      slottype=0,
+                                      note=f"DP腾箱挪杂卡{cid}(面{face})"))
+                store_used3.add(dest)
+                store_free3 -= 1
+                want -= 1
+                n_moved += 1
+                n_free_change += 1
         if n_sold or n_moved:
             self.compact_sold += n_sold
             self.compact_moved += n_moved
