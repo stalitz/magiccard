@@ -1052,6 +1052,29 @@ class AutoRefine:
                     steps.append({"action": "收卡", "ok": True,
                                   "detail": f"{nm} 暂缓（空位留给凑齐）"})
                     continue
+                # ★ 2026-11-04 用户澄清取卡口径（别再把「2 格」当成每张卡的占用量）：
+                #   服务端那句「亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！」
+                #   是**准入门槛**（取卡可能触发幸运事件，得奖要多占 1 格），
+                #   不是每张卡占 2 格。实际取一张只占 1 格，没得奖就还剩 1 格 →
+                #   所以是**逐个取、每取一张按新空位重判**：本地 `used += 1` 就是
+                #   这个口径，空 4 格完全可能连取 4 张（中间得一次奖就少取一张）。
+                #   本地不足 2 格时先腾位，免得白打一次注定被拒的请求。
+                if self._free_change(st) < 2:
+                    freed0 = await self._make_room(
+                        self.queue[0] if self.queue else 0, 2, st, steps)
+                    if freed0:
+                        # `_make_room` 自己重扫 snapshot，不回写外部 st → 这里按
+                        # 服务端确认腾出的格数把本地 used 减回去（freed0 是实腾数）。
+                        st["cap"]["change"]["used"] = max(
+                            0, int(st["cap"]["change"].get("used", 0)) - freed0)
+                    if self._free_change(st) < 2:
+                        nm0 = card_name(c["id"])
+                        self._log("收卡", True,
+                                  f"{nm0} 暂缓：换卡箱只剩 {self._free_change(st)} 格"
+                                  f"（取卡要空 2 格防幸运事件），腾不出来，留炉里")
+                        steps.append({"action": "收卡", "ok": True,
+                                      "detail": f"{nm0} 暂缓（换卡箱不足 2 格）"})
+                        continue
                 r = await self._take_card(slot, opu, is_self)
                 if not r.get("ok") and self._is_box_full(r):
                     # ★ 2026-10-26 真机死锁（用户报「买 10 面把卡箱占满、取不出 40 面」）：
@@ -1823,6 +1846,10 @@ class AutoRefine:
     @staticmethod
     def _take_reserve(st: dict) -> int:
         """给「已炼成待收」的炉预留换卡箱空位（真机取卡要 2 格空位）。
+
+        ⚠️ 这 2 格是**准入门槛**，不是「每张卡占 2 格」：取一张实际只占 1 格，
+        没触发幸运事件就还剩 1 格可继续取下一张（用户 2026-11-04 澄清）。
+        所以这里只需在有牌待收时留 2，不要按 ×张数 放大。
 
         ★ 只在本 tick 真有卡等收时预留。无条件预留会把买卡流水线掐死 ——
           历史上 `reserve = soon * 2` 让 3★/4★ 直接 750h 卡死（记忆里的老坑）。
