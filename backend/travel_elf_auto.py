@@ -81,7 +81,10 @@ _FALLBACK_A_GRADE = [4, 5, 6, 8]
 #   quality=2/4 的食物商店买不到（活动/其它玩法产出），不对用户开放。
 #   价格出处：travel_Info XML `travel_petShop type=91 item.price`（三叶草）。
 FOOD_QUALITY_LABEL = {"4": "S", "3": "A", "2": "B", "1": "C"}
-DEFAULT_FOOD_QUALITY = "3"          # 默认仍是 A 级，保持历史行为
+# ★ 2026-11-04 起默认 **C 级**（用户定调：「三叶草快没了，不能再用 4 个 A 级食物去旅行」）。
+#   A 级 500/个、C 级 360/个，两者只差旅行时长（+20 vs +15 分钟/个），
+#   而 A 级库存恒为 0（买了就当场投喂吃完）→ 每轮 16 个全靠现买 = 8000 三叶草。
+DEFAULT_FOOD_QUALITY = "1"
 # 各等级回退 food_id（拿不到静态 XML 时用；A/C 各 4 种，够 4 只猫各喂一种）
 _FALLBACK_BY_QUALITY = {
     "3": [4, 5, 6, 8],
