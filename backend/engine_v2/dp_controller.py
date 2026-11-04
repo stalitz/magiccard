@@ -907,7 +907,17 @@ class DPTickController:
         stoves = {f.stove for f in ws.furnaces
                   if not f.steal and f.endtime - ws.now > EPS and f.stove >= 0}
         if stoves:
-            return len(stoves)
+            # ★ 2026-11-04：只数**合法炉号**（0..machines-1）。
+            #   道具卡加炉到期时（stovenum 4→3）服务端行为未证实，可能
+            #   ① 超额炉继续炼完 —— 炉号 3 仍在炼、busy 数出 4 > machines 3
+            #      → `machines - busy` 为负截 0 → 连 1/2/3 号的**空炉也不投**，
+            #      白等几十分钟到几小时；
+            #   ② 超额炉的卡直接停/卡死（flag 永不为 2）—— 那 busy 恒 4，
+            #      额度**永久** 0，引擎彻底停摆。
+            #   两种情形都只需把超额炉排除在并发预算之外：machines 已经告诉你
+            #   现在只有几台炉可用，超额炉炼不炼完都不该挤占这 3 台的额度。
+            #   正常态 stove ∈ [0, machines) 时此过滤不生效 → 基准零影响。
+            return len([s for s in stoves if s < self.machines])
         # 兜底（老结构没炉号）：按卡数，但不超过 machines（等价旧行为，不放大）
         n = sum(1 for f in ws.furnaces if not f.steal and f.endtime - ws.now > EPS)
         return min(n, self.machines)

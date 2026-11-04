@@ -225,6 +225,39 @@ def parse_full(xml_text: str) -> dict:
     return out
 
 
+def _shrink_report(st: dict, n_stove: int) -> str:
+    """加炉道具到期缩容时的取证文本（2026-11-04）。
+
+    服务端在 `stovenum` 从 4 掉回 3 的瞬间对**超额炉**（炉号 >= n_stove）里
+    正在炼的卡到底怎么处理，用户也无法确认：可能是「继续炼完」，也可能是
+    「直接停掉」。这里不动任何东西，只把现场（卡 id / flag / 剩余时间）原样
+    打出来，等第一次真机到期，看下一条 tick 的剩余时间是继续递减还是卡没了，
+    就能定性，不用再猜。
+
+    `st` 为 `parse_full()` 结果，`st["stove"]` 只含 id>0 的已占卡位。
+    """
+    extra = [c for c in (st.get("stove") or [])
+             if int(c.get("stove") or -1) >= n_stove]
+    if not extra:
+        return (f"缩容取证：超额炉（炉号≥{n_stove}）已无卡 "
+                f"→ 到期瞬间服务端直接清掉了超额炉")
+    now = int(st.get("now") or 0)
+    parts = []
+    for c in extra:
+        btime = int(c.get("btime") or 0)
+        left = (btime + int(c.get("locktime") or 0) - now) if btime else None
+        if left is None:
+            stt = "无计时"
+        elif left <= 0:
+            stt = "到点待取"
+        else:
+            stt = f"剩{left // 60}分"
+        parts.append(f"炉{c.get('stove')}/位{c.get('slot')}/卡{c.get('id')}"
+                     f" flag={c.get('flag')} {stt}")
+    return (f"缩容取证：超额炉仍有 {len(extra)} 张卡（下 tick 剩余时间继续递减"
+            f"=炼完才失效；卡消失或计时冻结=直接停）｜" + "；".join(parts))
+
+
 # ---------------------------------------------------------------------
 # 状态字段差分（溯源「未知道具」用）
 # ---------------------------------------------------------------------
@@ -1345,9 +1378,16 @@ class AutoRefine:
         #   一张就让它变负 → 投料额度恒 0。
         n_stove = int((st.get("cap", {}).get("stove", {}) or {}).get("stovenum") or 0)
         if n_stove > 0 and n_stove != self._dp_ctrl.machines:
+            prev_stove = self._dp_ctrl.machines
             self._log("DP调度", True,
-                      f"主炉台数 {self._dp_ctrl.machines} → {n_stove}（按真机 stovenum）")
+                      f"主炉台数 {prev_stove} → {n_stove}（按真机 stovenum）")
             self._dp_ctrl.machines = n_stove
+            if n_stove < prev_stove:
+                # ★ 加炉道具到期缩容的**取证**（2026-11-04）：服务端到底是
+                #   ①让超额炉继续炼完、还是 ②把那张卡直接停掉，用户也无法确认。
+                #   首次真机到期时把超额炉的卡原样打出来（id/flag/剩余），
+                #   下次看日志就能定性，不用再猜。
+                self._log("DP调度", True, _shrink_report(st, n_stove))
         if not self.steal_enabled:
             ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）
         completed = {t: self.plans[t].rounds for t in self.queue}
