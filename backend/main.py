@@ -2198,11 +2198,35 @@ async def across_run(body: dict):
 # （买食物/领任务/浇水后才变），state 核心的猫状态(main)仍每次实时拉。
 # 任一写动作（run/clover/harvest/water/tasks）完成后立即失效，宁多拉一次不显示旧值。
 _TRAVEL_AUX_TTL = 45.0
-_travel_aux_cache: dict = {"ts": 0.0, "food": None, "tasks": None}
+# ★ 2026-11-04 修串号：原先是**进程级单例** `{"ts","food","tasks"}`，同端口多账号时
+#   A 账号读到的食物/任务会在 45s 内被 B 账号直接复用（实测 3822843 的食物清单
+#   与 4821992 一字不差 112/108/107/1，就是拿了别人的缓存）。改为按账号分桶。
+_travel_aux_cache: dict[str, dict] = {}
+
+
+def _taux_key() -> str:
+    """当前请求所属账号的缓存键（token 优先，退回 uin，再退回 default）。"""
+    for attr in ("token", "uin"):
+        try:
+            v = getattr(_session, attr, None)
+        except Exception:  # noqa: BLE001
+            v = None
+        if v:
+            return str(v)
+    return "default"
+
+
+def _taux_bucket() -> dict:
+    k = _taux_key()
+    b = _travel_aux_cache.get(k)
+    if b is None:
+        b = _travel_aux_cache[k] = {"ts": 0.0, "food": None, "tasks": None}
+    return b
 
 
 def _travel_aux_invalidate() -> None:
-    _travel_aux_cache["ts"] = 0.0
+    """作废缓存：只清当前账号（别人的写动作与本次无关，不能把别人的也清掉再重拉）。"""
+    _travel_aux_cache.pop(_taux_key(), None)
 
 
 @app.get("/api/travel/state")
@@ -2233,8 +2257,8 @@ async def travel_state():
                 "food_id": c.get("food_id"),
                 "food_num": c.get("food_num"),
             })
-        # 食物持有（act=3）+ A 级食物（静态配置解析）—— TTL 缓存
-        aux = _travel_aux_cache
+        # 食物持有（act=3）+ A 级食物（静态配置解析）—— TTL 缓存（按账号分桶）
+        aux = _taux_bucket()
         aux_ok = aux["ts"] > 0 and (_time_mod.monotonic() - aux["ts"]) < _TRAVEL_AUX_TTL
         try:
             if aux_ok and aux["food"] is not None:

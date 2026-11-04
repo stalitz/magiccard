@@ -541,6 +541,15 @@ async def harvest_returned(session, elf_id=None) -> list[dict]:
     if st is None:
         return [{"ok": False, "act": "harvest", "text": "读取状态失败，未收获"}]
     now = int(time.time())
+    # ★ 取证：收获前先记一次食物库存，收完再读一次，差值 = 收获带回的食物。
+    #   act=23 只领礼物、不投喂，这一段内不会有食物扣减，差值只可能是收获收益。
+    #   （2026-11-04 用户在 3822843 手动收获时「日志没显示」，因为「收获」按钮走的是
+    #    本函数，而之前只有 run_once 里做了前后对比 → 这里必须同样埋。）
+    _ret = [c for c in (st.get("travel_elf_arr") or [])
+            if (elf_id is None or int(c.get("elf_id") or 0) == int(elf_id))
+            and int(c.get("travel_end_ts") or 0) > 0
+            and now >= int(c.get("travel_end_ts") or 0)]
+    food_before = (await get_food_config(session) or {}) if _ret else None
     for c in st.get("travel_elf_arr") or []:
         eid = c.get("elf_id")
         if elf_id is not None and int(eid) != int(elf_id):
@@ -556,9 +565,36 @@ async def harvest_returned(session, elf_id=None) -> list[dict]:
             continue
         r = await harvest(session, eid)
         code = _resp_code(r)
+        _data = r.get("data") if isinstance(r.get("data"), dict) else {}
+        gift = _data.get("travel_gift")
+        # 除了 travel_gift，若返回里还带了别的字段（可能是食物/碎片明细）一并打出来，
+        # 免得又猜一轮。只打字段名+短值，不刷屏。
+        _extra = {k: v for k, v in _data.items()
+                  if k not in ("travel_gift",) and v not in (None, "", [], 0)}
+        _tail = ""
+        if gift not in (None, "", [], 0):
+            _tail += f"｜礼物 {gift}"
+        if _extra:
+            _tail += f"｜返回字段 { {k: (str(v)[:120]) for k, v in _extra.items()} }"
         out.append({"ok": code == 0, "act": "harvest", "elf_id": eid, "code": code,
-                    "gift": (r.get("data") or {}).get("travel_gift") if isinstance(r.get("data"), dict) else None,
-                    "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}"})
+                    "gift": gift,
+                    "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}" + _tail})
+
+    # ★ 收获前后食物对比（只在真的收过猫、且收获前清单拿到了才比）
+    if food_before is not None:
+        food_after = await get_food_config(session) or {}
+        names = resolve_food_names()
+        gains = []
+        for fid in sorted(set(food_before) | set(food_after)):
+            delta = int(food_after.get(fid, 0)) - int(food_before.get(fid, 0))
+            if delta > 0:
+                gains.append(f"{names.get(fid, fid)}×{delta}")
+        if gains:
+            out.append({"ok": True, "act": "harvest_gain",
+                        "text": "收获带回食物：" + "、".join(gains) + "（旅行确实会掉食物）"})
+        else:
+            out.append({"ok": True, "act": "harvest_gain",
+                        "text": "收获前后食物库存无变化 → 这次收获没带食物（碎片/其它道具另算）"})
     if elf_id is not None and not out:
         out.append({"ok": False, "act": "harvest", "text": f"未找到猫{elf_id}"})
     if elf_id is None and not any(i.get("act") == "harvest" and "收获" in i.get("text", "") for i in out):
