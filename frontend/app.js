@@ -553,6 +553,7 @@ document.querySelectorAll(".subnav .btn, .mobile-nav .mn-btn").forEach((b) => {
 // ---------- 猫咪旅行（独立玩法页，2026-09-20） ----------
 let travelInited = false;
 let travelAutoTimer = null;
+let travelLastState = null;      // 最近一次 /api/travel/state（切食物等级/数量时就地重渲染）
 
 // 每日任务名（来自 travel_day_task XML，实证）
 const TRAVEL_TASK_NAMES = {
@@ -621,7 +622,6 @@ function renderTravelState(r) {
     $("travel-state").innerHTML = '<div class="empty-tip">未读到猫咪数据。</div>';
     return;
   }
-  const aGrade = r.a_grade_foods || [];
   const owned = r.food_owned || {};
   let html = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;font-size:12px">
     <span class="chip">三叶草 ${r.clover_num}</span>
@@ -632,11 +632,26 @@ function renderTravelState(r) {
     ${returned ? `<span class="chip" style="border-color:#e8a33d;color:#b8792a">待收获 ${returned}</span>` : ""}
   </div>`;
 
-  if (aGrade.length) {
+  // ★ 2026-11-04 食物等级可选：按当前选择渲染该等级的食物清单 + 持有数 + 单价，
+  //   并估算「一次出发」的三叶草消耗（food_num × 单价），方便三叶草紧张时选 C 级。
+  const sel = $("travel-food");
+  const qSel = sel ? sel.value : (r.default_food_quality || "3");
+  const grades = r.food_grades || {};
+  const g = grades[qSel] || grades["3"] || null;
+  const foods = g ? g.foods.map((x) => x.id) : (r.a_grade_foods || []);
+  const priceOf = (fid) => {
+    if (g) { const it = g.foods.find((x) => x.id === fid); if (it) return it.price; }
+    return 0;
+  };
+  const foodNumInput = parseInt(($("travel-foodnum") || {}).value, 10) || 4;
+  if (foods.length) {
+    const unit = priceOf(foods[0]);
+    const perTrip = unit ? unit * foodNumInput : 0;
     html += `<div style="margin-bottom:12px;font-size:12px">
-      <div style="color:#556;margin-bottom:5px">A 级食物（每只猫自动分配其一，不足自动购买）</div>
+      <div style="color:#556;margin-bottom:5px">${g ? g.label + " 级" : "A 级"}食物（每只猫自动分配其一，不足自动购买）${
+        unit ? ` · ${unit} 三叶草/个 · 一次出发 ${foodNumInput} 个 ≈ ${perTrip} 三叶草` : ""}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">`;
-    for (const fid of aGrade) {
+    for (const fid of foods) {
       const nm = names[fid] || `食物${fid}`;
       html += `<span class="chip" style="border-color:#12b7f5">${esc(nm)} ×${owned[fid] || 0}</span>`;
     }
@@ -687,20 +702,41 @@ async function loadTravelState() {
     const r = await fetch("/api/travel/state").then((x) => x.json());
     if (!r.ok) { box.innerHTML = `<div class="empty-tip">读取失败：${esc(r.message || "未知错误")}</div>`; return; }
     box.dataset.loaded = "1";
+    travelLastState = r;
+    fillTravelFoodOptions(r);
     renderTravelState(r);
   } catch (e) {
     box.innerHTML = `<div class="empty-tip">请求异常：${esc(e.message)}</div>`;
   }
 }
 
+// ★ 2026-11-04：把后端各可选等级的食物单价写进下拉文案（A 500/个、C 360/个）。
+function fillTravelFoodOptions(r) {
+  const sel = $("travel-food");
+  if (!sel) return;
+  const grades = r.food_grades || {};
+  const cur = sel.value || r.default_food_quality || "3";
+  const opts = Object.entries(grades);
+  if (!opts.length) return;
+  sel.innerHTML = opts.map(([q, g]) => {
+    const price = (g.foods && g.foods[0] && g.foods[0].price) || 0;
+    return `<option value="${q}">${esc(g.label)} 级食物${price ? ` · ${price} 三叶草/个` : ""}</option>`;
+  }).join("");
+  if (grades[cur]) sel.value = cur;
+}
+
 async function travelRun(harvestOnly) {
   const dry = $("travel-dryrun").checked;
   const foodNum = parseInt($("travel-foodnum").value, 10) || 4;
+  // ★ 2026-11-04 食物等级可选（用户「三叶草快没了，别再用 4 个 A 级」）：
+  //   "3"=A 级 500 三叶草/个、"1"=C 级 360/个；后端按此挑食物，不够则照价买。
+  const foodQuality = $("travel-food") ? $("travel-food").value : "3";
   const restore = busyBtn($("travel-run"), "运行中…");
   try {
     const final = await streamRun("/api/travel/run", {
       body: {
-        food_num: foodNum, harvest_only: !!harvestOnly, dry_run: dry,
+        food_num: foodNum, food_quality: foodQuality,
+        harvest_only: !!harvestOnly, dry_run: dry,
         do_clover: true, do_water: true, do_tasks: true,
       },
       onStep: (it) => {
@@ -876,6 +912,10 @@ function initTravelOnce() {
   $("travel-auto-start").onclick = travelStartAuto;
   $("travel-auto-stop").onclick = travelStopAuto;
   $("travel-clearlog").onclick = () => { logClear(); };
+  // 换食物等级 / 改投喂数量 → 立即按新值重渲染食物块（持有数、单价、一次出发消耗）
+  const rerender = () => { if (travelLastState) renderTravelState(travelLastState); };
+  if ($("travel-food")) $("travel-food").onchange = rerender;
+  if ($("travel-foodnum")) $("travel-foodnum").oninput = rerender;
   loadTravelState();
   renderTravelFriends();
 }

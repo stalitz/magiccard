@@ -41,6 +41,10 @@
 
 A 级食物（quality=3，实证来源 travel_petShop type=91 食物商店名字 ↔ tool_food 等级）：
   food_id 4=夹心饼干, 5=饭团, 6=汉堡, 8=回忆便当  （正好 4 种，对应 4 只猫各一种）
+  C 级食物（quality=1，单价 360 三叶草、旅行 +15 分钟/个）：
+  food_id 1=曲奇饼, 2=寿司, 3=牛排, 7=回忆棒棒糖（也是 4 种）
+  ★ 2026-11-04 起等级可选（`run_once(food_quality=...)`）：A 级 500/个、C 级 360/个，
+    三叶草紧张时选 C。价格出处 travel_petShop type=91 item.price。
   等级解析：food 商店 itemid ↔ travel_tool.name ↔ tool_food[position=travel_tool.id].food_quality
 
 铁律：只发已实证动作；dry_run 只算不发，便于先验证逻辑再放手。
@@ -67,6 +71,24 @@ _TRAVEL_INFO_URL = "http://appimg2.qq.com/card/mk/travel_Info_v_461.xml"
 
 # 回退用：A 级食物（quality=3）food_id（实证）
 _FALLBACK_A_GRADE = [4, 5, 6, 8]
+
+# ★ 食物等级（2026-11-04 新增可选等级，用户「三叶草快没了，别再用 4 个 A 级」）
+#   `tool_food.food_quality` 是**数字**（1/2/3/4），商店在售的只有 1 和 3：
+#     quality=3 → A 级，单价 500 三叶草，旅行时间 +20 分钟/个
+#                 （4 夹心饼干 / 5 饭团 / 6 汉堡 / 8 回忆便当）
+#     quality=1 → C 级，单价 360 三叶草，旅行时间 +15 分钟/个
+#                 （1 曲奇饼 / 2 寿司 / 3 牛排 / 7 回忆棒棒糖）
+#   quality=2/4 的食物商店买不到（活动/其它玩法产出），不对用户开放。
+#   价格出处：travel_Info XML `travel_petShop type=91 item.price`（三叶草）。
+FOOD_QUALITY_LABEL = {"4": "S", "3": "A", "2": "B", "1": "C"}
+DEFAULT_FOOD_QUALITY = "3"          # 默认仍是 A 级，保持历史行为
+# 各等级回退 food_id（拿不到静态 XML 时用；A/C 各 4 种，够 4 只猫各喂一种）
+_FALLBACK_BY_QUALITY = {
+    "3": [4, 5, 6, 8],
+    "1": [1, 2, 3, 7],
+}
+# 商店在售、可选的等级（按贵→便宜）
+FOOD_QUALITY_CHOICES = ["3", "1"]
 
 # 每日任务完成阈值（来自 travel_day_task XML task_list.task_limit，实证）
 # index: limit  —— cnt>=limit 才可领取
@@ -265,17 +287,61 @@ def resolve_food_names() -> dict:
     return names
 
 
+def resolve_food_ids(quality: str = DEFAULT_FOOD_QUALITY) -> list:
+    """返回指定等级的食物 food_id 列表（quality: "3"=A / "1"=C）。
+
+    ★ 2026-11-04：等级可选。A 级 500 三叶草/个、C 级 360/个，用户三叶草紧张时
+      可以把每猫 4 个 A 级换成 C 级（16 个食物：8000 → 5760 三叶草/轮）。
+    拿不到静态 XML 时按 `_FALLBACK_BY_QUALITY` 回退；未知等级退回 A 级。
+    """
+    quality = str(quality or DEFAULT_FOOD_QUALITY)
+    q = resolve_food_quality()
+    ids = sorted(fid for fid, qual in q.items() if str(qual) == quality)
+    if not ids:
+        ids = list(_FALLBACK_BY_QUALITY.get(quality) or _FALLBACK_A_GRADE)
+    return ids
+
+
 def resolve_a_grade_foods() -> list:
-    """返回 A 级（quality==3）食物 food_id 列表（应为 4 种）。"""
+    """返回 A 级（quality==3）食物 food_id 列表（兼容旧调用；新代码用 `resolve_food_ids`）。"""
     global _cached_a_grade
     if _cached_a_grade is not None:
         return _cached_a_grade
-    q = resolve_food_quality()
-    a = sorted(fid for fid, qual in q.items() if qual == "3")
+    a = resolve_food_ids("3")
     if not a:
         a = list(_FALLBACK_A_GRADE)
     _cached_a_grade = a
     return a
+
+
+def resolve_food_prices() -> dict:
+    """返回 {food_id: 三叶草单价}（`travel_petShop type=91 item.price`）。失败返回 {}。"""
+    root = _fetch_travel_info()
+    prices: dict = {}
+    if root is not None:
+        try:
+            for el in root.iter("travel_petShop"):
+                if el.attrib.get("type") == "91":
+                    for it in el.iter("item"):
+                        prices[int(it.attrib["itemid"])] = int(it.attrib.get("price") or 0)
+        except Exception:
+            prices = {}
+    return prices
+
+
+def food_grade_summary() -> dict:
+    """给前端：各可选等级的食物清单 + 单价（`{quality: {label, foods:[{id,name,price}]}}`）。"""
+    names = resolve_food_names()
+    prices = resolve_food_prices()
+    out = {}
+    for ql in FOOD_QUALITY_CHOICES:
+        ids = resolve_food_ids(ql)
+        out[ql] = {
+            "label": FOOD_QUALITY_LABEL.get(ql, ql),
+            "foods": [{"id": i, "name": names.get(i, str(i)),
+                       "price": prices.get(i, 0)} for i in ids],
+        }
+    return out
 
 
 def compute_free_counts(state: dict) -> dict:
@@ -575,11 +641,14 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                    harvest_only: bool = False, dry_run: bool = False,
                    do_clover: bool = True, do_water: bool = True,
                    do_tasks: bool = True, a_food_ids: list | None = None,
-                   water_uins: list | None = None):
+                   water_uins: list | None = None,
+                   food_quality: str = DEFAULT_FOOD_QUALITY):
     """跑一轮自动旅行（SSE 流式：每步 yield 一个 dict，末尾 yield __done__）。
 
-    顺序：收获已返回的猫 → 用今日剩余免费次数出发空闲猫(各喂一种 A 级食物,不够则购买)
+    顺序：收获已返回的猫 → 用今日剩余免费次数出发空闲猫(各喂一种指定等级食物,不够则购买)
           → 收三叶草 → 给「已种未成熟三叶草且今日未浇」的好友浇水 → 领取可领的每日任务。
+
+    `food_quality`：食物等级（"3"=A 500三叶草/个、"1"=C 360/个），三叶草紧张时用 C。
 
     ⚠️ 免费次数口径：main.free_cnt = **今日已用**次数，上限 = **猫数 × 3**（4 猫 = 12，
        每猫每日 3 次）；剩余 = Σ max(0, 3 − 该猫已旅行次数)。本轮出发到用尽为止。
@@ -605,7 +674,8 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
     per_cat_limit = fc["per_cat_limit"]
 
     if a_food_ids is None:
-        a_food_ids = resolve_a_grade_foods()
+        a_food_ids = resolve_food_ids(food_quality)
+    grade = FOOD_QUALITY_LABEL.get(str(food_quality), str(food_quality))
 
     # 1) 收获所有已返回的猫
     for c in elves:
@@ -621,7 +691,7 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
             yield emit({"ok": code == 0, "act": "harvest", "elf_id": eid, "code": code,
                         "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}"})
 
-    # 2) 出发空闲猫（各喂一种不同的 A 级食物；道具不够先买；用尽今日免费次数为止）
+    # 2) 出发空闲猫（各喂一种不同的指定等级食物；道具不够先买；用尽今日免费次数为止）
     if not harvest_only:
         # 重读状态让刚收获的猫进入可出发集合
         st2 = st if dry_run else (await get_state(session) or st)
@@ -632,6 +702,10 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
         idle = [c for c in (st2 or st).get("travel_elf_arr") or []
                 if int(c.get("travel_end_ts") or 0) == 0]
         used_foods = set()
+        # ★ 按**持有量降序**分配（库存多的先派），尽量不为凑数去商店买 ——
+        #   2026-11-04 真机：C 级曲奇饼/寿司/牛排各 110+ 个、回忆棒棒糖只剩 1 个，
+        #   固定按 id 顺序会把棒棒糖派给第 4 只猫 → 白买 3 个。
+        food_order = sorted(a_food_ids, key=lambda f: -int(owned.get(f) or 0))
         for c in idle:
             if free_left <= 0:
                 yield emit({"ok": True, "act": "depart",
@@ -643,20 +717,20 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                 yield emit({"ok": True, "act": "depart", "elf_id": eid,
                             "text": f"猫{eid} 今日已旅行 {per_cat.get(eid)}/{per_cat_limit} 次（该猫到顶），跳过"})
                 continue
-            # 选一种尚未使用的 A 级食物（保证 4 猫各不同）
+            # 选一种尚未使用的同级食物（保证 4 猫各不同，优先库存多的）
             food = None
-            for f in a_food_ids:
+            for f in food_order:
                 if f not in used_foods:
                     food = f
                     break
             if food is None:
-                food = a_food_ids[0]  # 理论上不会（A 级数>=猫数）
+                food = food_order[0]  # 理论上不会（同级食物数 >= 猫数）
             used_foods.add(food)
             have = int(owned.get(food) or 0)
             need_buy = 0 if dry_run else max(0, food_num - have)
             if dry_run:
                 yield emit({"ok": True, "dry": True, "act": "depart", "elf_id": eid,
-                            "text": f"猫{eid} 拟出发：A级食物 food_id={food}（持有{have}，需{food_num}）"
+                            "text": f"猫{eid} 拟出发：{grade}级食物 food_id={food}（持有{have}，需{food_num}）"
                                     f"｜今日免费 {(free_used + 1)}/{free_limit}"})
                 free_used += 1
                 free_left -= 1
@@ -682,7 +756,7 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                 free_left = max(0, free_limit - free_used)
                 per_cat[eid] = int(per_cat.get(eid) or 0) + 1
                 yield emit({"ok": True, "act": "depart", "elf_id": eid, "code": code,
-                            "text": f"猫{eid} 出发(A级食物{food})：成功"
+                            "text": f"猫{eid} 出发({grade}级食物{food})：成功"
                                     f"（今日免费 {free_used}/{free_limit}，剩 {free_left}）"})
             else:
                 yield emit({"ok": False, "act": "depart", "elf_id": eid, "code": code,

@@ -2245,6 +2245,9 @@ async def travel_state():
         except Exception:  # noqa: BLE001
             food_owned = aux["food"] or {}
         a_grade = te.resolve_a_grade_foods()
+        # ★ 2026-11-04 食物等级可选（用户「三叶草快没了，别再用 4 个 A 级」）：
+        #   带出各可选等级的食物清单与三叶草单价，前端据此显示/选择。
+        food_grades = te.food_grade_summary()
         # 每日任务（act=32；task_bits = 已领取掩码）—— TTL 缓存
         try:
             if aux_ok and aux["tasks"] is not None:
@@ -2297,6 +2300,8 @@ async def travel_state():
                 "food_owned": food_owned,
                 "food_names": te.resolve_food_names(),
                 "a_grade_foods": a_grade,
+                "food_grades": food_grades,
+                "default_food_quality": te.DEFAULT_FOOD_QUALITY,
                 "task_bits": bits,
                 "tasks": task_rows,
                 "elves": elves}
@@ -2311,6 +2316,7 @@ async def travel_run(body: dict | None = None):
 
     body 可选：
       food_num?: 4          每只猫投喂数量（默认 4）
+      food_quality?: "3"    食物等级："3"=A 级（500 三叶草/个）、"1"=C 级（360/个）
       harvest_only?: false  只收获不出发
       dry_run?: false       只算参数不发请求（先验证逻辑）
       do_clover?: true      是否收三叶草（act=4）
@@ -2327,6 +2333,7 @@ async def travel_run(body: dict | None = None):
             async for step in te.run_once(
                 _session,
                 food_num=int(b.get("food_num") or te.DEFAULT_FOOD_NUM),
+                food_quality=str(b.get("food_quality") or te.DEFAULT_FOOD_QUALITY),
                 harvest_only=bool(b.get("harvest_only")),
                 dry_run=bool(b.get("dry_run")),
                 do_clover=bool(b.get("do_clover", True)),
