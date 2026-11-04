@@ -755,41 +755,67 @@ async def jd_auto(session, stone_order=(0, 1, 2), submit_relics: bool = True) ->
 
 # ───────────────────────── 自动挖 ─────────────────────────
 
-_auto = {
-    "running": False,
-    "stop": False,
-    "digs": 0,
-    "collected": 0,
-    "cost": {"chutou": 0, "line_tnt": 0, "jgg_tnt": 0},
-    "msgs": [],
-    "started": 0.0,
-    "max_digs": 0,
-    "use_tnt": False,
-    "finished": None,
-}
+# ★ 2026-11-04：原先 `_auto` 是**进程级单例**，同端口多账号会互相盖：
+#   A 账号在跑时 B 点「自动挖」直接回「已在运行」，B 的界面显示的是 A 的进度
+#   （和旅行 `_travel_aux_cache` 是同一类串号 bug）。改为按账号分桶。
+#   另：任务对象必须存引用，否则 asyncio 可能在执行中被 GC 掉（官方文档明示）。
 _AUTO_LOG_MAX = 60
+_autos: dict[str, dict] = {}
+_tasks: dict[str, object] = {}
 
 
-def auto_status() -> dict:
+def _skey(session) -> str:
+    """账号键：token 优先，退回 uin（与日志/会话的路由口径一致）。"""
+    for attr in ("token", "uin"):
+        try:
+            v = getattr(session, attr, None)
+        except Exception:  # noqa: BLE001
+            v = None
+        if v:
+            return str(v)
+    return "default"
+
+
+def _bucket(key: str) -> dict:
+    b = _autos.get(key)
+    if b is None:
+        b = _autos[key] = {
+            "running": False,
+            "stop": False,
+            "digs": 0,
+            "collected": 0,
+            "cost": {"chutou": 0, "line_tnt": 0, "jgg_tnt": 0},
+            "msgs": [],
+            "started": 0.0,
+            "max_digs": 0,
+            "use_tnt": False,
+            "finished": None,
+        }
+    return b
+
+
+def auto_status(session=None) -> dict:
+    a = _bucket(_skey(session)) if session is not None else _bucket("default")
     return {
-        "running": _auto["running"],
-        "digs": _auto["digs"],
-        "collected": _auto["collected"],
-        "cost": dict(_auto["cost"]),
-        "max_digs": _auto["max_digs"],
-        "use_tnt": _auto["use_tnt"],
-        "msgs": list(_auto["msgs"][-_AUTO_LOG_MAX:]),
-        "finished": _auto["finished"],
+        "running": a["running"],
+        "digs": a["digs"],
+        "collected": a["collected"],
+        "cost": dict(a["cost"]),
+        "max_digs": a["max_digs"],
+        "use_tnt": a["use_tnt"],
+        "msgs": list(a["msgs"][-_AUTO_LOG_MAX:]),
+        "finished": a["finished"],
     }
 
 
-def _alog(text: str, kind: str = "info"):
-    _auto["msgs"].append({"ts": int(time.time()), "text": text, "kind": kind})
-    if len(_auto["msgs"]) > _AUTO_LOG_MAX:
-        _auto["msgs"] = _auto["msgs"][-_AUTO_LOG_MAX:]
+def _alog(key: str, text: str, kind: str = "info"):
+    a = _bucket(key)
+    a["msgs"].append({"ts": int(time.time()), "text": text, "kind": kind})
+    if len(a["msgs"]) > _AUTO_LOG_MAX:
+        a["msgs"] = a["msgs"][-_AUTO_LOG_MAX:]
 
 
-async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
+async def auto_loop(session, akey: str, max_digs: int = 50, use_tnt: bool = True,
                     collect_every: int = 8, clear_margin: int = 1):
     """自动挖循环 —— 决策全部交给 `dig_plan.plan()`（纯函数、可离线验收）。
 
@@ -806,28 +832,29 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
       ⚠️ 超级炸药格不受此开关影响 —— 它是格子属性、不耗库存，用户明确要求优先点掉。
     clear_margin = 推进时额外要求多干净几行（1 = 多留一行缓冲）。
     """
-    _auto.update({"running": True, "stop": False, "digs": 0, "collected": 0,
-                  "cost": {"chutou": 0, "line_tnt": 0, "jgg_tnt": 0},
-                  "msgs": [], "started": time.time(), "max_digs": max_digs,
-                  "use_tnt": use_tnt, "finished": None})
-    _alog(f"自动挖启动：上限 {max_digs} 次，炸药 {'开' if use_tnt else '关（只锄头）'}，"
-          f"清账缓冲 {clear_margin} 行", "ok")
+    a = _bucket(akey)
+    a.update({"running": True, "stop": False, "digs": 0, "collected": 0,
+              "cost": {"chutou": 0, "line_tnt": 0, "jgg_tnt": 0},
+              "msgs": [], "started": time.time(), "max_digs": max_digs,
+              "use_tnt": use_tnt, "finished": None})
+    _alog(akey, f"自动挖启动：上限 {max_digs} 次，炸药 {'开' if use_tnt else '关（只锄头）'}，"
+                f"清账缓冲 {clear_margin} 行", "ok")
     failed = set()      # 失败过的 (行,列,工具)，下一轮重规划时排除，避免死磕同一个被拒动作
     try:
-        while not _auto["stop"] and _auto["digs"] < max_digs:
+        while not a["stop"] and a["digs"] < max_digs:
             st = await get_state(session)
             if st is None:
-                _alog("读状态失败，停止", "err")
+                _alog(akey, "读状态失败，停止", "err")
                 break
             # 1) 收：只要有待收就先收干净（这是「不丢东西」的唯一保险）
             if st["pending_cnt"] > 0:
                 c = await collect(session)
                 if c["ok"] and c["text"]:
-                    _auto["collected"] += 1
-                    _alog(f"一键收获：{c['text']}", "ok")
+                    a["collected"] += 1
+                    _alog(akey, f"一键收获：{c['text']}", "ok")
                 elif not c["ok"]:
-                    _alog(f"一键收获失败：{c['message']}", "err")
-                if _auto["stop"]:
+                    _alog(akey, f"一键收获失败：{c['message']}", "err")
+                if a["stop"]:
                     break
             # 2) 规划（已排除失败动作 & 爆炸探出窗口的落点）
             tools = {"chutou": st.get("chutou"), "line_tnt": st.get("line_tnt"),
@@ -836,53 +863,69 @@ async def auto_loop(session, max_digs: int = 50, use_tnt: bool = True,
                              clear_margin=clear_margin, exclude=failed)
             act = res.get("action")
             if not act:
-                _auto["finished"] = res.get("reason") or "没事可做"
-                _alog(f"停止：{_auto['finished']}", "info")
+                a["finished"] = res.get("reason") or "没事可做"
+                _alog(akey, f"停止：{a['finished']}", "info")
                 break
             # 3) 执行
             dt, line, col = act["dig_type"], act["line"], act["col"]
             r = await dig_cell(session, line, col, dt)
             if r["ok"]:
-                _auto["digs"] += 1
+                a["digs"] += 1
                 cost = (res.get("eval") or {}).get("cost") or 1
-                key = dplan.TOOL_KEY.get(dt)
-                if key:
-                    _auto["cost"][key] += cost
-                _auto["_fail"] = 0
+                tkey = dplan.TOOL_KEY.get(dt)
+                if tkey:
+                    a["cost"][tkey] += cost
+                a["_fail"] = 0
                 new_idx = (r.get("state") or {}).get("dig_index")
-                _alog(f"{dplan.TOOL_NAME[dt]}@({line},{col}) → {res['reason']}"
-                      + (f"｜地层 D{res['dig_index']}→{new_idx}" if new_idx != res["dig_index"] else ""),
+                _alog(akey, f"{dplan.TOOL_NAME[dt]}@({line},{col}) → {res['reason']}"
+                            + (f"｜地层 D{res['dig_index']}→{new_idx}" if new_idx != res["dig_index"] else ""),
                       "ok")
             else:
                 # 失败：记入排除集，下一轮重规划会选别的动作（不会原地重试同一个被拒动作）。
                 # 服务端对「爆炸探出窗口」的落点返 code=-1（desc="system busy"），
                 # 这是「目标非法」不是限流，重试无用 → 必须排除。
                 failed.add((line, col, dt))
-                _alog(f"{dplan.TOOL_NAME[dt]}@({line},{col}) 失败 code={r.get('code')} → 已排除，下轮换动作",
+                _alog(akey, f"{dplan.TOOL_NAME[dt]}@({line},{col}) 失败 code={r.get('code')} → 已排除，下轮换动作",
                       "warn" if act["tier"] == 0 else "err")
-                _auto["_fail"] = _auto.get("_fail", 0) + 1
-                if _auto["_fail"] >= 3:
-                    _auto["finished"] = "连续 3 个不同动作失败，疑似被限流，停止"
-                    _alog(_auto["finished"], "err")
+                a["_fail"] = a.get("_fail", 0) + 1
+                if a["_fail"] >= 3:
+                    a["finished"] = "连续 3 个不同动作失败，疑似被限流，停止"
+                    _alog(akey, a["finished"], "err")
                     break
                 continue
+    except asyncio.CancelledError:
+        a["finished"] = "任务被取消"
+        raise
+    except Exception as e:  # noqa: BLE001
+        # ★ 2026-11-04：以前任务内部异常会静默消失（界面只停在「启动」那一行），
+        #   现在任何异常都必须落到日志里，可追溯。
+        a["finished"] = f"异常：{e}"
+        _alog(akey, f"自动挖异常终止：{e}", "err")
     finally:
-        _auto["running"] = False
-        _alog(f"自动挖结束：共挖 {_auto['digs']} 次，收获 {_auto['collected']} 次", "ok")
+        a["running"] = False
+        _tasks.pop(akey, None)
+        _alog(akey, f"自动挖结束：共挖 {a['digs']} 次，收获 {a['collected']} 次", "ok")
 
 
 def start_auto(session, max_digs: int = 50, use_tnt: bool = True,
                clear_margin: int = 1) -> dict:
-    if _auto["running"]:
-        return {"ok": False, "message": "自动挖已在运行"}
-    _auto["_fail"] = 0
-    asyncio.ensure_future(auto_loop(session, max_digs, use_tnt, 8, clear_margin))
+    akey = _skey(session)
+    a = _bucket(akey)
+    if a["running"]:
+        return {"ok": False, "message": "自动挖已在运行（本账号）"}
+    a["_fail"] = 0
+    # ★ 任务对象必须留引用：`asyncio.ensure_future(...)` 返回值没人接住时，
+    #   任务可能在执行中被 GC 掉（官方文档明示），表现就是「点了启动、日志只一行、之后不动」。
+    t = asyncio.ensure_future(auto_loop(session, akey, max_digs, use_tnt, 8, clear_margin))
+    _tasks[akey] = t
+    t.add_done_callback(lambda _t, k=akey: _tasks.pop(k, None))
     return {"ok": True, "message": f"已启动（上限 {max_digs} 次）"}
 
 
-
-def stop_auto() -> dict:
-    if not _auto["running"]:
+def stop_auto(session=None) -> dict:
+    akey = _skey(session) if session is not None else "default"
+    a = _bucket(akey)
+    if not a["running"]:
         return {"ok": False, "message": "自动挖未在运行"}
-    _auto["stop"] = True
+    a["stop"] = True
     return {"ok": True, "message": "已发出停止信号"}

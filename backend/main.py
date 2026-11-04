@@ -2573,7 +2573,7 @@ async def dig_state():
         if st is None:
             return {"ok": False, "message": "读取挖地状态失败（可能限流，稍后重试）"}
         st["ok"] = True
-        st["auto"] = dg.auto_status()
+        st["auto"] = dg.auto_status(_session)
         return st
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
@@ -2588,7 +2588,7 @@ async def dig_cell(body: dict):
     try:
         r = await dg.dig_cell(_session, int(b.get("line")), int(b.get("col")),
                               int(b.get("dig_type") or 1))
-        r["state_auto"] = dg.auto_status()
+        r["state_auto"] = dg.auto_status(_session)
         return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
@@ -2781,7 +2781,7 @@ async def dig_auto_start(body: dict = None):
 async def dig_auto_stop():
     if err := _require_login():
         return err
-    return dg.stop_auto()
+    return dg.stop_auto(_session)
 
 
 # ---- 每日比赛只读看板（2026-09-25 bisai.har 实证）----
