@@ -697,6 +697,12 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
     grade = FOOD_QUALITY_LABEL.get(str(food_quality), str(food_quality))
 
     # 1) 收获所有已返回的猫
+    # ★ 2026-11-04 取证：收获前记一次食物库存，收获完对比 →
+    #   一次就能定性「C 级食物 100+ 到底是不是旅行带回来的」。
+    #   收获发生在出发之前，这一段内不会有投喂扣减，差值只可能是收获收益。
+    _pending = [c for c in elves
+                if int(c.get("travel_end_ts") or 0) > 0 and now >= int(c.get("travel_end_ts") or 0)]
+    food_before = None if (dry_run or not _pending) else (await get_food_config(session) or None)
     for c in elves:
         eid = c.get("elf_id")
         end = int(c.get("travel_end_ts") or 0)
@@ -707,8 +713,27 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                 continue
             r = await harvest(session, eid)
             code = _resp_code(r)
+            gift = (r.get("data") or {}).get("travel_gift") if isinstance(r.get("data"), dict) else None
             yield emit({"ok": code == 0, "act": "harvest", "elf_id": eid, "code": code,
-                        "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}"})
+                        "gift": gift,
+                        "text": f"猫{eid} 收获：{'成功' if code == 0 else (r.get('message') or code)}"
+                                + (f"｜带回 {gift}" if gift not in (None, "", []) else "")})
+
+    # ★ 收获前后食物对比（只在真的有猫被收获时，且 food_before 拿到了才比）
+    if food_before:
+        food_after = await get_food_config(session) or {}
+        names = resolve_food_names()
+        gains = []
+        for fid in sorted(set(food_before) | set(food_after)):
+            delta = int(food_after.get(fid, 0)) - int(food_before.get(fid, 0))
+            if delta > 0:
+                gains.append(f"{names.get(fid, fid)}×{delta}")
+        if gains:
+            yield emit({"ok": True, "act": "harvest_gain",
+                        "text": "收获带回食物：" + "、".join(gains) + "（旅行确实会掉食物）"})
+        else:
+            yield emit({"ok": True, "act": "harvest_gain",
+                        "text": "收获前后食物库存无变化 → 旅行不产食物，库存另有来源"})
 
     # 2) 出发空闲猫（各喂一种不同的指定等级食物；道具不够先买；用尽今日免费次数为止）
     if not harvest_only:
