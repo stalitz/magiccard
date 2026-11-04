@@ -177,7 +177,9 @@ _qr_gen_lock = asyncio.Lock()
 
 # 「一键全部」并发保护：run_all 串发复用全局登录 session，重复点击同时跑会互相串响应、
 # 把某个 _act 卡死（前端 reader.read 永远等不到 done → 一直显示「运行中…」）。已在跑则拦下。
-_home_all_running = False
+# ★ 按 token 分桶：原来是模块级布尔，A 账号在跑时 B 账号点一下就被拒
+#   （且 B 看到的是 A 的进度），同端口多账号必然互相干扰。
+_home_all_running: dict[str, bool] = {}   # token -> 是否在跑
 
 
 @app.get("/api/login/begin")
@@ -883,7 +885,7 @@ async def card_refine(target: int):
         r = await _session.refine(target)
         code = r.get("code") if isinstance(r, dict) else None
         if code == 0:
-            _inv_cache["data"] = None   # 炼卡消耗素材+入炉，立即使持有快照失效
+            _acct_bucket(_inv_cache)["data"] = None   # 炼卡消耗素材+入炉，立即使持有快照失效
         return r
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"炼卡请求异常：{e}"}
@@ -901,7 +903,7 @@ async def card_buy(card_id: int, theme_id: int):
         buylog.log_buy("card_buy", card_id, theme_id, code=code, ok=ok,
                        note=r.get("message") or "")
         if ok:
-            _inv_cache["data"] = None   # 买卡后卡箱有变，立即使持有快照失效
+            _acct_bucket(_inv_cache)["data"] = None   # 买卡后卡箱有变，立即使持有快照失效
         return {"ok": ok, "code": code,
                 "message": r.get("message") or ("" if ok else f"错误码 {code}")}
     except Exception as e:  # noqa: BLE001
@@ -966,9 +968,22 @@ async def card_register():
     return await _session.get(EP_REGISTER)
 
 
+# ---- 每账号缓存桶（同端口多账号共用同一进程，全局单例必然串号）----
+# 2026-11-04 教训：`_travel_aux_cache` 曾是进程级单例，A 账号的食物清单在 45s TTL
+# 内被 B 账号直接复用，页面显示的是别人的数据，排查时被彻底带偏。
+# 下列所有「实时数据短缓存」一律按 token 分桶，读写都只碰自己的桶。
+def _acct_bucket(store: dict) -> dict:
+    """取当前账号的缓存桶 {"ts": 0.0, "data": None}，不存在则新建。"""
+    tok = _cur_token()
+    b = store.get(tok)
+    if b is None:
+        b = store[tok] = {"ts": 0.0, "data": None}
+    return b
+
+
 # ---- 卡库查询（静态卡库 + 实时持有数）----
 # 持有快照 8 秒内复用，避免每次点击都打一次 mainpage
-_inv_cache: dict = {"ts": 0.0, "data": None}
+_inv_cache: dict[str, dict] = {}     # token -> {"ts","data"}
 INV_TTL = 8.0
 
 
@@ -978,8 +993,9 @@ async def _owned_snapshot() -> dict | None:
     from .card_plan import parse_user_cards
 
     now = _t.time()
-    if _inv_cache["data"] and now - _inv_cache["ts"] < INV_TTL:
-        return _inv_cache["data"]
+    _ic = _acct_bucket(_inv_cache)
+    if _ic["data"] and now - _ic["ts"] < INV_TTL:
+        return _ic["data"]
     try:
         r = await _session.post(EP_MAINPAGE, code="")
         if r.get("code") != 0:
@@ -990,12 +1006,12 @@ async def _owned_snapshot() -> dict | None:
             for _slot, cid in u[bname]:
                 if cid > 0:
                     avail[cid] = avail.get(cid, 0) + 1
-        _inv_cache["data"] = {
+        _ic["data"] = {
             "avail": avail,
             "furnace": [cid for _s, cid in u["stovebox"] if cid > 0],
         }
-        _inv_cache["ts"] = now
-        return _inv_cache["data"]
+        _ic["ts"] = now
+        return _ic["data"]
     except Exception:  # noqa: BLE001
         return None
 
@@ -1003,7 +1019,7 @@ async def _owned_snapshot() -> dict | None:
 # ---- 集卡册进度（card_mini_get）：每套「已炼成(上交)次数」num，覆盖全库主套卡 ----
 # 这是游戏官方记录的「已炼套数」口径（不是按卡箱持有数估算）。变化频率低，短时缓存。
 import time as _tmod
-_mini_cache: dict = {"ts": 0.0, "data": None}
+_mini_cache: dict[str, dict] = {}     # token -> {"ts","data"}
 MINI_TTL = 60.0
 
 
@@ -1014,18 +1030,19 @@ async def _mini_sets_map() -> dict[int, tuple[int, int]]:
     lv  = 集卡册等级（与「主题秀收集数」无关，主题是另一维度，见 _collection_map）。
     """
     now = _tmod.time()
-    if _mini_cache["data"] is not None and now - _mini_cache["ts"] < MINI_TTL:
-        return _mini_cache["data"]
+    _mc = _acct_bucket(_mini_cache)
+    if _mc["data"] is not None and now - _mc["ts"] < MINI_TTL:
+        return _mc["data"]
     try:
         r = await _session.post(EP_MINI_GET)
         raw = r.get("raw", "") or ""
         mp = {int(a): (int(b), int(c)) for a, b, c in
               re.findall(r'<Node\s+theme_id="(\d+)"\s+num="(\d+)"\s+lv="(\d+)"', raw)}
-        _mini_cache["data"] = mp
-        _mini_cache["ts"] = now
+        _mc["data"] = mp
+        _mc["ts"] = now
         return mp
     except Exception:  # noqa: BLE001
-        return _mini_cache["data"] or {}
+        return _mc["data"] or {}
 
 
 # ---- 主题秀（QQ秀立绘）收集状态：card_collection_get 才是真源 ----
@@ -1038,7 +1055,7 @@ async def _mini_sets_map() -> dict[int, tuple[int, int]]:
 #   · total_cnt ≡ 集齐次数（与 card_mini_get 的 num 全量相等，会随上交增长），非立绘总数。
 #   · 早期 QQ 秀分男女、重复选同立绘只延长有效期不计数 → 老套 cnt/num 都 ≠ 立绘集满。
 # 故 list_themes / theme_detail 的 `show` 一律用 ob（qqshow 已获得数），绝不用 cnt/num。
-_collection_cache: dict = {"ts": 0.0, "data": None}
+_collection_cache: dict[str, dict] = {}   # token -> {"ts","data"}
 COLL_TTL = 120.0
 
 
@@ -1057,8 +1074,9 @@ async def _collection_map() -> dict[int, tuple[int, int, int, int, str]]:
       非 1 星全 4；1 星多数 4、仅时尚男/女·经典男/女 4 套为 1；道具卡=0。
     """
     now = _tmod.time()
-    if _collection_cache["data"] is not None and now - _collection_cache["ts"] < COLL_TTL:
-        return _collection_cache["data"]
+    _cc = _acct_bucket(_collection_cache)
+    if _cc["data"] is not None and now - _cc["ts"] < COLL_TTL:
+        return _cc["data"]
     try:
         r = await _session.post(EP_COLLECTION_GET)
         raw = r.get("raw", "") or ""
@@ -1076,11 +1094,11 @@ async def _collection_map() -> dict[int, tuple[int, int, int, int, str]]:
                                     int(lt.group(1)) if lt else 0,
                                     int(et.group(1)) if et else 0,
                                     qs.group(1) if qs else "")
-        _collection_cache["data"] = mp
-        _collection_cache["ts"] = now
+        _cc["data"] = mp
+        _cc["ts"] = now
         return mp
     except Exception:  # noqa: BLE001
-        return _collection_cache["data"] or {}
+        return _cc["data"] or {}
 
 
 @app.get("/api/cards/q")
@@ -3251,15 +3269,16 @@ async def home_all():
         return err
 
     async def gen():
-        global _home_all_running
+        tok = _cur_token()
         # 并发保护：run_all 会复用全局登录 session 串发请求，重复点击同时跑会互相串响应、
         # 把某个 _act 卡死（前端 reader.read 永远等不到 done → 一直显示「运行中…」）。
-        # 用布尔标志做「检查即设置」（check 与 set 之间无 await，asyncio 单线程下天然原子），
+        # 用标志做「检查即设置」（check 与 set 之间无 await，asyncio 单线程下天然原子），
         # 已在跑则直接返回错误步、绝不排队等释放后再跑第二遍。
-        if _home_all_running:
+        # 分桶按 token：只拦同一账号的重复点击，别的账号不受影响。
+        if _home_all_running.get(tok):
             yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': '已有「一键全部」任务在进行中，请稍后再试（或刷新页面确认是否已完成）'}, ensure_ascii=False)}\n\n"
             return
-        _home_all_running = True
+        _home_all_running[tok] = True
         try:
             try:
                 async for step in ch.run_all(_session):
@@ -3267,7 +3286,7 @@ async def home_all():
             except Exception as e:  # noqa: BLE001
                 yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
         finally:
-            _home_all_running = False
+            _home_all_running.pop(tok, None)
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

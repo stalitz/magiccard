@@ -904,7 +904,12 @@ async def auto_loop(session, akey: str, max_digs: int = 50, use_tnt: bool = True
     finally:
         a["running"] = False
         _tasks.pop(akey, None)
-        _alog(akey, f"自动挖结束：共挖 {a['digs']} 次，收获 {a['collected']} 次", "ok")
+        # 跑到上限时要给出结束原因，否则界面一直显示 finished=None（像是没结束）
+        if not a["finished"]:
+            a["finished"] = (f"已达上限 {max_digs} 次" if a["digs"] >= max_digs
+                             else ("已手动停止" if a["stop"] else "结束"))
+        _alog(akey, f"自动挖结束：共挖 {a['digs']} 次，收获 {a['collected']} 次"
+                    f"（{a['finished']}）", "ok")
 
 
 def start_auto(session, max_digs: int = 50, use_tnt: bool = True,
