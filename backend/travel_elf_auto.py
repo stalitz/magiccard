@@ -68,8 +68,14 @@ import urllib.request
 
 from .constants import EP_TRAVEL_ELF, EP_TRAVEL_ELF_MAIN, EP_USER_LIST
 
-# 每只猫默认投喂数量（faithful to HAR：elf1 food_num=4）
-DEFAULT_FOOD_NUM = 4
+# 每只猫默认投喂数量。
+# 2026-11-04 用户定调：**默认改成 1**。免费次数是每天固定 12 次（4 猫各 3 次 = 3 轮），
+# 次数花不完与投喂多少无关，只影响单次时长，所以「1 个」是纯省料解：
+#   food_num=4 + A 级 → 48 个/天 × 500 = 24000 三叶草/天，余额只够 3 天；
+#   food_num=1 + C 级 → 12 个/天，且 C 级库存 1/2/3 各有 100+，日常只需补回忆棒棒糖
+#                       3 个/天 = 1080 三叶草 → 三叶草余额每天净增。
+# 真硬限制不是三叶草而是**食物本身**：没食物不能出发；既没食物又没三叶草 = 彻底停摆。
+DEFAULT_FOOD_NUM = 1
 # 同时旅行上限：用户确认 4 只猫可同时旅行 → 上限=4（此前误判的 3 是连续出发限流，非并发上限）
 MAX_CONCURRENT = 4
 
@@ -758,8 +764,15 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
                             "code": cb,
                             "text": f"猫{eid} 食物{food}不足，购买{need_buy}个：{rb.get('message') or cb}"})
                 if cb != 0:
-                    # 购买失败则不出发这只猫（避免带不够食物硬发）
-                    continue
+                    # ★ 2026-11-04 用户定调的真硬限制：**没有食物就不能出发**，
+                    #   而食物只能靠三叶草买 → 「无库存 + 三叶草不足」= 彻底发不了车。
+                    #   购买失败（多为三叶草不足）就没必要让后面每只猫再撞一次，
+                    #   直接停本轮并说清原因。
+                    yield emit({"ok": False, "act": "buy", "elf_id": eid, "food_id": food,
+                                "code": cb,
+                                "text": f"猫{eid} 食物{food}不足、购买失败：{rb.get('message') or cb}"
+                                        f"｜无库存食物又买不到 → 本次无法出发，停止出发（检查三叶草余额）"})
+                    break
             # 出发（限流由 _act 统一节流 + 退避重试）
             r = await depart(session, eid, food, food_num)
             code = _resp_code(r)

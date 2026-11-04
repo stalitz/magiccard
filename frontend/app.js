@@ -643,7 +643,7 @@ function renderTravelState(r) {
     if (g) { const it = g.foods.find((x) => x.id === fid); if (it) return it.price; }
     return 0;
   };
-  const foodNumInput = parseInt(($("travel-foodnum") || {}).value, 10) || 4;
+  const foodNumInput = parseInt(($("travel-foodnum") || {}).value, 10) || 1;
   if (foods.length) {
     const unit = priceOf(foods[0]);
     const perTrip = unit ? unit * foodNumInput : 0;
@@ -727,7 +727,7 @@ function fillTravelFoodOptions(r) {
 
 async function travelRun(harvestOnly) {
   const dry = $("travel-dryrun").checked;
-  const foodNum = parseInt($("travel-foodnum").value, 10) || 4;
+  const foodNum = parseInt($("travel-foodnum").value, 10) || 1;
   // ★ 2026-11-04 食物等级可选（用户「三叶草快没了，别再用 4 个 A 级」）：
   //   "3"=A 级 500 三叶草/个、"1"=C 级 360/个；后端按此挑食物，不够则照价买。
   const foodQuality = $("travel-food") ? $("travel-food").value : "3";
