@@ -47,6 +47,16 @@ A 级食物（quality=3，实证来源 travel_petShop type=91 食物商店名字
     三叶草紧张时选 C。价格出处 travel_petShop type=91 item.price。
   等级解析：food 商店 itemid ↔ travel_tool.name ↔ tool_food[position=travel_tool.id].food_quality
 
+★★ **4 种食物掉的道具不同，必须让 4 只猫各吃一种，禁止合并成同一种来省三叶草**
+   （2026-11-04 用户明确：「还是买吧，因为 4 种食物掉的道具不同」）。
+   碎片池出自 travel_Info XML `tool_food.food_city`，A 级与 C 级是**一一对应**的：
+     曲奇饼(1) ／ 夹心饼干(4) → 粉嫩漂唇、埋线双眼皮、腹部塑形
+     寿司(2)   ／ 饭团(5)     → 美睫嫁接、美甲、半永久纹眉
+     牛排(3)   ／ 汉堡(6)     → 玻尿酸补水、精油SPA、光子嫩肤
+     回忆棒棒糖(7) ／ 回忆便当(8) → 回忆碎片
+   → 换 C 级不会少任何一类碎片（池子完全对齐），只是单次时长短了（+15 vs +20 分钟/个）。
+   回忆棒棒糖常被买空（每次只缺 food_num 个、单价 360），那是**必须花的钱**，不是浪费。
+
 铁律：只发已实证动作；dry_run 只算不发，便于先验证逻辑再放手。
 """
 import asyncio
@@ -705,9 +715,10 @@ async def run_once(session, food_num: int = DEFAULT_FOOD_NUM,
         idle = [c for c in (st2 or st).get("travel_elf_arr") or []
                 if int(c.get("travel_end_ts") or 0) == 0]
         used_foods = set()
-        # ★ 按**持有量降序**分配（库存多的先派），尽量不为凑数去商店买 ——
-        #   2026-11-04 真机：C 级曲奇饼/寿司/牛排各 110+ 个、回忆棒棒糖只剩 1 个，
-        #   固定按 id 顺序会把棒棒糖派给第 4 只猫 → 白买 3 个。
+        # ★ 按**持有量降序**分配（库存多的先派），只为「别把只剩 1 个的回忆棒棒糖
+        #   排在前面、导致后面还不够又要重复买」，**不是**为了省掉买东西。
+        #   ⚠️ 4 只猫必须各吃一种（4 种食物掉不同碎片池，见文件头），
+        #   绝不能为了省三叶草让两只猫共用一种 —— 2026-11-04 用户定调。
         food_order = sorted(a_food_ids, key=lambda f: -int(owned.get(f) or 0))
         for c in idle:
             if free_left <= 0:
