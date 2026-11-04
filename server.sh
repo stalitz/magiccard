@@ -1,20 +1,26 @@
 #!/bin/bash
 # 魔法卡片助手 - 服务管理脚本（独立后台进程，不占用任务卡片）
-# 用法: ./server.sh {start|stop|status} [端口=8000] [session文件=/tmp/mc_session.json]
-# 多开：用不同端口 + 不同 session 文件起多个实例，浏览器各开窗口访问不同端口，各登各的号
+# 用法: ./server.sh {start|stop|status} [端口=8000] [session文件(可选,旧版兼容)]
+# 账号：/tmp/mc_sessions/*.json，一个文件一个账号（文件名=token），同端口多账号靠 X-MC-Token 头路由
+# 多开：用不同端口 + 不同 MC_SESSIONS_DIR 起多个实例
 #   例：./server.sh start 8001 /tmp/mc_a.json
 #       ./server.sh start 8002 /tmp/mc_b.json
 cd "$(dirname "$0")"
 PYBIN=/Users/stalitz/.workbuddy/binaries/python/envs/mc/bin/python3
 
 PORT="${2:-8000}"
-SESS="${3:-/tmp/mc_session.json}"
+# 第 3 个参数是「旧版单文件会话」，已废弃：现在一个目录装所有账号（文件名=token）。
+# 仅多实例兼容场景才需要显式传它，不传就走多账号目录。
+SESS="${3:-}"
+ACCOUNTS="${MC_SESSIONS_DIR:-/tmp/mc_sessions}"
 LOG="/tmp/mc_${PORT}.log"
 
 case "$1" in
   start)
     # 前置环境变量仅对本次 python 进程生效：PORT/MC_SESSION_FILE/MC_LOG 由 mc_api 与启动器读取
-    MC_SESSION_FILE="$SESS" MC_LOG="$LOG" PORT="$PORT" $PYBIN - <<'PY'
+    ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT")
+    [ -n "$SESS" ] && ENVARGS+=(MC_SESSION_FILE="$SESS")
+    env "${ENVARGS[@]}" $PYBIN - <<'PY'
 import os, sys
 port = int(os.environ.get("PORT", "8000"))
 sess = os.environ.get("MC_SESSION_FILE", "/tmp/mc_session.json")
@@ -38,7 +44,7 @@ PY
       sleep 0.5
     done
     if lsof -iTCP:$PORT -sTCP:LISTEN -n -P >/dev/null 2>&1; then
-      echo "started -> http://localhost:$PORT (session: $SESS, log: $LOG)"
+      echo "started -> http://localhost:$PORT (账号目录: $ACCOUNTS, log: $LOG)"
     else
       echo "启动失败：:$PORT 无监听。最后日志："
       tail -5 "$LOG"
@@ -72,6 +78,6 @@ PY
     fi
     ;;
   *)
-    echo "用法: $0 {start|stop|status} [端口=8000] [session文件=/tmp/mc_session.json]"
+    echo "用法: $0 {start|stop|status} [端口=8000] [session文件(可选,旧版兼容)]"
     ;;
 esac

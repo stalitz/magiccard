@@ -25,7 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 
 from .auth_qr import QRLogin
-from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, SESSION_FILE, LOG_DIR
+from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, LOG_DIR
 import json
 from collections import deque
 from . import card_query as cq
@@ -96,18 +96,15 @@ class SessionProxy:
 
 
 def _load_sessions() -> None:
-    """启动时加载所有账号：迁移旧的单体文件为 default，再扫描 SESSIONS_DIR。"""
+    """启动时扫描 SESSIONS_DIR，每个 *.json 即一个账号（文件名=token）。
+
+    ★2026-11-04 移除「旧单文件 → default 账号」的自动迁移：
+    迁移只会把一个账号同时挂到 `default` 和它自己的随机 token 下（同号双 session），
+    一旦两边各起一个引擎就会同时投炉/取卡，互相打架。而 `default` 只在
+    请求既无 X-MC-Token 也无 mc_token cookie 时才被命中，正常前端永远用不到它。
+    旧文件已备份到 /tmp/mc_sessions_backup_20261104/，不再读、不再生成。
+    """
     global SESSIONS
-    # 向后兼容：旧版单文件 /tmp/mc_session.json -> 迁成 default 账号
-    default_file = SESSIONS_DIR / f"{DEFAULT_TOKEN}.json"
-    if SESSION_FILE.exists() and not default_file.exists():
-        try:
-            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-            # 复制而非移动：保留源文件作备份，避免迁移后目标被清（如 probe 判过期）
-            # 导致原登录态不可恢复。
-            default_file.write_text(SESSION_FILE.read_text())
-        except Exception:  # noqa: BLE001
-            pass
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     for f in SESSIONS_DIR.glob("*.json"):
         token = f.stem
