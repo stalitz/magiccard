@@ -18,6 +18,10 @@ class Furnace:
     cid: int = 0
     endtime: int = 0
     steal: bool = False
+    # 炉号（stovebox 的 `<card stove="N">`）。`_main_cap` 判「几台炉在忙」必须按
+    # 炉号去重：一个炉可以挂 1 在炼 + 1 排队（两张卡 = 两个 Furnace），按卡数
+    # 数就会把 3 炉 4 卡算成「4 台在忙」→ 把 machines(3) 减成负数 → 投料额度恒 0。
+    stove: int = -1
 
 
 @dataclass
@@ -138,8 +142,13 @@ class WorldState:
                     end = now + int(c.get("left") or 0)
                 except (TypeError, ValueError):
                     end = 0
+            try:
+                stove_no = int(c.get("stove") or -1)
+            except (TypeError, ValueError):
+                stove_no = -1
             furnaces.append(Furnace(slot=slot, cid=cid, endtime=end,
-                                    steal=str(c.get("slottype") or "") == "steal"))
+                                    steal=str(c.get("slottype") or "") == "steal",
+                                    stove=stove_no))
         return cls(
             now=now,
             change=change, store=store,

@@ -199,6 +199,11 @@ def parse_full(xml_text: str) -> dict:
             # 3 张在炼时列出 2 个空槽=主炉上限 5，占满 5 个后一个都不列）。
             # ⚠️ 别用 cur 反推：stovebox cur=7，但主炉实际上限是 5（炉满时服务端
             # 返回「您的炼卡炉满了」）；cur 里含偷炉格 + 1 个用不了的格子。
+            # ★ stovenum = **主炉台数**（真机 `<stovebox cur="7" max="7" stovenum="4">`）。
+            #   2026-11-04 道具卡把主炉从 3 开到 4 后实测确认：`cur` 恒 7 不变，
+            #   只有 stovenum 与 `<stove id="0..3">` 跟着变 → 引擎建模的并发炉数
+            #   必须取自这里，不能写死 3。
+            out["cap"][key]["stovenum"] = int(head.get("stovenum") or 0)
             out["cap"][key]["free_main"] = free_main
             out["cap"][key]["free_steal"] = free_steal
     stove_entries = []
@@ -1333,6 +1338,16 @@ class AutoRefine:
         if rd is not None:
             st, stock, slots, pending = rd
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
+        # ★ 主炉台数随真机走（2026-11-04，道具卡把主炉 3→4）：`<stovebox stovenum>`
+        #   是权威值（`cur` 恒 7 不变，只有 stovenum 与 `<stove id=0..3>` 跟着变）。
+        #   以前 `machines=3` 写死 → 4 炉里永远只按 3 台排期，多出的那台一直空转；
+        #   更糟的是 `_main_cap` 拿「按卡数的 running」减 machines，用户往炉里排队
+        #   一张就让它变负 → 投料额度恒 0。
+        n_stove = int((st.get("cap", {}).get("stove", {}) or {}).get("stovenum") or 0)
+        if n_stove > 0 and n_stove != self._dp_ctrl.machines:
+            self._log("DP调度", True,
+                      f"主炉台数 {self._dp_ctrl.machines} → {n_stove}（按真机 stovenum）")
+            self._dp_ctrl.machines = n_stove
         if not self.steal_enabled:
             ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）
         completed = {t: self.plans[t].rounds for t in self.queue}

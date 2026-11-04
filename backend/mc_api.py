@@ -966,7 +966,11 @@ def parse_state(xml_text: str) -> dict:
         if b is None:
             return {"cur": 0, "max": 0, "cards": []}
         cards = [{k: c.get(k) for k in c.attrib} for c in b.iter("card")]
-        return {"cur": _i(b.get("cur")), "max": _i(b.get("max")), "cards": cards}
+        # ★ stovenum = 主炉台数（只有 stovebox 带）。2026-11-04 实测：道具卡把主炉
+        #   3→4 后 `<stovebox cur="7" max="7" stovenum="4">`，`cur` 仍是 7 不变，
+        #   只有 stovenum 与 `<stove id="0..3">` 跟着变 —— 引擎并发炉数取这个值。
+        return {"cur": _i(b.get("cur")), "max": _i(b.get("max")),
+                "stovenum": _i(b.get("stovenum")), "cards": cards}
 
     sb = box("stovebox")
     slots = []
@@ -985,7 +989,8 @@ def parse_state(xml_text: str) -> dict:
             "slottype": (c.get("slottype") or "").strip(),
             "opuin": (c.get("opuin") or "").strip(),
         })
-    out["stovebox"] = {"cur": sb["cur"], "max": sb["max"], "cards": slots}
+    out["stovebox"] = {"cur": sb["cur"], "max": sb["max"],
+                       "stovenum": sb["stovenum"], "cards": slots}
 
     for key in ("changebox", "storebox"):
         b = box(key)

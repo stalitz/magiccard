@@ -895,6 +895,23 @@ class DPTickController:
                 "cp_thr": _cp_thr}
         return plan, stats
 
+    def _busy_stoves(self, ws) -> int:
+        """正在占用「主炉」的炉数（按炉号去重，不含偷炉）。
+
+        ★ 2026-11-04 修：旧口径按**卡数**数（`sum(1 for f in ws.furnaces ...)`），
+        而 `self.machines` 是**炉数**。一个炉挂 1 在炼 + 1 排队就是 2 条 Furnace，
+        用户往炉里排一张队，running 立刻从 3 变 4 > machines(3) →
+        `_main_cap = max(0, min(main_free, 3-4)) = 0` → **引擎再也不投料**
+        （真机 4821992 用道具卡开 4 炉后 running=5、machines=3，直接归零）。
+        """
+        stoves = {f.stove for f in ws.furnaces
+                  if not f.steal and f.endtime - ws.now > EPS and f.stove >= 0}
+        if stoves:
+            return len(stoves)
+        # 兜底（老结构没炉号）：按卡数，但不超过 machines（等价旧行为，不放大）
+        n = sum(1 for f in ws.furnaces if not f.steal and f.endtime - ws.now > EPS)
+        return min(n, self.machines)
+
     def _main_cap(self, ws) -> int:
         """本 tick 可投的主炉张数。
 
@@ -905,12 +922,13 @@ class DPTickController:
         时执行层会「比模型更早锁料、更晚出活」。
         实测（1★ tid=85，TIME_SCALE=1.0 即旧时长）：允许排队 8.12h、只按并发
         7.08h → **默认收窄到并发上限**；`MC_MAIN_QUEUE=1` 放开排队做消融。
+
+        `self.machines` 不再写死 3：生产每 tick 按真机 `<stovebox stovenum>` 同步
+        （道具卡可把主炉从 3 开到 4+）。
         """
         if self.allow_queue:
             return ws.main_free
-        running = sum(1 for f in ws.furnaces
-                      if not f.steal and f.endtime - ws.now > EPS)
-        return max(0, min(ws.main_free, self.machines - running))
+        return max(0, min(ws.main_free, self.machines - self._busy_stoves(ws)))
 
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
