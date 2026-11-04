@@ -1046,9 +1046,9 @@ class AutoRefine:
                     nm = card_name(c["id"])
                     need_n = self._collect_need(stock_now)
                     self._log("收卡", True,
-                              f"{nm} 暂缓取出：两箱空位只够凑齐这一套"
-                              f"（还差 {need_n} 格、空 {self._free_change(st)} 格），"
-                              f"先留炉里，等上交后再取")
+                              f"{nm} 暂缓取出：两箱一个空位都没有"
+                              f"（还差 {need_n} 格），"
+                              f"先留炉里，腾出空位马上取")
                     steps.append({"action": "收卡", "ok": True,
                                   "detail": f"{nm} 暂缓（空位留给凑齐）"})
                     continue
@@ -1486,8 +1486,8 @@ class AutoRefine:
                         and not self._is_collect_essential(a.cid, stock)
                         and self._collect_tight(st, stock) > 0):
                     self._log("买卡", True,
-                              f"{card_name(a.cid)}（DP预买）暂缓：两箱空位只够凑齐本套，"
-                              f"先不囤卡，等上交释放格位")
+                              f"{card_name(a.cid)}（DP预买）暂缓：两箱一个空位都没有，"
+                              f"先不囤卡，腾出空位再来")
                     continue
                 for _ in range(max(1, a.n)):
                     if self._free_change(st) <= 0:
@@ -1926,18 +1926,28 @@ class AutoRefine:
 
         「当任何操作会卡住集齐一套卡时，都要延后。」
 
-        返回**必须给凑齐预留的格数**（= 凑齐还缺几张 distinct 卡）。只有两箱
-        空位 ≤ 这个缺口（零余量边界态）时才 > 0，表示此刻任何多占 1 格的
-        「非凑齐必需」操作，都会让这一套永远凑不齐，必须延后。
+        返回**必须给凑齐预留的格数**（= 凑齐还缺几张 distinct 卡）。返回值 > 0
+        表示此刻处于「真·卡死」态，必须延后非凑齐必需的操作。
 
-        空位充裕（或已凑齐、队列为空）时一律返回 0 —— 正常情况绝不做延后。
-        用户明确：「正常卡箱空位够时，不需要这样，这会让时间拉长」。所以这条
-        规则只在边界态生效，代价（拉长时间）只落在真的装不下的场合。
+        ★ 判据（2026-11-04 用户定调修正）：**判死的唯一标准是两箱空位 == 0**。
+          用户原话：「什么时候真的卡住，就是卡箱一个空位都没了，但凡有一个空位，
+          都要把在炼的卡继续取卡投炉。」
+
+          旧判据是 `空位 <= 缺口`，在「缺口远大于空位」（如还差 8 格、空 4 格）
+          时也恒成立 —— 而那种状态下空位根本涨不上去（没集齐不买底卡、也上交
+          不了），于是每个 tick 都把出炉的卡延后，那张卡永久占住炉位。真机实测
+          4821992 连续 78 tick（58 分钟）只打「暂缓取出」，引擎零动作。
+
+          注意这两条铁律是配套的：既然「没集齐时一个 10 面底卡都不买」，空位
+          就不会被底卡需求占掉，所以取卡腾炉不存在「取出来就买不进料」的风险
+          —— 只要有 1 格空位，取卡永远是正确的。
+
+        空位 ≥ 1（或已凑齐、队列为空）时一律返回 0 —— 正常情况绝不做延后。
         """
         need = self._collect_need(stock)
         if need <= 0:
             return 0
-        return need if self._free2(st) <= need else 0
+        return need if self._free2(st) <= 0 else 0
 
     def _should_defer_take(self, cid: int, st: dict, stock: Counter,
                            pending: Counter | None = None) -> bool:
@@ -1958,10 +1968,14 @@ class AutoRefine:
 
         判据（三道闸，缺一不可，任何一道不满足就照常取）：
           ① 这张卡是「凑齐所必需的供给」（含向上合成的素材）→ 必取，不延后；
-          ② 炉里「多余待收卡」还没堆到 4 张（卡位共 7 个，留 4 张以内不影响投炉）
-             → 才允许继续延后，避免多余卡把炉位长期堆死；
-          ③ 两箱合起来装不下「凑齐还缺的张数」→ 才值得延后
-             （空位充裕时取出来无所谓，别白白让炉位空转）。
+          ② 炉里「多余待收卡」还没堆到 4 张 → 才允许继续延后，避免多余卡把炉位长期堆死；
+          ③ **两箱空位为 0**（真·卡死）→ 才延后。只要有 1 格空位就照取。
+
+        ★ 2026-11-04 用户定调：③ 的判据从「空位 ≤ 凑齐缺口」收紧为「空位 == 0」。
+          旧口径在「缺口 8 格、空 4 格」时恒延后，而那种状态空位涨不上去（没集齐
+          不买底卡、也上交不了），出炉的卡就被永久锁在炉里。用户原话：「什么时候
+          真的卡住，就是卡箱一个空位都没了，但凡有一个空位，都要把在炼的卡继续
+          取卡投炉。」
         """
         if self._is_collect_essential(cid, stock, pending, as_take=True):
             return False                          # ① 必需卡，照常取
@@ -2376,11 +2390,11 @@ class AutoRefine:
             if tight > 0 and not any(self._is_collect_essential(c, self._stock)
                                      for c, _n, _t in specs):
                 self._log("礼物变卡", True,
-                          f"暂缓：两箱空位只够凑齐这一套（还差 {tight} 格），"
-                          f"变出的卡对凑齐零贡献，会挤掉凑齐所需格位，等上交后再变")
+                          f"暂缓：两箱一个空位都没有（还差 {tight} 格），"
+                          f"变出的卡放不下，腾出空位再变")
                 self.gift_last = {"ok": True, "skipped": True, "took": 0, "changed": 0,
                                   "dst": None,
-                                  "message": "箱位只够凑齐本套，收礼变卡暂缓"}
+                                  "message": "两箱无空位，收礼变卡暂缓"}
                 return
         dst_ids = [cid for cid, _need, _tid in specs]
         dst_need = {cid: need for cid, need, _tid in specs}
