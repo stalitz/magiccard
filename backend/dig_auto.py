@@ -596,6 +596,25 @@ async def daily_gift(session) -> dict:
             "message": data.get("desc") or ""}
 
 
+# 70 类道具箱编号 → JD_STONES 下标（3=蓝晶石 4=绿晶石 5=红晶石）。
+# 实证见上方 DIG_MAT_TYPE 段：`new_prop[].id` 是**大类 70** 的类内编号，
+# 用户仓库截图「蓝114/绿110/红78」↔ new_prop 3/4/5 的 num 逐条吻合。
+_STONE_PIDS = (3, 4, 5)
+
+
+def _stone_stock(st: dict) -> dict:
+    """背包视图 → 三种晶石库存 {0:蓝, 1:绿, 2:红}（背包里没有的记 0）。"""
+    out = {0: 0, 1: 0, 2: 0}
+    for p in ((st.get("bag") or {}).get("props") or []):
+        try:
+            pid = int(p.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if pid in _STONE_PIDS:
+            out[_STONE_PIDS.index(pid)] = int(p.get("num") or 0)
+    return out
+
+
 async def jd_start(session, machine: int = 0, stone: int = 0) -> dict:
     """act=4 往鉴定机投一颗晶石。machine=机器序号，stone=0蓝/1绿/2红。"""
     machine, stone = int(machine), int(stone)
@@ -670,6 +689,12 @@ async def jd_auto(session, stone_order=(0, 1, 2), submit_relics: bool = True) ->
     （2026-09-29 用户反馈「自动一轮不会自动上交文物」）。
     ⚠️ 上交走 relic_submit_all：对无库存/不存在的 id 是**探测型**（不扣次数），零副作用。
     """
+    # stone_order 收敛到合法下标（0/1/2），越界会让 JD_STONES[stone] 抛 IndexError
+    try:
+        _ord = tuple(s for s in (int(x) for x in (stone_order or ())) if 0 <= s < len(JD_STONES))
+    except (TypeError, ValueError):
+        _ord = ()
+    stone_order = _ord or (0, 1, 2)
     c = await jd_collect(session)
     # 收完立刻交文物：本轮收出的 + 仓库里之前没交的，一并清掉
     sub = await relic_submit_all(session) if submit_relics else None
@@ -678,16 +703,33 @@ async def jd_auto(session, stone_order=(0, 1, 2), submit_relics: bool = True) ->
         tail = f"；上交文物 {sub['total']} 件" if (sub and sub.get("total")) else ""
         return {"ok": False, "text": "读状态失败（已收、已交）" + tail}
     started = []
+    # ★ 2026-11-04 用户反馈「没有蓝晶石就不投了，现在是空的」：
+    #   旧码按 `stone_order[i % 3]` 固定顺序投，任一失败就 `break` —— 蓝晶石库存为 0
+    #   时第 1 个空槽投蓝失败 → 这台机器剩下的槽一个都不投（下一台又从蓝开始，同样
+    #   失败）→ 鉴定机整片空着，而绿/红晶石还在背包里躺着。
+    #   改成按**实际库存**挑：轮转到的那颗没货就顺延到下一颗；三种都没货才停。
+    stock = _stone_stock(st)
+    empty_stones = [JD_STONES[k] for k in (0, 1, 2) if stock.get(k, 0) <= 0]
+    n_order = len(stone_order) or 1
     for m in st.get("jd") or []:
         if int(m.get("lv") or 0) <= 0:
             continue
         for i in range(int(m.get("free") or 0)):
-            stone = stone_order[i % len(stone_order)]
+            # 从轮转位开始找第一颗**还有库存**的石头
+            stone = None
+            for k in range(n_order):
+                cand = stone_order[(i + k) % n_order]
+                if stock.get(cand, 0) > 0:
+                    stone = cand
+                    break
+            if stone is None:
+                break                       # 三种晶石都用光了 → 本机不再投
             r = await jd_start(session, m["machine"], stone)
             started.append({"machine": m["machine"], "stone": JD_STONES[stone],
                             "ok": r["ok"], "text": r["text"]})
             if not r["ok"]:
-                break
+                break                       # 有库存仍失败 = 真错误（槽位/等级），停
+            stock[stone] = stock.get(stone, 0) - 1
     nstart = len([x for x in started if x["ok"]])
     got = c.get("count") or 0
     parts = []
@@ -696,6 +738,10 @@ async def jd_auto(session, stone_order=(0, 1, 2), submit_relics: bool = True) ->
     if sub and sub.get("total"):
         parts.append(f"上交文物 {sub['total']} 件")
     parts.append(f"投石 {nstart} 次")
+    if empty_stones:
+        rest = {JD_STONES[k]: stock.get(k, 0) for k in (0, 1, 2)}
+        parts.append("无" + "/".join(empty_stones) + "，剩余 " +
+                     "、".join(f"{n}×{v}" for n, v in rest.items()))
     out = {
         "ok": True, "collected": got, "started": nstart,
         "submitted": (sub or {}).get("total", 0) if sub else 0,
