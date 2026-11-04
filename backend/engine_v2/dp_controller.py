@@ -1144,14 +1144,26 @@ class DPTickController:
         #   发不出 → 零动作）；收到 base_quota//3(1~3) → 2★ 27.02h 退化（买不上料、
         #   炉空转）。故取 due_window：紧箱场景「多买」与「少买」两侧都有悬崖。
         n_wave = max(due_window, base_quota // 3)
+        # ★ 2026-11-04：按「炉」收集缺口（一波 = 一个 refine op 的整套底卡 feeders），
+        #   买卡时按波填齐。真机 4821992 的形态：空主炉等料，`jit_need` 里
+        #   {智慧少年:4, 大显身手:4, 神通广大:4, ...}，旧排序按缺口降序 + 内层 while
+        #   把额度 3 张**全砸在同一张卡**上 → 13:15 买智慧少年×3、13:16 买大显身手×3、
+        #   13:17 买神通广大才凑出第一炉，空主炉白等 2 tick（90s）。额度本来就够一炉
+        #   （3 张），按波填齐就能同 tick 投 —— 买卡与投炉本来就可以同 tick 完成
+        #   （`buy_sametick` + 虚拟槽，执行层买完重读真实 slot）。
+        waves: List[List[int]] = []
         got = 0
         for j in range(plan["cursor"], len(ops)):
             if issued[j] or ops[j]["kind"] != "refine":
                 continue
             mj = self._owner[ops[j]["cid"]]
+            w: List[int] = []
             for f in mj.feeders(ops[j]["cid"]):
                 if f in self._base_cids:
                     jit_need[f] = jit_need.get(f, 0) + 1
+                    w.append(f)
+            if w:
+                waves.append(w)
             got += 1
             if got >= n_wave:
                 break
@@ -1188,21 +1200,38 @@ class DPTickController:
                 if _lack:
                     _need = _lack
                     self.buy_fallback += 1
-            for cid in sorted(_need, key=lambda c: (-_need[c], c)):
+            def _buy_one(cid: int) -> bool:
+                """买 1 张 cid（额度 / 换卡箱空位 / 净缺口任一不足就不动）。
+
+                用函数而不是内联，是为了让「按波填齐」与「按缺口补」共用同一套闸，
+                不会出现一处记得扣额度、另一处忘掉。
+                """
+                nonlocal n_base, n_buy, box_free_local
                 if n_buy >= buy_cap or box_free_local <= 0 or n_base >= base_quota:
-                    break
+                    return False
                 have = (box_stock.get(cid, 0) + pending.get(cid, 0)
                         + bought_this_tick.get(cid, 0))
-                want = _need[cid] - have
-                while (want > 0 and n_buy < buy_cap and box_free_local > 0
-                       and n_base < base_quota):
-                    actions.append(Action(kind="buy", cid=cid, n=1,
-                                         note=f"DP即时买底料 {cid}"))
-                    bought_this_tick[cid] += 1
-                    box_free_local -= 1
-                    n_base += 1
-                    n_buy += 1
-                    want -= 1
+                if _need.get(cid, 0) - have <= 0:
+                    return False
+                actions.append(Action(kind="buy", cid=cid, n=1,
+                                     note=f"DP即时买底料 {cid}"))
+                bought_this_tick[cid] += 1
+                box_free_local -= 1
+                n_base += 1
+                n_buy += 1
+                return True
+
+            # ① 按波填齐（2026-11-04）：一波 = 一个 refine op 的整套底卡。
+            #   额度只够一炉（3 张）时，这 3 张会分别给到同一炉的 3 种底卡，
+            #   于是买完这个 tick 就能投；旧口径按卡种降序堆量，3 张全给同一种，
+            #   要凑满一炉得等 3 个 tick（真机每炉白等 90s，且箱里躺着半套料）。
+            for w in waves:
+                for cid in w:
+                    _buy_one(cid)
+            # ② 剩余额度按缺口降序补（waves 之外的需求，或额度大于头几炉需要时）
+            for cid in sorted(_need, key=lambda c: (-_need[c], c)):
+                while _buy_one(cid):
+                    pass
         for i, op in enumerate(ops):
             if self.buy_free and not self.buy_keepop:
                 break                   # 买卡已由 jit_need 通道处理（ops 里无 buy）
