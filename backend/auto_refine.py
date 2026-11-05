@@ -898,9 +898,16 @@ class AutoRefine:
           + 保险箱 1 格」这 4 格 —— 这 4 格本来刚好够买齐缺的 4 张 10 面底卡。箱位
           一满，买卡一张也进不来，然后每 tick 空转几百次。
 
-          闸门：`两箱空位 < 本套还缺张数` → 返回 **0 套**（本轮不排任何炉次），
-          因为在这种状态下投炉的产物也无处可放，只会把箱位锁得更死。
+          闸门：`两箱空位 < 本套还缺张数` **且缺口全是商店底卡**（收尾集齐态）→
+          返回 **0 套**（本轮不排任何炉次），因为在这种状态下投炉的产物也无处可放，
+          只会把箱位锁得更死。
           **注意**：0 套只停「投炉/买卡」，收卡与上交照常走（tick 前半段）。
+
+          ★★ 2026-11-05 补丁：闸门最初无条件按缺口冻结，真机 3822843 毒菇凉
+          (tid1223) 立刻被误冻 —— 它缺 9 张里 **7 张是合成卡**（必须投炉产出），
+          两箱只有 4 格。缺口含合成卡时缺口张数 ≠ 所需空位数：投炉消耗底卡腾格、
+          产物出炉再取，全程只需 1~2 格流转。按缺口冻结 = 不投炉 = 缺口永不减，
+          正是 11-04 死了 58 分钟的那个机制。故加 `_plan_base_only` 限定。
         """
         sets = self._calc_sets_raw(plan, stock, pending, free_slots)
         cur = int(box_cur or getattr(self, "_box_cur", 0) or 0)
@@ -910,7 +917,15 @@ class AutoRefine:
             store_free = int(getattr(self, "_store_free", 0) or 0)
             relief = max(0, free) + max(0, store_free)
             need = sum(1 for c in plan.ids if stock.get(c, 0) < 1)
-            if need > 0 and relief < need:
+            # ★ 只有「收尾集齐态」才闸（2026-11-05 真机 3822843 误冻后补）：
+            #   缺的卡必须**全部是商店底卡**（合成卡都在箱），这时缺口张数 = 必须
+            #   一次性同时占住的格数，`两箱空位 < 缺口` 才是真装不下。
+            #   若缺口含合成卡（要靠投炉产出），缺口张数 ≠ 需要的空位数 —— 投炉
+            #   消耗底卡腾格、产物出炉再取，全程只需 1~2 格流转。这时按缺口冻结
+            #   就是 11-04 那个死锁的翻版：不投炉 → 缺口永不减 → 空位涨不上来。
+            #   真机反例：毒菇凉(tid1223) 缺 9 张里 7 张是合成卡、两箱只有 4 格，
+            #   被无条件闸冻住，而它 09:30 前一直在正常滚动炼制。
+            if need > 0 and relief < need and self._plan_base_only(plan, stock):
                 self._log_freeze(plan, need, relief, free, store_free)
                 self._last_sets[plan.tid] = 0     # 界面「套数」如实显示 0（DP 路径不写这个字典）
                 return 0
@@ -2087,6 +2102,21 @@ class AutoRefine:
         """
         return self._collect_tight_ex(st, stock)[0]
 
+    def _plan_base_only(self, plan, stock: Counter) -> bool:
+        """这一套是否「合成卡全在、只差从商店买的底卡」—— 收尾集齐态。
+
+        判据与收尾补集卡册买底卡、`_calc_sets` 缺口闸**同一口径**：
+        `miss_comp 为空 且 miss_base 非空`。改一处必须同步另两处。
+
+        ★ 2026-11-05：三种语义必须分开，否则要么空转要么死锁：
+          · 收尾集齐态（本函数为真）→ 缺口张数 = 必须同时占住的格数，可以按箱位闸；
+          · 缺口含合成卡 → 靠投炉产出，缺口张数 ≠ 所需空位数，**绝不能按缺口闸**
+            （不投炉 → 缺口不减 → 空位涨不上来，11-04 死锁）。
+        """
+        if any(c in plan.comp and stock.get(c, 0) < 1 for c in plan.ids):
+            return False
+        return any(stock.get(c, 0) < 1 for c in plan.ids)
+
     def _base_only_short(self, stock: Counter) -> bool:
         """队列里是否有一套「只差能从商店买的底卡」（合成卡全在箱）。
 
@@ -2097,11 +2127,7 @@ class AutoRefine:
             plan = self.plans.get(tid)
             if not plan:
                 continue
-            miss_comp = [c for c in plan.ids
-                         if c in plan.comp and stock.get(c, 0) < 1]
-            if miss_comp:
-                continue
-            if any(stock.get(c, 0) < 1 for c in plan.ids):
+            if self._plan_base_only(plan, stock):
                 return True
         return False
 
