@@ -644,6 +644,9 @@ class AutoRefine:
         self.stats = {"rounds": 0, "refined": 0, "bought": 0, "collected": 0,
                       "gold": 0, "errors": 0}
         self.randchance = 0          # 取自己卡炉累积的抽奖机会数（status 透传）
+        # 刚买进的卡：cid -> 时间戳。腾位（_make_room）不许把它们当杂卡卖掉，
+        # 否则会出现「买一张 → 卖掉刚买那张 → 再买下一张」的空转（2026-11-05）。
+        self._recent_buys: dict[int, float] = {}
         self.live_plan: dict | None = None   # 主套实时净需求（兼容旧面板）
         self.live_plans: list[dict] = []     # 队列里每套的实时净需求
         self._stock: Counter = Counter()     # 最近一次读到库存（status 里算实时净需求用）
@@ -1044,11 +1047,9 @@ class AutoRefine:
                 #   （释放全部格位）后再取，代价只是占一个炉位。
                 if self._should_defer_take(int(c["id"]), st, stock_now, pending_now):
                     nm = card_name(c["id"])
-                    need_n = self._collect_need(stock_now)
+                    why = getattr(self, "_defer_reason", "") or "箱位不够"
                     self._log("收卡", True,
-                              f"{nm} 暂缓取出：两箱一个空位都没有"
-                              f"（还差 {need_n} 格），"
-                              f"先留炉里，腾出空位马上取")
+                              f"{nm} 暂缓取出：{why}，先留炉里，腾出空位马上取")
                     steps.append({"action": "收卡", "ok": True,
                                   "detail": f"{nm} 暂缓（空位留给凑齐）"})
                     continue
@@ -1283,6 +1284,7 @@ class AutoRefine:
                     ok = r.get("code") == 0
                     if ok:
                         self.stats["bought"] += 1
+                        self._mark_bought(cid)
                         stock[cid] += 1
                         st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                     msg = r.get("message") or err_msg(r.get("code"))
@@ -1521,6 +1523,7 @@ class AutoRefine:
                     ok = r.get("code") == 0
                     if ok:
                         self.stats["bought"] += 1
+                        self._mark_bought(a.cid)
                         stock[a.cid] += 1
                         slots_dirty = True      # 新卡还没有 slot 记录，refine 前要重读
                         st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
@@ -1965,16 +1968,91 @@ class AutoRefine:
           不了），于是每个 tick 都把出炉的卡延后，那张卡永久占住炉位。真机实测
           4821992 连续 78 tick（58 分钟）只打「暂缓取出」，引擎零动作。
 
-          注意这两条铁律是配套的：既然「没集齐时一个 10 面底卡都不买」，空位
-          就不会被底卡需求占掉，所以取卡腾炉不存在「取出来就买不进料」的风险
-          —— 只要有 1 格空位，取卡永远是正确的。
+        ⚠️ 11-04 版还基于一个假设：「没集齐时一个 10 面底卡都不买，所以空位不会
+          被底卡需求占掉」。**该假设已不成立** —— 收尾「补集卡册」这条路径会
+          买底卡，且买完就上交，正是最该先做的事（见 `_collect_tight_ex`）。
 
         空位 ≥ 1（或已凑齐、队列为空）时一律返回 0 —— 正常情况绝不做延后。
         """
+        return self._collect_tight_ex(st, stock)[0]
+
+    def _base_only_short(self, stock: Counter) -> bool:
+        """队列里是否有一套「只差能从商店买的底卡」（合成卡全在箱）。
+
+        与收尾补集卡册买底卡的判据**完全一致**（`miss_comp 为空 且 miss_base
+        非空`），这样两处不会各说各话。
+        """
+        for tid in self.queue:
+            plan = self.plans.get(tid)
+            if not plan:
+                continue
+            miss_comp = [c for c in plan.ids
+                         if c in plan.comp and stock.get(c, 0) < 1]
+            if miss_comp:
+                continue
+            if any(stock.get(c, 0) < 1 for c in plan.ids):
+                return True
+        return False
+
+    def _mark_bought(self, cid: int) -> None:
+        """记下刚买进的卡：腾位时不许把它当杂卡卖掉。
+
+        ★ 2026-11-05 真机 4821992：买一张底卡 → 下一轮腾位把它当「多余 10 面
+          底卡」卖掉 → 再买下一张 → 再卖…… `stats.bought` 累积到 201 次、
+          集卡册进度零。给买进来的卡 5 分钟活口（投炉或同 tick 上交都够了）。
+        """
+        self._recent_buys[int(cid)] = time.time()
+
+    def _recently_bought(self, cid: int, window: float = 300.0) -> bool:
+        ts = self._recent_buys.get(int(cid))
+        return bool(ts) and (time.time() - ts) < window
+
+    def _defer_escape(self) -> bool:
+        """逃逸阀：连续多 tick 因「先集齐」延后，却一张卡都没买成 → 放行取卡。
+        买路本身不通（金币不够 / 卡已下架 / 箱里杂卡把位占死）时，继续延后只是
+        拿炉位空耗，必须放行。阈值按「每 tick 该函数被调 N 次」放大到 60
+        （≈4~6 tick，3~5 分钟）；只要买进过一张卡就清零重来。
+        """
+        bought = int(self.stats.get("bought", 0))
+        if bought > getattr(self, "_defer_bought", 0):
+            self._defer_ticks = 0
+        self._defer_bought = bought
+        self._defer_ticks = getattr(self, "_defer_ticks", 0) + 1
+        if self._defer_ticks >= 60:
+            self._defer_ticks = 0
+            return True
+        return False
+
+    def _collect_tight_ex(self, st: dict, stock: Counter) -> tuple[int, str]:
+        """`_collect_tight` 的完整版：返回 (要预留的格数, 原因文案)。
+
+        ★ 2026-11-05 用户定调（补回 11-02 的前提，但不再掉回 11-04 的死锁）：
+          「但凡有一个空位都要取卡投炉」**有一个前提** —— 卡箱里的卡已经能凑成
+          一套、空位也够时，**先集齐上交，再取卡**。取卡会吃掉买底卡的格位，
+          而集齐（买底卡 → 同一 tick 上交）一次性释放十几格；顺序反了就会
+          「取了卡反而买不进底卡」，然后买一张卖一张空转。
+
+          判据分三层（优先级从高到低）：
+            ① 两箱空位 == 0 → 无条件延后（无路可走）。
+            ② 缺口**全部是可买底卡**、且空位 ≤ 缺口 → 延后（先集齐上交）。
+               这种状态买完即上交，有明确出路，延后是值得的。
+            ③ 其余（缺口含必须投炉的合成卡）→ 不延后。
+               ⚠️ 这里正是 11-04 那次 58 分钟零动作的真因：延后取卡=不投炉
+               =缺口永远不减=空位永远涨不上去。判据必须能区分「缺口能不能
+               靠买补齐」，不能只看 `空位 <= 缺口`。
+        """
         need = self._collect_need(stock)
         if need <= 0:
-            return 0
-        return need if self._free2(st) <= 0 else 0
+            return 0, ""
+        free2 = self._free2(st)
+        if free2 <= 0:
+            return need, "两箱一个空位都没有"
+        if free2 <= need and self._base_only_short(stock):
+            if self._defer_escape():
+                return 0, ""
+            return need, (f"只差 {need} 张可买底卡、空位只剩 {free2} 格，"
+                          f"先集齐上交再取卡")
+        return 0, ""
 
     def _should_defer_take(self, cid: int, st: dict, stock: Counter,
                            pending: Counter | None = None) -> bool:
@@ -1996,13 +2074,9 @@ class AutoRefine:
         判据（三道闸，缺一不可，任何一道不满足就照常取）：
           ① 这张卡是「凑齐所必需的供给」（含向上合成的素材）→ 必取，不延后；
           ② 炉里「多余待收卡」还没堆到 4 张 → 才允许继续延后，避免多余卡把炉位长期堆死；
-          ③ **两箱空位为 0**（真·卡死）→ 才延后。只要有 1 格空位就照取。
-
-        ★ 2026-11-04 用户定调：③ 的判据从「空位 ≤ 凑齐缺口」收紧为「空位 == 0」。
-          旧口径在「缺口 8 格、空 4 格」时恒延后，而那种状态空位涨不上去（没集齐
-          不买底卡、也上交不了），出炉的卡就被永久锁在炉里。用户原话：「什么时候
-          真的卡住，就是卡箱一个空位都没了，但凡有一个空位，都要把在炼的卡继续
-          取卡投炉。」
+          ③ 箱位确实不够让「集齐」和「取卡」同时进行 → 才延后（详见 `_collect_tight_ex`
+             的三层优先级）。⚠️ 11-04 曾把 ③ 收紧成「空位 == 0」，等于把「先集齐
+             上交再取卡」这条前提删掉了 —— 结果取卡吃光买底卡的格位。
         """
         if self._is_collect_essential(cid, stock, pending, as_take=True):
             return False                          # ① 必需卡，照常取
@@ -2017,7 +2091,9 @@ class AutoRefine:
             n_extra += 1
         if n_extra >= 4:
             return False
-        return self._collect_tight(st, stock) > 0  # ③ 边界态才延后
+        tight, why = self._collect_tight_ex(st, stock)   # ③ 边界态才延后
+        self._defer_reason = why
+        return tight > 0
 
     # ---------- 腾位（换卡箱满了买不进底卡时）★ 2026-10-03 用户定调 ----------
     async def _make_room(self, tid: int, need: int, st: dict, steps: list[dict],
@@ -2091,6 +2167,11 @@ class AutoRefine:
                 if cid <= 0:
                     continue
                 face = _face_of(cid)
+                if self._recently_bought(cid):
+                    # ★ 2026-11-05：刚买进来的卡不许当杂卡卖掉 —— 否则就是
+                    #   「买一张 → 腾位卖掉刚买那张 → 再买下一张」的空转，
+                    #   集卡册永远补不齐（真机 bought 累计 201 次、进度零）。
+                    continue
                 rank = 0
                 if cid in keep_ids:
                     # ★ 套内卡：只有 **10 面底卡**可腾（40 面及以上是一炉炼出来的成品，
@@ -2656,6 +2737,7 @@ class AutoRefine:
                 ok = r.get("code") == 0
                 if ok:
                     self.stats["bought"] += 1
+                    self._mark_bought(m)
                 msg = r.get("message") or err_msg(r.get("code"))
                 buylog.log_buy("engine._buy_for", m, tid, code=r.get("code"),
                                ok=ok, note=f"{plan.cname(target)}素材 {msg}")
