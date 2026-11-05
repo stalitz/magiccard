@@ -274,6 +274,7 @@ class DPTickController:
         self.jit_blocked = 0            # JIT 门拦下的买卡 op 数（未到需求不买）
         self.buy_fallback = 0           # 「ops 空、只剩底卡要买」时按 buy0_map 兜底的次数
         self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时把 sets 提到 2 的次数
+        self.pipe_sets_blocked = 0      # 提套会吃掉本套合成卡而被拦下的次数（见 _pipe_consumes_set）
         self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
         self.compact_moved = 0          # 腾箱挪保险箱累计张数
         # ★★ 2026-10-28 事件驱动重解（默认开，`MC_EVENT_RESOLVE=0` 可关）：
@@ -350,6 +351,48 @@ class DPTickController:
         return {"types": ut, "idx": idx, "n": n, "dur": dur,
                 "mats": mats, "mclass": mclass, "depth": depth, "cp": cp}
 
+    @staticmethod
+    def _pipe_consumes_set(m, avail, pending) -> bool:
+        """提套（sets→2）会不会拿**本套自己的合成卡**当下一套的素材。
+
+        ★ 2026-11-05 用户定调：「流水线不能影响快要集齐的套」。
+
+        真机 4821992 好少年(tid326) 事故：成套配置是
+            `540面 勇敢少年 ← 奋勇少年(150) + 英勇少年(150) + 勇猛少年(150)`
+        当本套「4 张 150 在箱 + 1 张 540 在保险箱 + 4 张 40 面在炉」时，
+        `_nd <= 0`（合成卡净需求归零）命中 pipe_sets → sets 提到 2 → DP 立刻
+        投炉炼第 2 张 540，**吃掉本套那 3 张 150** → 本套从「约 1 小时后可上交」
+        变成「再等 15 小时」（540 炼制 54000s），且这 3 张 150 每张还要 4 小时。
+
+        判据 = **本套顶层卡已经在箱里**（`avail[top] > 0`）**且** sets=2 的待炼目标
+        会拿本套那些还躺在箱里的合成卡当素材。两者同时成立才算「会拆本套」。
+
+        为什么必须带「顶层已在箱」这个前置：
+        · 好少年事故：540 已在保险箱、4 张 150 在换卡箱 → 顶层已就位，本套只差
+          6 张底卡 + 4 张 40 出炉，**马上就要上交**；此时提套必然抢走那 3 张 150。
+        · 1★85 正常流水线：顶层在**炉里**（其素材已被消耗、不在箱），本套就位卡
+          不会被动用 → 放行。拦它只会白白退化多轮收益（178×3 靠这个从 17.06→9.05h）。
+        · 早期（还没有成品）：顶层没影 → 放行，提前炼中间卡是净增，不拆套。
+
+        返回 True = 提套会拆本套 → 调用方应跳过本次提套。
+        """
+        top = m.top_cid
+        if avail.get(top, 0) <= 0:
+            return False           # 本套顶层还没到手 = 没到「快要集齐」的窗口
+        try:
+            runs2, _ = m.net_plan(avail, dict(pending), sets=2)
+        except Exception:          # noqa: BLE001  算不出来就保守拦下
+            return True
+        set_ids = set(m.ids)
+        for c in runs2:
+            if m.is_base(c):
+                continue
+            for f in m.feeders(c):
+                # 素材是套内合成卡 + 此刻就在箱里 → 炼下一套就是拆本套
+                if f in set_ids and not m.is_base(f) and avail.get(f, 0) > 0:
+                    return True
+        return False
+
     def _union_need0(self, box_stock, pending, active, completed_rounds,
                      max_rounds, credits=None, sets_fn=None, free_main=0,
                      box_free=0):
@@ -420,7 +463,11 @@ class DPTickController:
             if (self.pipe_sets and sets > 0 and left >= 2
                     and box_free >= self.pipe_min_free and sets < 2):
                 _nd = sum(n for c, n in runs.items() if not m.is_base(c))
-                if _nd <= 0:
+                if _nd <= 0 and self._pipe_consumes_set(m, avail, pending):
+                    # ★ 2026-11-05 用户定调：「流水线不能影响快要集齐的套」。
+                    #   提套会把本套的合成卡当下一套的素材吃掉 → 跳过本次提套。
+                    self.pipe_sets_blocked += 1
+                elif _nd <= 0:
                     sets = 2
                     runs, buys = m.net_plan(avail, dict(pending), sets=sets)
                     self.pipe_sets_hits += 1
