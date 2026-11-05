@@ -912,9 +912,11 @@ class AutoRefine:
             need = sum(1 for c in plan.ids if stock.get(c, 0) < 1)
             if need > 0 and relief < need:
                 self._log_freeze(plan, need, relief, free, store_free)
+                self._last_sets[plan.tid] = 0     # 界面「套数」如实显示 0（DP 路径不写这个字典）
                 return 0
             self._freeze_msg = ""      # 已解冻：下次再冻要重新记一行
             sets = min(sets, max(1, free // max(1, len(plan.ids))))
+        self._last_sets[plan.tid] = sets
         return sets
 
     def _log_freeze(self, plan, need: int, relief: int, change_free: int,
