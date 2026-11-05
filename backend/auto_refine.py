@@ -1098,6 +1098,69 @@ class AutoRefine:
         txt = "，".join(f'{d["field"]} {d["from"]}→{d["to"]}（{d["delta"]:+d}）' for d in top)
         self._log("状态变化", True, txt)
 
+    async def _submit_album(self, tid: int, steps: list[dict]) -> bool:
+        """把一套集齐的卡上交到集卡册（服务端消耗整套各 1 张），返回是否尝试过。
+
+        ★ 2026-11-05 抽成方法（紧箱仿真暴露）：旧流程里上交是 tick 第 3 步、
+          「收尾买底卡」是第 5 步 —— 于是**买齐之后要等下一个 tick 才提交**，
+          中间整整一个 45s 的窗口：箱是满的、已经集齐，此时任何取卡都会挤掉
+          一格买底卡的位置，引擎只能靠卖底卡腾位（真机与仿真 C1/C3 都复现：
+          「卖 大显身手 / 消防少年 腾位」→ 缺口 +2 → 永远收敛不了）。
+          现在收尾买完底卡可以在**同一个 tick 内**直接提交，窗口消失。
+
+        ★ 上交挑「未收集」的 qq秀：遍历 t[9] 各 giftid，用 gift_list 翻成实例 id，
+          选第一个不在已收集列表里的（2026-10-12 修：旧逻辑永远传 t[9] 首项，
+          套内首个 qq秀已收集时反复上交同一个已收集的，永远集不满）。
+        """
+        plan = self.plans[tid]
+        gmap = _gift_info_map()
+        collected = self._tick_collected.get(tid, set())
+        chosen = plan.giftid
+        chosen_inst = None
+        chosen_name = None
+        for g in plan.gifts:
+            inst, nm = gmap.get(g, (None, ""))
+            if inst and inst not in collected:
+                chosen, chosen_inst, chosen_name = g, inst, nm
+                break
+        r = await self.s.post(EP_COLLECTION_ADD, themetype=0, giftid=chosen,
+                              cardtype=1, theme=tid)
+        code = r.get("code")
+        ok = code == 0
+        msg = ("成功放入集卡册" if ok
+               else ((r.get("message") or "").strip() or err_msg(code)))
+        detail = f"{plan.name}: {msg}"
+        if chosen != plan.giftid:
+            detail += f"｜选未收集qq秀 {chosen_name}({chosen_inst})"
+        if ok:
+            self.stats["collected"] += 1
+            plan.rounds += 1
+            self.stats["rounds"] = sum(p.rounds for p in self.plans.values())
+            # 解析「获得的奖励」与「额外得到的卡」（响应结构未抓包，宽容提取）
+            got = parse_collect_rewards(r.get("raw") or "", set(plan.ids))
+            self.last_collect = {"theme": plan.name, "message": msg, **got}
+            extra = [c for c in got["cards"] if not c["mine"]]
+            if got["items"]:
+                detail += "｜奖励 " + "、".join(i["text"] for i in got["items"])
+            if extra:
+                detail += "｜得卡 " + "、".join(
+                    f'{c["name"]}（{c["price"]}面值）' for c in extra[:6])
+            if not got["items"] and not extra:
+                # 什么都没提出来 → 把原始响应留下来，下次收紧解析
+                detail += f"｜响应原文 {got['raw'][:220]}"
+            # 把刚收集的 qq秀实例写回缓存，避免同缓存窗口（20s）内下一轮重复选它
+            if chosen_inst:
+                self._show_cache.setdefault(tid, set()).add(chosen_inst)
+                self._tick_collected.setdefault(tid, set()).add(chosen_inst)
+            if self.max_rounds and plan.rounds >= self.max_rounds:
+                plan.done = True
+                if tid in self.queue:
+                    self.queue.remove(tid)
+                self._log("完成", True, f"{plan.name} 已达 {self.max_rounds} 轮，移出队列")
+        steps.append({"action": "上交集卡册", "ok": ok, "detail": detail})
+        self._log("上交", ok, detail)
+        return True
+
     # ---------- 单步 ----------
     async def tick(self) -> list[dict]:
         steps: list[dict] = []
@@ -1268,55 +1331,7 @@ class AutoRefine:
             plan = self.plans[tid]
             if not all(stock[c] >= 1 for c in plan.ids):
                 continue
-            # ★ 上交挑「未收集」的 qq秀：遍历 t[9] 各 giftid，用 gift_list 翻成实例 id，
-            #   选第一个不在已收集列表里的（2026-10-12 修：旧逻辑永远传 t[9] 首项，
-            #   套内首个 qq秀已收集时反复上交同一个已收集的，永远集不满）。
-            gmap = _gift_info_map()
-            collected = self._tick_collected.get(tid, set())
-            chosen = plan.giftid
-            chosen_inst = None
-            chosen_name = None
-            for g in plan.gifts:
-                inst, nm = gmap.get(g, (None, ""))
-                if inst and inst not in collected:
-                    chosen, chosen_inst, chosen_name = g, inst, nm
-                    break
-            r = await self.s.post(EP_COLLECTION_ADD, themetype=0, giftid=chosen,
-                                  cardtype=1, theme=tid)
-            code = r.get("code")
-            ok = code == 0
-            msg = ("成功放入集卡册" if ok
-                   else ((r.get("message") or "").strip() or err_msg(code)))
-            detail = f"{plan.name}: {msg}"
-            if chosen != plan.giftid:
-                detail += f"｜选未收集qq秀 {chosen_name}({chosen_inst})"
-            if ok:
-                self.stats["collected"] += 1
-                plan.rounds += 1
-                self.stats["rounds"] = sum(p.rounds for p in self.plans.values())
-                # 解析「获得的奖励」与「额外得到的卡」（响应结构未抓包，宽容提取）
-                got = parse_collect_rewards(r.get("raw") or "", set(plan.ids))
-                self.last_collect = {"theme": plan.name, "message": msg, **got}
-                extra = [c for c in got["cards"] if not c["mine"]]
-                if got["items"]:
-                    detail += "｜奖励 " + "、".join(i["text"] for i in got["items"])
-                if extra:
-                    detail += "｜得卡 " + "、".join(
-                        f'{c["name"]}（{c["price"]}面值）' for c in extra[:6])
-                if not got["items"] and not extra:
-                    # 什么都没提出来 → 把原始响应留下来，下次收紧解析
-                    detail += f"｜响应原文 {got['raw'][:220]}"
-                # 把刚收集的 qq秀实例写回缓存，避免同缓存窗口（20s）内下一轮重复选它
-                if chosen_inst:
-                    self._show_cache.setdefault(tid, set()).add(chosen_inst)
-                    self._tick_collected.setdefault(tid, set()).add(chosen_inst)
-                if self.max_rounds and plan.rounds >= self.max_rounds:
-                    plan.done = True
-                    if tid in self.queue:
-                        self.queue.remove(tid)
-                    self._log("完成", True, f"{plan.name} 已达 {self.max_rounds} 轮，移出队列")
-            steps.append({"action": "上交集卡册", "ok": ok, "detail": detail})
-            self._log("上交", ok, detail)
+            await self._submit_album(tid, steps)
             progressed = True
         if progressed:
             # 上交消耗了整套卡，库存变了；重读后**立刻**续炼下一轮（流水线、炉位不空，
@@ -1404,6 +1419,17 @@ class AutoRefine:
                                   "detail": f"{card_name(cid)}（{plan.name} 补集卡册） {msg}"})
                     if not ok:
                         break
+                # ★★ 买齐就**在同一个 tick 内**上交（2026-11-05 紧箱仿真 C1/C3）：
+                #   旧流程买完只是 return，提交要等下一个 tick 的第 3 步 —— 中间
+                #   一整个 45s 窗口箱是满的、已经集齐，此时任何取卡都得先卖底卡腾位，
+                #   卖掉一张缺口 +1，永远收敛不了。买完立刻提交就把窗口关掉。
+                if all(stock.get(c, 0) >= 1 for c in plan.ids):
+                    await self._submit_album(tid, steps)
+                    rd = await self._read_state()
+                    if rd is not None:
+                        st, stock, slots, pending = rd
+                        self._stock, self._pending = stock, pending
+                        self._refresh_caps(st)
         return steps
 
     # ---------- 变卡与炼卡共用的一套 40 面卡口径 ----------
@@ -2179,9 +2205,17 @@ class AutoRefine:
                靠买补齐」，不能只看 `空位 <= 缺口`。
         """
         need = self._collect_need(stock)
-        if need <= 0:
-            return 0, ""
         free2 = self._free2(st)
+        if need <= 0:
+            # ★★ 2026-11-05 紧箱仿真（C1/C3）：**已集齐**时也有一道闸。
+            #   已集齐 = 整套 17 张各 1 张都在箱里，此刻唯一该做的是上交。
+            #   若两箱已满（free2 == 0），取任何一张出炉卡都得先卖底卡腾位 ——
+            #   卖掉的那张很可能正是集齐要用的，缺口 +1，然后永远凑不回来
+            #   （真机日志「腾位 大显身手 / 消防少年」+「还缺 2 张，两箱只有 0 格」）。
+            #   等上交释放 17 格再取，代价只有一个 tick；卖卡重建是永久损伤。
+            if free2 <= 0:
+                return 1, "本套已集齐、两箱无空位，先上交再取卡"
+            return 0, ""
         if free2 <= 0:
             return need, "两箱一个空位都没有"
         if free2 <= need and self._base_only_short(stock):
@@ -2215,6 +2249,15 @@ class AutoRefine:
              的三层优先级）。⚠️ 11-04 曾把 ③ 收紧成「空位 == 0」，等于把「先集齐
              上交再取卡」这条前提删掉了 —— 结果取卡吃光买底卡的格位。
         """
+        # ★★ 最高优先级（2026-11-05 紧箱仿真 C1/C3）：**已集齐 + 两箱满** → 一律延后。
+        #   这一条必须排在「必需卡必取」之前：集齐时整套各 1 张都在箱里，上交就在
+        #   下一行代码（tick 第 3 步 / 收尾买齐后同一 tick），等一个 tick 的代价
+        #   远小于「卖一张底卡腾位 → 缺口 +1 → 永远凑不回来」。
+        #   真机日志形态：「腾位 大显身手（面10底卡）卖掉腾位」紧随
+        #   「还缺 2 张，两箱只有 0 格（换卡箱 0 / 保险箱 0）」。
+        if self._collect_need(stock) <= 0 and self._free2(st) <= 0:
+            self._defer_reason = "本套已集齐、两箱无空位，先上交再取卡"
+            return True
         if self._is_collect_essential(cid, stock, pending, as_take=True):
             return False                          # ① 必需卡，照常取
         # ② 炉里多余待收卡积压到 4 张就照常取（别把炉位长期占死）
@@ -2283,6 +2326,18 @@ class AutoRefine:
             c = _all_cards.get(cid)
             return int(c[3] or 0) if c else 0
 
+        _stock_now = self._stock_from(st)
+
+        def _sell_would_reopen_gap(cid: int) -> bool:
+            """卖掉这张之后，需求树是不是又要它了（= 它本来就是集齐缺的/还差的张数）。"""
+            stock2 = Counter(_stock_now)
+            if stock2.get(cid, 0) <= 0:
+                return False
+            stock2[cid] -= 1
+            if stock2[cid] <= 0:
+                del stock2[cid]
+            return self._is_collect_essential(cid, stock2, self._pending)
+
         def candidates(box_key):
             # ★ 2026-10-26 死锁修复（用户报「买 10 面把卡箱占满、取不出 40 面」）：
             #   旧版 `if cid in keep_ids: continue` 把**套内 10 面底卡也保护了**，
@@ -2317,6 +2372,16 @@ class AutoRefine:
                     #   40 面卡，是隐患，这里收紧到 > 10。
                     if face > 10:
                         continue
+                    # ★★ 2026-11-05 紧箱仿真 D2：**缺着的底卡一张都不许卖**。
+                    #   D2（两箱全满、炉空、缺口含合成卡）原先会卖「消防少年/大显身手」
+                    #   去换 2 格买 3 合 1 的素材 —— 结果素材只买进 2 张，第 3 格没有了，
+                    #   投炉失败：卖掉 2 张还缺的卡 + 箱里多 2 张用不上的素材，
+                    #   缺口从 6 涨到 8，之后永久零动作（真机同形态，收敛不了）。
+                    #   判据不是「有没有缺口」（缺口含合成卡时仍要放行投炉），而是
+                    #   **卖掉这一张之后需求树还缺不缺它**：还有富余张（重复且超出需求）
+                    #   才能卖；卖完就缺 → 停手报「需清卡箱」。
+                    if _sell_would_reopen_gap(cid):
+                        continue
                     rank = 1 if have[cid] > 1 else 2   # 重复底卡先卖，单张垫后
                 out.append((cid, face, int(c.get("slot") or 0), rank))
             # 排序：① 高面值杂卡最先（移保险箱，无损、且大面额本就用不上，用户定调
@@ -2336,7 +2401,6 @@ class AutoRefine:
         #   买回来又满 → 「卖一张买一张」无限空转（真机 4821992 实测）。
         #   只拦「卖底卡」这一支：高面值杂卡移保险箱仍然放行，缺口含合成卡时也照常
         #   腾位取卡（那种场景卖底卡能推进合成，不能一起拦，否则复现 11-04 死锁）。
-        _stock_now = self._stock_from(st)
         no_sell = (self._base_only_short(_stock_now)
                    and self._collect_need(_stock_now) > self._free2(st))
         # ★ 用 while + 每次重取候选：卖卡/移卡后**其他卡的 slot 会重排**，
@@ -2405,8 +2469,8 @@ class AutoRefine:
             self._log_throttled(
                 "room_short", "腾位不足", False,
                 f"还需 {need - freed} 格｜候选 {n_cand0} 张 / 尝试 {guard} 次 / "
-                f"腾出 {freed} 格。保险箱已满、高面值卡不自动卖，"
-                f"只能卖 10 面值底卡 —— 请手动清理保险箱或换卡箱")
+                f"腾出 {freed} 格。保险箱已满、高面值卡不自动卖；箱里的 10 面底卡"
+                f"全是集齐还缺的（卖掉缺口只会更大）—— 需清卡箱才能继续")
         return freed
 
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,
