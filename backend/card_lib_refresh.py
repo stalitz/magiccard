@@ -73,7 +73,12 @@ async def refresh_card_lib() -> dict:
     old_ids = {int(c[0]) for c in old.get("card_list", []) if c and len(c) > 0}
     old_themes = {int(t[0]) for t in old.get("theme_card_list", []) if t and len(t) > 0}
 
-    async with httpx.AsyncClient(timeout=60, follow_redirects=True,
+    # ★ trust_env=False（2026-11-05 真机事故）：后台进程是从带代理环境变量的 shell
+    #   启动的（HTTP_PROXY/HTTPS_PROXY 指向宿主的临时端口），一旦那个端口随会话失效，
+    #   httpx 默认 trust_env=True 会去连死代理 → `All connection attempts failed`，
+    #   前端「刷新卡库」恒失败（同一台机器单独跑本模块却成功，因为代理还活着）。
+    #   腾讯静态资源国内直连可达，不需要代理 —— 与 mc_api / auth_qr 同口径。
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True, trust_env=False,
                                   headers={"User-Agent": "Mozilla/5.0"}) as c:
         r = await c.get(CARD_LIB_URL)
         r.raise_for_status()

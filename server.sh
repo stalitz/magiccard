@@ -20,7 +20,13 @@ case "$1" in
     # 前置环境变量仅对本次 python 进程生效：PORT/MC_SESSION_FILE/MC_LOG 由 mc_api 与启动器读取
     ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT")
     [ -n "$SESS" ] && ENVARGS+=(MC_SESSION_FILE="$SESS")
-    env "${ENVARGS[@]}" $PYBIN - <<'PY'
+    # ★ 剥掉宿主代理环境变量（2026-11-05 真机事故）：从带 HTTP_PROXY/HTTPS_PROXY 的
+    #   shell 启动时，后台常驻进程会继承那个临时端口；端口随会话失效后，任何
+    #   httpx 默认 trust_env=True 的调用都变成 `All connection attempts failed`
+    #   （「刷新卡库」就这么恒失败）。腾讯服务与 localhost 都直连可达，不需要代理。
+    env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+        -u http_proxy -u https_proxy -u all_proxy \
+        "${ENVARGS[@]}" $PYBIN - <<'PY'
 import os, sys
 port = int(os.environ.get("PORT", "8000"))
 sess = os.environ.get("MC_SESSION_FILE", "/tmp/mc_session.json")

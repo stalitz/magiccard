@@ -24,7 +24,9 @@ RUN_HOURS = 3.0
 
 async def main() -> int:
     deadline = time.time() + RUN_HOURS * 3600
-    async with httpx.AsyncClient(timeout=20) as c:
+    # trust_env=False：后台常驻进程别读宿主代理环境变量（代理端口失效会恒 ConnectError；
+    # 而且这里访问的是 localhost，本来就不该走代理）
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as c:
         while time.time() < deadline:
             # 1) 取新码（force=1 拿新 qrsig，并刷新服务端缓存）
             try:
