@@ -409,7 +409,12 @@ class ThemePlan:
         `sets` = 每张套内卡要几张（= 炼几套）。`sets=1` 是旧行为（凑 1 套）。
         更大的 `sets` 让引擎一次排更多炉次（多套并行、炉位不闲）；库存抵扣照旧，
         所以「按囤卡炼多套」是自动的 —— 囤够就多炼、囤不够就少炼，绝不空转。
+        ★ 2026-11-05：`sets <= 0` 表示**本轮不排任何炉次**（`_calc_sets` 的缺口闸：
+        两箱空位放不下还缺的卡时返回 0）。旧写法 `need = max(1, sets)` 会把 0 悄悄
+        抬回 1，等于闸门形同虚设 —— 正是这次超炼 4 张卡、把箱位吃死的机制。
         """
+        if int(sets) <= 0:
+            return {}, {}
         avail = Counter(stock)
         if credit:
             avail.update({int(c): n for c, n in credit.items() if n > 0})
@@ -647,6 +652,8 @@ class AutoRefine:
         # 刚买进的卡：cid -> 时间戳。腾位（_make_room）不许把它们当杂卡卖掉，
         # 否则会出现「买一张 → 卖掉刚买那张 → 再买下一张」的空转（2026-11-05）。
         self._recent_buys: dict[int, float] = {}
+        self._throttle: dict[str, float] = {}   # 同类日志节流（key → 上次打印时刻）
+        self._freeze_msg: str = ""              # 缺口闸上次的原因文案（变了才记日志）
         self.live_plan: dict | None = None   # 主套实时净需求（兼容旧面板）
         self.live_plans: list[dict] = []     # 队列里每套的实时净需求
         self._stock: Counter = Counter()     # 最近一次读到库存（status 里算实时净需求用）
@@ -684,6 +691,7 @@ class AutoRefine:
         # 给并行套数封顶（N 张一套必须同时在箱才能上交，见 _calc_sets 的 2026-10-28 事故说明）
         self._box_cur: int = 0
         self._box_used: int = 0      # 本 tick 换卡箱已占格数（空位 = cur - used）
+        self._store_free: int = 0     # 本 tick 保险箱空位（炼成卡优先落这里）
         self._friend_fail: dict = {}          # uin -> ts：最近偷炉失败（含好友相关错误），暂不重试
         self._steal_cooldown_until = 0.0     # 全局冷却（服务端报“我炉满”则冷却一段时间）
         # 礼物箱 → 变卡（可选环节，勾选才做）。2026-09-21 用户定调：
@@ -875,13 +883,69 @@ class AutoRefine:
         这里限的只是「同时铺开几套」，铺开太多才会「三张 40 面全在等」把箱塞死）。
 
         `_box_used` 来自本 tick 的 `parse_full`；容量未知（0）时不封顶，退回旧口径。
+
+        ★★ 2026-11-05 缺口闸（用户定调，取代「只看换卡箱 18 格」的旧口径）：
+          用户原话：「你看空位怎么不看两个箱，只看换卡箱，你不知道取的卡会优先进
+          保险箱吗，只有买的 10 面卡才会进换卡箱」。
+
+          真实落箱规则：**炼成的卡优先进保险箱，保险箱满了才溢到换卡箱；只有买的
+          底卡一定进换卡箱**。所以「还能不能再往箱里塞一套」的判据是**两箱合计空位**，
+          而不是换卡箱单箱空位。旧口径把保险箱只当库存计数（`_stock_from` 合算张数），
+          从没把它当「换卡箱可以往外挪的承接位」，于是算不出「保险箱满 = 换卡箱也
+          腾不出格」。
+
+          真机 4821992 好少年(tid326) 事故链：超炼 4 张重复卡，正好吃掉「换卡箱 3 格
+          + 保险箱 1 格」这 4 格 —— 这 4 格本来刚好够买齐缺的 4 张 10 面底卡。箱位
+          一满，买卡一张也进不来，然后每 tick 空转几百次。
+
+          闸门：`两箱空位 < 本套还缺张数` → 返回 **0 套**（本轮不排任何炉次），
+          因为在这种状态下投炉的产物也无处可放，只会把箱位锁得更死。
+          **注意**：0 套只停「投炉/买卡」，收卡与上交照常走（tick 前半段）。
         """
         sets = self._calc_sets_raw(plan, stock, pending, free_slots)
         cur = int(box_cur or getattr(self, "_box_cur", 0) or 0)
         if cur > 0 and plan.ids:
             free = cur - int(getattr(self, "_box_used", 0) or 0)
+            # 缺口闸：两箱合计空位（换卡箱 + 保险箱）够不够放下还没到手的那些张
+            store_free = int(getattr(self, "_store_free", 0) or 0)
+            relief = max(0, free) + max(0, store_free)
+            need = sum(1 for c in plan.ids if stock.get(c, 0) < 1)
+            if need > 0 and relief < need:
+                self._log_freeze(plan, need, relief, free, store_free)
+                return 0
+            self._freeze_msg = ""      # 已解冻：下次再冻要重新记一行
             sets = min(sets, max(1, free // max(1, len(plan.ids))))
         return sets
+
+    def _log_freeze(self, plan, need: int, relief: int, change_free: int,
+                    store_free: int) -> None:
+        """箱位不够时把「缺几格、哪边满」打成一条可执行的日志。
+
+        只在原因变化时记一次（tick 45s，否则同一句话刷屏几百行，正是这次事故的
+        日志形态：`腾位不足 还需 1 格` 连打 300+ 次）。
+        """
+        msg = (f"{plan.name} 暂停开新炉：还缺 {need} 张，两箱只有 {relief} 格"
+               f"（换卡箱 {change_free} / 保险箱 {store_free}）"
+               f"→ 还差 {need - relief} 格，需清卡箱才能继续")
+        if msg == getattr(self, "_freeze_msg", ""):
+            return
+        self._freeze_msg = msg
+        self._log("箱位不足", False, msg)
+
+    def box_relief(self, stock: Counter) -> tuple[int, int, int]:
+        """本 tick 两箱可用空位与本套缺口：返回 (换卡箱空位, 保险箱空位, 缺口)。
+
+        给界面/预检用（`/api/auto/plan` 之类可以直接读），避免各处自己又按单箱算。
+        """
+        free = max(0, int(getattr(self, "_box_cur", 0) or 0)
+                   - int(getattr(self, "_box_used", 0) or 0))
+        store_free = max(0, int(getattr(self, "_store_free", 0) or 0))
+        need = 0
+        for tid in self.queue:
+            p = self.plans.get(tid)
+            if p:
+                need += sum(1 for c in p.ids if stock.get(c, 0) < 1)
+        return free, store_free, need
 
     def _calc_sets_raw(self, plan: "ThemePlan", stock: Counter, pending: Counter,
                        free_slots: int = 0) -> int:
@@ -980,6 +1044,21 @@ class AutoRefine:
                 detail = f"{src} → {dst} {stage}（{extra}）"
             self._log(label, bool(a.get("ok")), detail)
 
+    def _log_throttled(self, key: str, action: str, ok: bool, detail: str,
+                       window: float = 900.0) -> None:
+        """同类日志节流：同一 key 在 `window` 秒内只打一行。
+
+        ★ 2026-11-05 真机：卡箱锁死时 `腾位不足 还需 1 格` + 3 条「移入保险箱失败」
+          每 45s 刷一轮，日志里连打 300+ 行全是同一句，把有用的信息全冲掉了。
+          状态没变就不该重复记 —— 失败计数已经由 `stats` 统计。
+        """
+        now = time.time()
+        last = self._throttle.get(key)
+        if last is not None and now - last < window:
+            return
+        self._throttle[key] = now
+        self._log(action, ok, detail)
+
     def _log(self, action: str, ok: bool, detail: str) -> None:
         self.log.append({"ts": time.time(), "action": action, "ok": ok, "detail": detail})
         if not ok:
@@ -1012,9 +1091,7 @@ class AutoRefine:
         raw0 = mp.get("raw", "")
         st = parse_full(raw0)
         # 换卡箱容量与占用（供 `_calc_sets` 用**空位**给并行套数封顶；0 = 未知则不封顶）
-        _cap_ch = (st.get("cap") or {}).get("change") or {}
-        self._box_cur = int(_cap_ch.get("cur") or 0)
-        self._box_used = len(st.get("change") or [])
+        self._refresh_caps(st)
         self.randchance = st.get("randchance", 0)
         # 跨 tick 差分：上一 tick 翻过牌 → 此刻的变化就是那些奖励的去向
         cur_fields = parse_state_fields(raw0)
@@ -1266,6 +1343,22 @@ class AutoRefine:
                 miss_base = [c for c in plan.ids if c not in plan.comp and stock.get(c, 0) < 1]
                 if miss_comp or not miss_base:
                     continue
+                # ★★ 2026-11-05 物理装不下就别硬买（真机空转的真因）：
+                #   两箱空位 < 还缺的底卡张数时，逐张「卖一张 → 买一张」只会原地打转
+                #   ——卖掉的正是集卡册还要的底卡，买回来又满，缺口一格没少。
+                #   真机 4821992 日志：卖智慧少年 → 买大显身手 → 卖消防少年 →
+                #   买消防少年 → 再满…… `stats.bought` 一直涨、集卡册永远差 4 张。
+                #   这种状态唯一的出路是**清卡箱**（挪走别主题卡 / 卖重复卡），
+                #   引擎能做的就是把「差几格、哪边满」报清楚，别再空转。
+                free2 = self._free2(st)
+                if len(miss_base) > free2:
+                    self._log_throttled(
+                        f"albumfull:{tid}", "买卡", False,
+                        f"{plan.name} 还缺 {len(miss_base)} 张底卡，两箱只剩 {free2} 格"
+                        f"（换卡箱 {self._free_change(st)} / 保险箱 {self._store_free}）"
+                        f"→ 还差 {len(miss_base) - free2} 格，物理装不下，先别买；"
+                        f"请清卡箱：把别主题卡移进保险箱、或处理掉套内重复卡")
+                    continue
                 for cid in miss_base:
                     if self._free_change(st) <= 0:
                         # ★ 收尾补集卡册底卡也要能腾位（此前只在 _prepare_turn 腾，
@@ -1276,9 +1369,10 @@ class AutoRefine:
                             if rd is not None:
                                 st, stock, slots, pending = rd
                     if self._free_change(st) <= 0:
-                        self._log("买卡", False,
-                                  f"卡箱 0 空位，{card_name(cid)} 买不进来："
-                                  f"{plan.name} 集卡册还差 {len(miss_base)} 张底卡 —— 这是真的空间不足")
+                        self._log_throttled(
+                            f"albumbuy:{tid}", "买卡", False,
+                            f"卡箱 0 空位，{card_name(cid)} 买不进来："
+                            f"{plan.name} 集卡册还差 {len(miss_base)} 张底卡 —— 这是真的空间不足")
                         break
                     r = await self.s.post(EP_BUY, card_id=cid, theme_id=tid)
                     ok = r.get("code") == 0
@@ -1404,6 +1498,7 @@ class AutoRefine:
         rd = await self._read_state()
         if rd is not None:
             st, stock, slots, pending = rd
+            self._refresh_caps(st)     # 缺口闸/套数封顶必须用重读后的真实箱容
         ws = WorldState.from_parsed(st, now=int(st.get("now") or 0))
         # ★ 主炉台数随真机走（2026-11-04，道具卡把主炉 3→4）：`<stovebox stovenum>`
         #   是权威值（`cur` 恒 7 不变，只有 stovenum 与 `<stove id=0..3>` 跟着变）。
@@ -1945,6 +2040,20 @@ class AutoRefine:
                 return True     # 需求树还要它（含「箱里有几张但不够」与合成素材）
         return False
 
+    def _refresh_caps(self, st: dict) -> None:
+        """把本 tick 的箱容量快照记到实例上（tick 开头与 DP 决策前重读都要调）。
+
+        · `_box_cur/_box_used` = 换卡箱已开通格 / 已占格
+        · `_store_free` = 保险箱空位 —— 炼成的卡**优先落保险箱**，满了才溢到换卡箱
+          （用户 2026-11-05 定调），所以它是「换卡箱能不能腾出格」的承接位。
+        """
+        cap = st.get("cap") or {}
+        ch = cap.get("change") or {}
+        stc = cap.get("store") or {}
+        self._box_cur = int(ch.get("cur") or 0)
+        self._box_used = len(st.get("change") or [])
+        self._store_free = max(0, int(stc.get("cur", 0)) - int(stc.get("used", 0)))
+
     def _free2(self, st: dict) -> int:
         """两箱合计空位。保险箱看 `cur`（已开通格），`max` 是没开通的上限。"""
         store = (st.get("cap") or {}).get("store") or {}
@@ -2194,6 +2303,14 @@ class AutoRefine:
                       "换卡箱满且无卡可腾：高面值杂卡移不进保险箱（保险箱已开通格全满）、"
                       "箱内也没有多余的 10 面底卡")
             return 0
+        # ★★ 2026-11-05：缺的卡**全是可买底卡**、且两箱空位装不下时，禁止靠卖底卡腾位。
+        #   这种状态下卖掉的底卡正是集齐要用的（缺口清单本身），卖掉只会让缺口更大，
+        #   买回来又满 → 「卖一张买一张」无限空转（真机 4821992 实测）。
+        #   只拦「卖底卡」这一支：高面值杂卡移保险箱仍然放行，缺口含合成卡时也照常
+        #   腾位取卡（那种场景卖底卡能推进合成，不能一起拦，否则复现 11-04 死锁）。
+        _stock_now = self._stock_from(st)
+        no_sell = (self._base_only_short(_stock_now)
+                   and self._collect_need(_stock_now) > self._free2(st))
         # ★ 用 while + 每次重取候选：卖卡/移卡后**其他卡的 slot 会重排**，
         #   继续用旧 slot 会 -311（卡牌有变化）；且失败的那张要跳过、试下一张，
         #   不能每次都重扫 snapshot（保险箱满时会空转一串网络请求）。
@@ -2210,6 +2327,12 @@ class AutoRefine:
             nm = card_name(cid)
             done = False
             if face <= 10:
+                if no_sell:
+                    self._log_throttled(
+                        "no_sell_base", "腾位", False,
+                        f"{nm}（面{face}底卡）不卖：缺的卡全是可买底卡、两箱只"
+                        f"{self._free2(st)} 格，卖了会让缺口更大 —— 需清卡箱才能继续")
+                    break
                 # ★ 10 面值底卡：用户定调「未下架的 10 面值卡都买掉」——它们是炼卡
                 #   素材、用多少现场买多少，留着纯占格位，卖掉既腾格又回金币。
                 #   ★ 2026-10-26 用户重申：「不能用 10 面的卡占位，要卖掉再取卡向上合」。
@@ -2234,9 +2357,10 @@ class AutoRefine:
                     # ★ 2026-10-21 用户定调：高面值杂卡**不自动卖**（旧实现会卖掉当保底，
                     #   属越权；且 sell_card 只换回面值等额金币，高价值卡被折成零头）。
                     #   保险箱满 → 跳过这张，继续试下一张候选（可能还有底卡可卖）。
-                    self._log("腾位", False,
-                              f"{nm}（面{face}）移入保险箱失败（保险箱已满）——"
-                              f"高面值卡不自动卖，跳过")
+                    self._log_throttled(
+                        f"roomstore:{cid}", "腾位", False,
+                        f"{nm}（面{face}）移入保险箱失败（保险箱已满）——"
+                        f"高面值卡不自动卖，跳过")
             if done:
                 freed += 1
                 tried.clear()      # 状态变了，重新看全部候选
@@ -2250,10 +2374,11 @@ class AutoRefine:
             #   直接试下一张即可。
         if freed < need:
             # 腾不出位：如实说明原因（保险箱满 + 高面值卡不自动卖 → 只能靠清保险箱）
-            self._log("腾位不足", False,
-                      f"还需 {need - freed} 格｜候选 {n_cand0} 张 / 尝试 {guard} 次 / "
-                      f"腾出 {freed} 格。保险箱已满、高面值卡不自动卖，"
-                      f"只能卖 10 面值底卡 —— 请手动清理保险箱或换卡箱")
+            self._log_throttled(
+                "room_short", "腾位不足", False,
+                f"还需 {need - freed} 格｜候选 {n_cand0} 张 / 尝试 {guard} 次 / "
+                f"腾出 {freed} 格。保险箱已满、高面值卡不自动卖，"
+                f"只能卖 10 面值底卡 —— 请手动清理保险箱或换卡箱")
         return freed
 
     async def _prepare_turn(self, tid: int, target: int, st, stock, slots, pending,

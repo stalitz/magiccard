@@ -389,7 +389,10 @@ class DPTickController:
             sets = 1
             if sets_fn is not None:
                 try:
-                    sets = max(1, int(sets_fn(t, avail, pending, free_main)))
+                    # ★ 2026-11-05：允许 0 —— `_calc_sets` 的缺口闸在「两箱空位放不下
+                    #   还缺的卡」时返回 0，表示本轮不排炉次。旧 `max(1, ...)` 把 0 抬回
+                    #   1，闸门失效（真机超炼 4 张、箱位吃死就是这么来的）。
+                    sets = max(0, int(sets_fn(t, avail, pending, free_main)))
                 except Exception:      # noqa: BLE001  回调异常不拖死调度
                     sets = 1
             if max_rounds:
@@ -414,8 +417,8 @@ class DPTickController:
             #   轮次**且换卡箱不紧 → 现在就把下一环排进来。否则 ops 为空、执行层
             #   整 tick 零动作，而箱里的 40 面恰好就是下一套的料（可立即开炉）。
             #   只提一格（sets=2），不铺满：铺满会叠箱 → collect 不触发 → 死锁。
-            if (self.pipe_sets and left >= 2 and box_free >= self.pipe_min_free
-                    and sets < 2):
+            if (self.pipe_sets and sets > 0 and left >= 2
+                    and box_free >= self.pipe_min_free and sets < 2):
                 _nd = sum(n for c, n in runs.items() if not m.is_base(c))
                 if _nd <= 0:
                     sets = 2
