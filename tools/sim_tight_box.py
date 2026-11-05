@@ -98,6 +98,7 @@ class FakeWorld:
         self.sold: Counter = Counter()
         self.bought: Counter = Counter()
         self.moved: Counter = Counter()
+        self.parked: Counter = Counter()   # 保险箱 → 简易箱 的寄存次数
         self.took_lucky = 0            # 幸运事件触发次数（仿真里恒 0，留字段）
 
     # ---- 箱操作 ----
@@ -330,6 +331,27 @@ class FakeSession:
         w.simple.append({"id": hit["id"], "st": 2})
         w._norm()
         return {"ok": True, "message": "移动成功"}
+
+    async def get_simple_box(self):
+        w = self.w
+        return {"ok": True, "cur": w.sp_cap, "max": w.sp_cap,
+                "filled": len(w.simple), "expire_time": w.now + 20 * 86400,
+                "cards": [{"slot": c["slot"], "id": c["id"], "end_time": 0}
+                          for c in w.simple]}
+
+    async def to_simple_box(self, cid, store_slot):
+        """保险箱 → 简易箱（真机 card_user_temp_slot act=3 type=0）。"""
+        w = self.w
+        if w.sp_free() <= 0:
+            return {"ok": False, "code": -1, "message": "简易箱已满，无处寄存"}
+        hit = next((x for x in w.store if x["slot"] == int(store_slot)), None)
+        if hit is None or int(hit["id"]) != int(cid):
+            return {"ok": False, "code": -1, "message": "保险箱槽位不匹配"}
+        w.store.remove(hit)
+        w.simple.append({"id": hit["id"], "st": 2})
+        w._norm()
+        w.parked[int(cid)] += 1
+        return {"ok": True, "code": 0, "message": "已寄存到简易箱"}
 
     async def open_pai(self):
         return {"ok": True, "message": "", "raw": "", "items": []}

@@ -915,7 +915,12 @@ class AutoRefine:
             free = cur - int(getattr(self, "_box_used", 0) or 0)
             # 缺口闸：两箱合计空位（换卡箱 + 保险箱）够不够放下还没到手的那些张
             store_free = int(getattr(self, "_store_free", 0) or 0)
-            relief = max(0, free) + max(0, store_free)
+            # ★ 2026-11-05（B3）：保险箱满时还能把「用不上的」保险箱卡寄存到简易箱，
+            #   一张寄存 = 从保险箱腾 1 格给换卡箱的卡 → 等价于换卡箱多 1 格。
+            #   `_simple_free` 是本 tick 拉到的可寄存张数（`_refresh_simple`），
+            #   所以周转空间 = 两箱空位 + 可寄存数。
+            parkable = int(getattr(self, "_simple_free", 0) or 0)
+            relief = max(0, free) + max(0, store_free) + parkable
             need = sum(1 for c in plan.ids if stock.get(c, 0) < 1)
             # ★ 只有「收尾集齐态」才闸（2026-11-05 真机 3822843 误冻后补）：
             #   缺的卡必须**全部是商店底卡**（合成卡都在箱），这时缺口张数 = 必须
@@ -1172,6 +1177,8 @@ class AutoRefine:
         st = parse_full(raw0)
         # 换卡箱容量与占用（供 `_calc_sets` 用**空位**给并行套数封顶；0 = 未知则不封顶）
         self._refresh_caps(st)
+        # 简易箱可寄存张数（只在两箱紧时才多打这一次接口）——保险箱满时的周转空间
+        await self._refresh_simple(st)
         self.randchance = st.get("randchance", 0)
         # 跨 tick 差分：上一 tick 翻过牌 → 此刻的变化就是那些奖励的去向
         cur_fields = parse_state_fields(raw0)
@@ -1383,12 +1390,16 @@ class AutoRefine:
                 #   这种状态唯一的出路是**清卡箱**（挪走别主题卡 / 卖重复卡），
                 #   引擎能做的就是把「差几格、哪边满」报清楚，别再空转。
                 free2 = self._free2(st)
-                if len(miss_base) > free2:
+                # ★ 2026-11-05（B3）：保险箱满时还能靠「寄存简易箱」周转，
+                #   周转空间 = 两箱空位 + 可寄存张数（见 `_refresh_simple`）。
+                relief = free2 + int(getattr(self, "_simple_free", 0) or 0)
+                if len(miss_base) > relief:
                     self._log_throttled(
                         f"albumfull:{tid}", "买卡", False,
                         f"{plan.name} 还缺 {len(miss_base)} 张底卡，两箱只剩 {free2} 格"
-                        f"（换卡箱 {self._free_change(st)} / 保险箱 {self._store_free}）"
-                        f"→ 还差 {len(miss_base) - free2} 格，物理装不下，先别买；"
+                        f"（换卡箱 {self._free_change(st)} / 保险箱 {self._store_free} / "
+                        f"可寄存简易箱 {getattr(self, '_simple_free', 0)}）"
+                        f"→ 还差 {len(miss_base) - relief} 格，物理装不下，先别买；"
                         f"请清卡箱：把别主题卡移进保险箱、或处理掉套内重复卡")
                     continue
                 for cid in miss_base:
@@ -2103,6 +2114,52 @@ class AutoRefine:
         store_free = max(0, int(store.get("cur", 0)) - int(store.get("used", 0)))
         return self._free_change(st) + store_free
 
+    def _parkable_count(self, st: dict) -> int:
+        """保险箱里「可以寄存到简易箱」的卡张数（不在在炼套、不是集齐还要的）。
+
+        这些卡挪进简易箱不影响任何在炼/收尾的套 —— 只有这类卡才允许寄存。
+        """
+        stock = self._stock_from(st)
+        keep: set = set()
+        for t in self.queue:
+            p = self.plans.get(t)
+            if p:
+                keep |= set(p.ids)
+        n = 0
+        for c in (st.get("store") or []):
+            cid = int(c.get("id") or 0)
+            if cid <= 0 or cid in keep or self._recently_bought(cid):
+                continue
+            if self._is_collect_essential(cid, stock, self._pending):
+                continue
+            n += 1
+        return n
+
+    async def _refresh_simple(self, st: dict) -> None:
+        """本 tick 最多能把多少张保险箱卡寄存到简易箱（`_simple_free`）。
+
+        ★ 2026-11-05（B3 场景）：保险箱满、换卡箱也满时，唯一还能腾格的动作就是
+          「保险箱卡 → 简易箱」（真机只支持这两跳：换卡箱↔保险箱、保险箱↔简易箱）。
+          这一步的收益必须算进「物理装不下」的判定，否则闸门会在还有救的时候先停摆。
+
+        只在**两箱已经很紧**时才多打一次接口（正常滚动时 `_simple_free` 恒 0）。
+        读不到就退化成旧行为（当没有可寄存空间），绝不因为简易箱接口失败挡住主流程。
+        """
+        self._simple_free = 0
+        fn = getattr(self.s, "get_simple_box", None)
+        if fn is None:
+            return
+        if self._free2(st) >= max(1, self._collect_need(self._stock_from(st))):
+            return
+        try:
+            sb = await fn()
+        except Exception:       # noqa: BLE001  简易箱读不到就当没有
+            return
+        if not sb.get("ok"):
+            return
+        free = int(sb.get("cur") or 0) - int(sb.get("filled") or 0)
+        self._simple_free = max(0, min(free, self._parkable_count(st)))
+
     def _collect_tight(self, st: dict, stock: Counter) -> int:
         """★ 最高优先级规则（用户 2026-11-02 定调）
 
@@ -2276,6 +2333,65 @@ class AutoRefine:
         return tight > 0
 
     # ---------- 腾位（换卡箱满了买不进底卡时）★ 2026-10-03 用户定调 ----------
+    async def _park_one_to_simple(self, snap: dict, steps: list[dict]) -> bool:
+        """把一张**用不上的**保险箱卡寄存到简易箱，腾出 1 个保险箱格。
+
+        ★ 2026-11-05 用户定调（B3 场景）：
+          · 只做「保险箱 → 简易箱」这一跳，**不做自动搬回** —— 保险箱本来就放不下，
+            搬回去等于白挪；简易箱快到期他会自己用道具续期，没道具再另想办法。
+          · 因此候选必须严格筛：不是在炼套的卡、不是需求树还要的卡；
+            再按**面值从低到高**挑（真忘了续期，损失最小）。
+          · 高面值藏品不动 —— 用户 2026-10-21 定调「高面值卡永不自动处理」的延伸。
+
+        返回是否真的腾出了 1 格。`snap` = parse_full 结果（含 store 列表与 slot）。
+        """
+        cards = snap.get("store") or []
+        if not cards:
+            return False
+        stock = self._stock_from(snap)
+        keep: set = set()
+        for t in self.queue:
+            p = self.plans.get(t)
+            if p:
+                keep |= set(p.ids)
+        _all_cards = _maps()[0]
+
+        def _face(cid: int) -> int:
+            c = _all_cards.get(cid)
+            return int(c[3] or 0) if c else 0
+
+        cands = []
+        for c in cards:
+            cid = int(c.get("id") or 0)
+            slot = int(c.get("slot") or -1)
+            if cid <= 0 or slot < 0 or cid in keep:
+                continue
+            if self._is_collect_essential(cid, stock, self._pending):
+                continue
+            cands.append((_face(cid), cid, slot))
+        if not cands:
+            self._log_throttled("park_none", "腾位", False,
+                                "保险箱里没有可寄存的卡（全是在炼套/集齐要用的）—— 需清卡箱")
+            return False
+        cands.sort()
+        face, cid, slot = cands[0]
+        nm = card_name(cid)
+        fn = getattr(self.s, "to_simple_box", None)
+        if fn is None:
+            return False
+        r = await fn(cid, slot)
+        if r.get("ok"):
+            self._simple_free = max(0, int(getattr(self, "_simple_free", 0) or 0) - 1)
+            self._log("腾位", True,
+                      f"{nm}（面{face}）寄存到简易箱腾 1 格"
+                      f"（不自动搬回；简易箱到期前请续期）")
+            steps.append({"action": "腾位", "ok": True,
+                          "detail": f"{nm}（面{face}）寄存简易箱"})
+            return True
+        self._log_throttled(f"parkfail:{cid}", "腾位", False,
+                            f"{nm}（面{face}）寄存简易箱失败：{(r.get('message') or '')[:60]}")
+        return False
+
     async def _make_room(self, tid: int, need: int, st: dict, steps: list[dict],
                          running_themes: set | None = None) -> int:
         """换卡箱腾出至少 `need` 格，返回腾出的格数（不够/失败返回实际腾出数）。
@@ -2407,6 +2523,7 @@ class AutoRefine:
         #   继续用旧 slot 会 -311（卡牌有变化）；且失败的那张要跳过、试下一张，
         #   不能每次都重扫 snapshot（保险箱满时会空转一串网络请求）。
         freed = 0
+        parked = 0                  # 本 tick 已寄存到简易箱的张数（上限 = need）
         tried: set = set()          # 已试过且失败的 (cid, slot)，避免重复试同一张
         guard = 0
         while freed < need and guard < 60:
@@ -2448,10 +2565,23 @@ class AutoRefine:
                 else:
                     # ★ 2026-10-21 用户定调：高面值杂卡**不自动卖**（旧实现会卖掉当保底，
                     #   属越权；且 sell_card 只换回面值等额金币，高价值卡被折成零头）。
-                    #   保险箱满 → 跳过这张，继续试下一张候选（可能还有底卡可卖）。
+                    # ★★ 2026-11-05（B3 场景）：保险箱满时先试**寄存到简易箱** —— 挪一张
+                    #   用不上的保险箱卡去简易箱，保险箱立刻多 1 格，这张杂卡就能落位、
+                    #   换卡箱腾出 1 格。不做自动搬回（用户定调：保险箱本来就放不下）。
+                    #   每轮最多寄存 `need` 张，避免把简易箱一次吃光。
+                    if parked < need and await self._park_one_to_simple(snap, steps):
+                        parked += 1
+                        snap = await snapshot()
+                        if snap is None:
+                            self._log("腾位", False, "寄存后重读卡箱失败，中止本轮腾位")
+                            break
+                        tried.clear()      # 保险箱 slot 变了，候选要重取
+                        continue
+                    #   保险箱满且简易箱也没法寄存 → 跳过这张，继续试下一张候选
+                    #   （可能还有底卡可卖）。
                     self._log_throttled(
                         f"roomstore:{cid}", "腾位", False,
-                        f"{nm}（面{face}）移入保险箱失败（保险箱已满）——"
+                        f"{nm}（面{face}）移入保险箱失败（保险箱已满、简易箱也无处寄存）——"
                         f"高面值卡不自动卖，跳过")
             if done:
                 freed += 1

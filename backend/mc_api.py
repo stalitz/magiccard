@@ -584,6 +584,30 @@ class LoginSession:
             "raw": (r.get("raw") or "")[:300],
         }
 
+    async def to_simple_box(self, card_id: int, store_slot: int) -> dict:
+        """保险箱 → 简易箱（临时寄存）。
+
+        端点 `card_user_temp_slot`（act=3 / type=0，2026-10-17 用户 Charles 抓包验证；
+        该接口对 appid 敏感 → 走 `qzone_json`，不带 appid）。
+        `slot` = 该卡在**保险箱**里的序号。
+
+        ⚠️ 简易箱是临时箱，**到期会清空**（真机报文带 expire_time）。用户 2026-11-05
+        定调：快到期他会自己用道具续期，没道具再另想办法 —— 所以**不做自动搬回**
+        （保险箱本来就放不下，搬回等于白挪）。调用方必须只放「用不上」的卡，
+        并按面值从低到高选，万一没续期损失最小。
+        """
+        r = await self.qzone_json("card_user_temp_slot", act=3, type=0,
+                                 slot=store_slot, card_id=card_id)
+        code = r.get("code")
+        ok = code == 0
+        return {
+            "ok": ok,
+            "code": code,
+            "message": (r.get("message") or "").strip()
+                       or ("已寄存到简易箱" if ok else f"未知错误 code={code}"),
+            "raw": (r.get("raw") or "")[:200],
+        }
+
     async def auto_random_draw_and_sell(self, max_rounds: int = 30):
         """一键抽完所有随机抽卡次数，并自动卖掉 10 面额卡（SSE 流式）。
 
