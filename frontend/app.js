@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261106d";
+const APP_VER = "20261106e";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -127,13 +127,16 @@ function showBadge(o) {
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
-// 「面值」徽标：放列表第一行、紧跟套名，扫列表时一眼可见（2026-11-06 用户要求）。
-// pmin==pmax 时只写一个数，避免「面值 40~40」这种冗余。
-function faceBadge(o) {
+// 「张数 + 面值」徽标：放列表第一行、紧跟套名，扫列表时一眼可见（2026-11-06 用户要求）。
+// 两项合并成一个徽章，避免多占一个 gap 把第一行挤爆；pmin==pmax 时只写一个面值数。
+function specBadge(o) {
   const a = Number(o.pmin) || 0, b = Number(o.pmax) || 0;
-  if (!a && !b) return "";
+  const n = Number(o.n) || 0;
   const v = a === b ? `${a}` : `${a}~${b}`;
-  return `<span class="face" title="该套卡面值范围：${v}">面值 ${v}</span>`;
+  const face = (a || b) ? `面值 ${v}` : "";
+  const cnt = n ? `${n} 张` : "";
+  const txt = [cnt, face].filter(Boolean).join(" · ");
+  return txt ? `<span class="face" title="套卡规格：${txt}">${txt}</span>` : "";
 }
 
 // 「集齐奖励」徽标：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
@@ -3110,16 +3113,15 @@ async function runThemeQuery() {
         `<span class="tag ${g.cls}">${g.label}</span>` +
         `<span class="meta">${items.length} 套</span></div>`;
       html += items.map((t) => {
-        // ★ 2026-11-06 版式：面值是扫列表时要一眼看到的信息 → 放第一行、紧跟套名；
-        //   第一行强制单行、名称过长才省略（面值/徽章不会被挤到第二行），主题秀徽章挪到
+        // ★ 2026-11-06 版式：张数/面值是扫列表时要一眼看到的信息 → 合并成一个徽章放第一行、
+        //   紧跟套名；第一行强制单行、名称过长才省略（徽章不会被挤到第二行），主题秀徽章挪到
         //   第二行靠前处，避免 430px 窄栏把第一行尾部徽章直接裁掉。第二行 nowrap + 省略号，
-        //   条目恒为两行、不出现孤字行；完整文案（含面值/主题秀）在 title 与套卡详情里。
+        //   条目恒为两行、不出现孤字行；完整文案（含张数/面值/主题秀）在 title 与套卡详情里。
         const rw = rewardBadge(t);
         const subTxt = [
           rw,
           showBadge(t),
           `主题 #${t.tid}`,
-          `${t.n} 张`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join("　·　");
@@ -3131,7 +3133,7 @@ async function runThemeQuery() {
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join(" · ");
         return `<div class="it th" data-tid="${t.tid}">
-        <div class="r1"><span class="nm">${esc(t.name)}</span>${faceBadge(t)} ${stars(t.star)}
+        <div class="r1"><span class="nm">${esc(t.name)}</span>${specBadge(t)} ${stars(t.star)}
           ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}</div>
         <div class="sub sub1" title="${esc(subPlain)}">${subTxt}</div></div>`;
       }).join("");
