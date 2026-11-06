@@ -346,8 +346,13 @@
   .it .r1{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .it .nm{font-weight:600;font-size:13.5px}
   .it .sub{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.5}
-  /* 套卡列表第二行：张数/面值/日期/奖励全挤这一行，强制单行（超宽出省略号 + title 看全），
-     避免第一行过长折成三行、第三行只剩几个字。只作用于套卡行，卡片的「配方」行仍可换行。 */
+  /* 套卡行：第一行强制单行（名称过长才省略，面值/徽章不换行），第二行 nowrap + 省略号。
+     条目恒为 2 行，窄栏也不会折出「只剩几个字」的第三行。卡片列表行不受影响。 */
+  .it.th .r1{flex-wrap:nowrap;overflow:hidden}
+  .it.th .r1 > *{flex:none}
+  .it.th .r1 .nm{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .it.th .r1 .face{font-size:11.5px;font-weight:700;color:#0a6fb5;background:#eaf5ff;
+    border:1px solid #c9e4fa;border-radius:4px;padding:1px 6px;white-space:nowrap;cursor:help}
   .it .sub.sub1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   /* 集齐奖励（金币/经验）：放第二行开头，短写，完整文案在 title */
   .it .sub .rw{color:#b8740f;font-weight:700;white-space:nowrap;cursor:help}
@@ -1873,7 +1878,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261106c"></script>
+<script src="/app.js?v=20261106d"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

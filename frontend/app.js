@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261106c";
+const APP_VER = "20261106d";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -127,12 +127,21 @@ function showBadge(o) {
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
+// 「面值」徽标：放列表第一行、紧跟套名，扫列表时一眼可见（2026-11-06 用户要求）。
+// pmin==pmax 时只写一个数，避免「面值 40~40」这种冗余。
+function faceBadge(o) {
+  const a = Number(o.pmin) || 0, b = Number(o.pmax) || 0;
+  if (!a && !b) return "";
+  const v = a === b ? `${a}` : `${a}~${b}`;
+  return `<span class="face" title="该套卡面值范围：${v}">面值 ${v}</span>`;
+}
+
 // 「集齐奖励」徽标：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
 // ★ 2026-11-06 真机实证：交「时尚女套装」实测 user.money +100 / user.exp +200，
 //   与卡库 100/200 完全对上 → t[6]=金币、t[7]=经验（此前只把 t[6] 当金币用）。
 // ★ 2026-11-06 版式：原本这段写在列表第一行的 meta 里，加上后第一行过长、
 //   折成三行（第三行只剩几个字）。改为**放到第二行末尾**的短写「100金/200经」，
-//   完整文案放 title（悬停可看全称），第一行恢复成 名称+标签+张数/面值 两行版式。
+//   完整文案放 title（悬停可看全称），第一行留给 名称+面值+星级+标签，保持两行版式。
 function rewardBadge(o) {
   const g = o.gold | 0, e = o.exp | 0;
   if (!g && !e) return "";
@@ -3101,27 +3110,29 @@ async function runThemeQuery() {
         `<span class="tag ${g.cls}">${g.label}</span>` +
         `<span class="meta">${items.length} 套</span></div>`;
       html += items.map((t) => {
-        // ★ 2026-11-06 版式：第一行只留 名称+星级+标签徽章（原来还挂着「N 张 · 面值 a~b」，
-        //   加上奖励后整行超宽 → 折成三行、第三行只剩几个字）。张数/面值/奖励统一搬到
-        //   第二行，且该行 nowrap + 省略号：条目的行数永远是 2 行，窄栏也不会出现孤字行。
-        //   奖励放最前（最重要且不能被截掉），完整文案在 title 与套卡详情里。
+        // ★ 2026-11-06 版式：面值是扫列表时要一眼看到的信息 → 放第一行、紧跟套名；
+        //   第一行强制单行、名称过长才省略（面值/徽章不会被挤到第二行），主题秀徽章挪到
+        //   第二行靠前处，避免 430px 窄栏把第一行尾部徽章直接裁掉。第二行 nowrap + 省略号，
+        //   条目恒为两行、不出现孤字行；完整文案（含面值/主题秀）在 title 与套卡详情里。
         const rw = rewardBadge(t);
         const subTxt = [
           rw,
+          showBadge(t),
           `主题 #${t.tid}`,
-          `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
+          `${t.n} 张`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join("　·　");
         const subPlain = [
           rw ? `集齐 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验` : "",
+          t.show_total ? `主题秀 ${t.show | 0}/${t.show_total | 0}` : "主题秀 —",
           `主题 #${t.tid}`, `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join(" · ");
-        return `<div class="it" data-tid="${t.tid}">
-        <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
-          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}</div>
+        return `<div class="it th" data-tid="${t.tid}">
+        <div class="r1"><span class="nm">${esc(t.name)}</span>${faceBadge(t)} ${stars(t.star)}
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}</div>
         <div class="sub sub1" title="${esc(subPlain)}">${subTxt}</div></div>`;
       }).join("");
       html += `</div>`;
