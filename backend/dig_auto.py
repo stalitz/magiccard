@@ -86,7 +86,18 @@ _BUSY_CODES = {-1, -2, -3, -6}
 _last_req_ts = 0.0
 
 # 本轮遇到的「查不到名字」的奖励编号（给前端做「补名字」入口）
-_unknown: set = set()
+# ★ 2026-11-06：原来是一个全局 set，A 账号在挖地时查不到名字的编号会出现在
+#   B 账号的 state 里（`unknown` 字段），等于把别人的数据塞给这个账号。按账号分桶。
+_unknown: dict[str, set] = {}
+
+
+def _unk_set() -> set:
+    from .acct import acct_key
+    k = acct_key()
+    s = _unknown.get(k)
+    if s is None:
+        s = _unknown[k] = set()
+    return s
 
 
 def _note_unknown(t, i):
@@ -95,7 +106,7 @@ def _note_unknown(t, i):
     except (TypeError, ValueError):
         return
     if not iid.item_name(t, i):
-        _unknown.add(f"{t}_{i}")
+        _unk_set().add(f"{t}_{i}")
 
 
 async def _throttle():
@@ -330,7 +341,7 @@ def summarize_state(d: dict) -> dict:
         "pending_cnt": pending,
         "jd": _jd_view(d.get("jd_macs") or []),
         "bag": _bag_view(d),
-        "unknown": sorted(_unknown),
+        "unknown": sorted(_unk_set()),
     }
 
 

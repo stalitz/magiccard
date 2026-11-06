@@ -3621,7 +3621,7 @@ async def match_race_log(limit: int = 20):
     """最近 N 次出战记录（哪只猫 / 穿什么 / 哪场 / 得分 / 剩余次数）。"""
     if err := _require_login():
         return err
-    return {"ok": True, "items": mt.load_race_log(limit)}
+    return {"ok": True, "items": mt.load_race_log(limit, _session)}
 
 
 @app.get("/api/match/theme")
@@ -3644,7 +3644,7 @@ async def match_theme():
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": f"异常：{e}"}
     equip = st.get("equip") or {}
-    suggest = mt.best_equip(equip, theme) if theme else None
+    suggest = mt.best_equip(equip, theme, _session) if theme else None
     cats = []
     for c in (st.get("cats") or []):
         worn = c.get("equip") or []
@@ -3700,8 +3700,8 @@ async def match_lineup():
     return {
         "ok": True,
         "cats": st.get("cats"),
-        "suggest": mt.best_equip(st.get("equip") or {}),
-        "theme_arr": mt._load_theme_arr(),
+        "suggest": mt.best_equip(st.get("equip") or {}, session=_session),
+        "theme_arr": mt._load_theme_arr(_session),
     }
 
 

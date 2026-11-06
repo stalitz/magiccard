@@ -41,19 +41,27 @@ import asyncio
 _HOME_RUN_LOG = _Path(__file__).resolve().parent.parent / "data" / "home_run.json"
 
 
+def _run_log_path() -> _Path:
+    """步骤落盘文件 —— 按账号分文件（2026-11-06：原来是全局一份，两个账号的
+    运行历史互相顶掉，「某某没成功」时查到的是另一个号的记录）。"""
+    from .acct import acct_path
+    return acct_path(_HOME_RUN_LOG)
+
+
 def _save_run(tag: str, payload: dict) -> None:
-    """把最近一次自动流程的步骤写进 data/home_run.json（只留最近 20 次）。"""
+    """把最近一次自动流程的步骤写进 data/home_run.<uin>.json（只留最近 20 次）。"""
     try:
         hist = []
-        if _HOME_RUN_LOG.exists():
-            loaded = _json.loads(_HOME_RUN_LOG.read_text(encoding="utf-8"))
+        p = _run_log_path()
+        if p.exists():
+            loaded = _json.loads(p.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 hist = loaded
         row = dict(payload)
         row["tag"], row["ts"] = tag, _time.strftime("%F %T")
         hist.append(row)
-        _HOME_RUN_LOG.write_text(_json.dumps(hist[-20:], ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+        p.write_text(_json.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                     encoding="utf-8")
     except Exception:  # 落盘失败不影响主流程
         pass
 

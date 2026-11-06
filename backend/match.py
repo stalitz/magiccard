@@ -448,24 +448,35 @@ async def ensure_mood(session, threshold: int = MOOD_TARGET) -> dict:
     return await feed_smart(session, threshold)
 
 
-_RACE_LOG = "/tmp/mc_match_race.jsonl"  # 注意：本文件 _Path 在后面才 import
+_RACE_LOG = "/tmp/mc_match_race.__token__.jsonl"  # 注意：本文件 _Path 在后面才 import
+_RACE_LOG_TOKEN = "__token__"                     # 路径里的账号占位符
 
 
-def save_race_log(entry: dict) -> None:
+def _race_log_path(session=None) -> str:
+    """出战记录文件 —— 按账号分文件。
+
+    2026-11-06：原来是全局 `/tmp/mc_match_race.jsonl`，A 账号打完的记录会出现在
+    B 账号的「出战记录」面板里（`load_race_log` 读的是同一个文件）。
+    """
+    from .acct import acct_key
+    return _RACE_LOG.replace(_RACE_LOG_TOKEN, acct_key(session))
+
+
+def save_race_log(entry: dict, session=None) -> None:
     """追加一条出战记录（jsonl）。失败不影响主流程。"""
     try:
         entry = dict(entry)
         entry.setdefault("ts", _time.strftime("%Y-%m-%d %H:%M:%S"))
-        with open(_RACE_LOG, "a", encoding="utf-8") as f:
+        with open(_race_log_path(session), "a", encoding="utf-8") as f:
             f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001
         pass
 
 
-def load_race_log(limit: int = 20) -> list:
+def load_race_log(limit: int = 20, session=None) -> list:
     """最近 limit 条出战记录（新的在前）。"""
     try:
-        with open(_RACE_LOG, encoding="utf-8") as f:
+        with open(_race_log_path(session), encoding="utf-8") as f:
             lines = f.read().splitlines()
     except Exception:  # noqa: BLE001
         return []
@@ -534,7 +545,7 @@ async def competition_race(session, cat_id: int, equip_ids: list,
                 "message": r.get("message") or "比赛请求未返回数据"}
     # theme_attr 是「下一场」主题，只作参考缓存，不参与本场建议
     if "theme_attr" in d:
-        save_theme_attr(d.get("theme_attr"), d.get("theme_arr"))
+        save_theme_attr(d.get("theme_attr"), d.get("theme_arr"), session)
     d["race_id_used"] = int(race_id)
     d["equip_used"] = ids
     # 可读穿装（名字 / 属性加成 / 是否命中今日主题），供日志与出战记录展示。
@@ -555,7 +566,7 @@ async def competition_race(session, cat_id: int, equip_ids: list,
             "performe_num": d.get("performe_num"),
             "content": d.get("content"),
             "next_theme": d.get("theme_attr"),
-        })
+        }, session)
     return {"ok": True, "code": r.get("code"), "data": d}
 
 
@@ -594,7 +605,20 @@ import time as _time
 import itertools as _itertools
 from pathlib import Path as _Path
 
-_THEME_CACHE = _Path("/tmp/mc_match_theme.json")
+_THEME_CACHE_BASE = "/tmp/mc_match_theme.json"
+
+
+def _theme_cache(session=None) -> _Path:
+    """主题缓存文件路径 —— **按账号分文件**。
+
+    2026-11-06：原来是全局 `/tmp/mc_match_theme.json`，A 账号打完比赛写进自己的
+    主题权重，B 账号下一次算穿装直接读到 A 的主题（猫咪比赛主题每场独立随机），
+    等于用别人的题面答题。
+    """
+    from .acct import acct_path
+    return acct_path(_THEME_CACHE_BASE, session)
+
+
 _DRESS_TABLES = (
     "cat_home_dress_head_attr", "cat_home_dress_hand_attr",
     "cat_home_dress_clothing_attr", "cat_home_dress_other_attr",
@@ -624,20 +648,20 @@ async def competition_theme(session) -> dict:
               "name": attr_name(a.get("id"))} for a in rows if isinstance(a, dict)]
     # 实时主题顺手入缓存（lineup / 兜底逻辑可用）
     if theme:
-        save_theme_attr(rows)
+        save_theme_attr(rows, session=session)
     return {"ok": True, "code": r.get("code"), "theme": theme,
             "race_id": d.get("id")}
 
 
-def last_theme_attr() -> dict:
+def last_theme_attr(session=None) -> dict:
     """上一次实打比赛拿到的 theme_attr（打完才有，故取缓存）。"""
     try:
-        return _json.loads(_THEME_CACHE.read_text(encoding="utf-8")).get("theme_attr") or {}
+        return _json.loads(_theme_cache(session).read_text(encoding="utf-8")).get("theme_attr") or {}
     except Exception:  # noqa: BLE001
         return {}
 
 
-def save_theme_attr(theme: list, theme_arr: list = None) -> None:
+def save_theme_attr(theme: list, theme_arr: list = None, session=None) -> None:
     """act=4 / act=23 成功后回写主题，供下次比赛前算建议。"""
     try:
         payload = {"theme_attr": theme or []}
@@ -645,23 +669,23 @@ def save_theme_attr(theme: list, theme_arr: list = None) -> None:
             payload["theme_arr"] = theme_arr
         cur = {}
         try:
-            cur = _json.loads(_THEME_CACHE.read_text(encoding="utf-8"))
+            cur = _json.loads(_theme_cache(session).read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             pass
         cur.update(payload)
-        _THEME_CACHE.write_text(_json.dumps(cur, ensure_ascii=False), encoding="utf-8")
+        _theme_cache(session).write_text(_json.dumps(cur, ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
 
-def _load_theme_arr() -> dict:
+def _load_theme_arr(session=None) -> dict:
     """union act=23 返回的 12 项主题权重表（bisai2.har 实证：4/8/12 权重 14，其余 10）。
 
     这张表是「本场主题需求」的完整分布，比 competition act=4 的 theme_attr（只有 4 项加成量）
     更完整，优先用它算最优穿装。
     """
     try:
-        rows = _json.loads(_THEME_CACHE.read_text(encoding="utf-8")).get("theme_arr") or []
+        rows = _json.loads(_theme_cache(session).read_text(encoding="utf-8")).get("theme_arr") or []
     except Exception:  # noqa: BLE001
         return {}
     if isinstance(rows, list):
@@ -669,7 +693,7 @@ def _load_theme_arr() -> dict:
     return rows or {}
 
 
-def best_equip(equip: dict, theme=None) -> dict:
+def best_equip(equip: dict, theme=None, session=None) -> dict:
     """穷举「头/手/衣/各 一件」，按今日主题百分比给出最优组合（只读，不发请求）。
 
     theme 权威来源 = competition act=2 的 attr（[{id,value}]，value 合计 100，
@@ -680,7 +704,7 @@ def best_equip(equip: dict, theme=None) -> dict:
     与每日比赛主题无关，不再优先使用（2026-09-26 修正上一版的错误优先级）。
     """
     if theme is None:
-        theme = last_theme_attr()
+        theme = last_theme_attr(session)
     if isinstance(theme, list):
         theme = {a.get("id"): a.get("val", a.get("value", 0)) for a in theme if isinstance(a, dict)}
     if not theme:
@@ -803,7 +827,7 @@ async def run_match_all(session, max_races: int = 0, stop_mood: int = 80):
             race_id = int(th_next["race_id"])
             theme = {a["id"]: a["value"] for a in (th_next.get("theme") or [])}
             theme_rows = th_next.get("theme") or []
-        sug = best_equip(equip, theme) if theme else {}
+        sug = best_equip(equip, theme, session) if theme else {}
         ids = (sug.get("equip_ids") or [])
         if len(ids) != 4:
             yield {"act": "race", "no": n + 1, "err": "算不出 4 件最优装，停止"}
@@ -1085,7 +1109,7 @@ async def union_shake_fruit(session, reset_first: bool = True) -> dict:
     `reset_first=True`（默认）：摇之前先重置一次（act=16，用户定调「每次摇水果前
     还有一次重置，有机会把 3 连刷成 4 连拉高奖励」），重置失败不阻断摇。
     """
-    q = _union_quota_check("shake", SHAKE_DAILY_LIMIT)
+    q = _union_quota_check("shake", SHAKE_DAILY_LIMIT, session)
     if q.get("blocked"):
         return q
     rst = await union_fruit_reset(session) if reset_first else None
@@ -1096,7 +1120,7 @@ async def union_shake_fruit(session, reset_first: bool = True) -> dict:
             r["text"] = summarize_reward(str((r.get("data") or {}).get("content") or ""))
         except Exception:  # 取不到就留原始串，不阻断
             pass
-        used = _union_quota_bump("shake").get("shake")
+        used = _union_quota_bump("shake", session).get("shake")
         r["used"] = used
         r["limit"] = SHAKE_DAILY_LIMIT
         r["fruits"] = (rst or {}).get("fruits")
@@ -1126,7 +1150,7 @@ async def run_union_shake(session) -> dict:
     rounds = []
     last_max = 0  # 上一轮重置后的最大相同数（5 连则跳过本轮重置）
     for i in range(SHAKE_DAILY_LIMIT):
-        q = _union_quota_check("shake", SHAKE_DAILY_LIMIT)
+        q = _union_quota_check("shake", SHAKE_DAILY_LIMIT, session)
         if q.get("blocked"):
             rounds.append({"round": i + 1, "reset_ok": None, "reset_fruits": None,
                            "reset_skipped": None, "start_ok": False,
@@ -1166,13 +1190,13 @@ async def union_exchange_redstone(session, optype: int = 4, uptype: int = 1) -> 
     游戏内手动兑感知不到）。响应返 coin(工会资金+2/+5)/exp —— 兑换副产品展示，
     uptype 与商店商品 id 的对应关系语义未证实。
     """
-    q = _union_quota_check("exchange", EXCHANGE_DAILY_LIMIT)
+    q = _union_quota_check("exchange", EXCHANGE_DAILY_LIMIT, session)
     if q.get("blocked"):
         return q
     r = await _act(session, EP_TRAVEL_UNION, 21, optype=int(optype), uptype=int(uptype))
     d = (r.get("data") or {}) if r.get("ok") else {}
     if r.get("ok"):
-        used = _union_quota_bump("exchange").get("exchange")
+        used = _union_quota_bump("exchange", session).get("exchange")
         return {"ok": True, "code": 0, "used": used, "limit": EXCHANGE_DAILY_LIMIT,
                 "coin": d.get("coin"), "exp": d.get("exp"),
                 "text": f"商店兑换成功（工会资金 → {d.get('coin')}，今日 {used}/{EXCHANGE_DAILY_LIMIT}，本周库存省着用）"}
@@ -1295,7 +1319,7 @@ async def union_battle(session, feed: bool = True) -> dict:
     ⚠ 每日本地硬闸 BATTLE_DAILY_LIMIT=3：超限直接不发请求（不喂猫、不读阵容），
     避免替用户烧当日挑战机会。
     """
-    q = _union_quota_check("battle", BATTLE_DAILY_LIMIT)
+    q = _union_quota_check("battle", BATTLE_DAILY_LIMIT, session)
     if q.get("blocked"):
         return q
     if feed:
@@ -1324,12 +1348,12 @@ async def union_battle(session, feed: bool = True) -> dict:
     ba = (d.get("battle_data") or {}).get("attack_accounts") or {}
     win = ba.get("iswin")
     if r.get("code") in (0, None) and win == 1:
-        used = _union_quota_bump("battle").get("battle")
+        used = _union_quota_bump("battle", session).get("battle")
         return {"ok": True, "code": 0, "win": True, "score": ba.get("total_score"),
                 "used": used, "limit": BATTLE_DAILY_LIMIT,
                 "text": f"公会战出战胜利（总分 {ba.get('total_score')}，今日 {used}/{BATTLE_DAILY_LIMIT}）"}
     if r.get("code") in (0, None):
-        used = _union_quota_bump("battle").get("battle")
+        used = _union_quota_bump("battle", session).get("battle")
         return {"ok": True, "code": 0, "win": False, "score": ba.get("total_score"),
                 "used": used, "limit": BATTLE_DAILY_LIMIT,
                 "text": f"公会战出战结束（iswin={win}，总分 {ba.get('total_score')}，今日 {used}/{BATTLE_DAILY_LIMIT}）"}
@@ -1388,6 +1412,17 @@ from pathlib import Path as _upath                       # noqa: E402
 _UNION_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "union_run.json"
 _UNION_QUOTA_FILE = _upath(__file__).resolve().parent.parent / "data" / "union_quota.json"
 
+
+def _union_quota_path(session=None) -> _upath:
+    """每日限次计数文件 —— **按账号分文件**。
+
+    2026-11-06：原来是全局 `data/union_quota.json`，摇水果/公会战/商店兑换的
+    「今日已做 N 次」是全账号共享的。A 账号摇满 3 次之后，B 账号点「一键工会」
+    会被本地闸直接拦下、一次请求都不发（和送礼额度是同一类串号 bug）。
+    """
+    from .acct import acct_path
+    return acct_path(_UNION_QUOTA_FILE, session)
+
 # 每日限次硬闸（本地计数，只统计本工具发起的请求；游戏内手动操作无法感知）：
 # - 摇水果 act=17：每日 3 次（服务端第 4 次 busy 拒绝，双保险）。
 # - 公会战出战 act=23：3/3 次数（用户实证）。
@@ -1399,11 +1434,11 @@ BATTLE_DAILY_LIMIT = 3
 EXCHANGE_DAILY_LIMIT = 1
 
 
-def _union_quota_today() -> dict:
+def _union_quota_today(session=None) -> dict:
     """读当日工会限次计数（跨日自动清零），形如 {"date":"2026-09-29","shake":1,"battle":0}。"""
     today = _utime.strftime("%F")
     try:
-        d = _ujson.loads(_UNION_QUOTA_FILE.read_text(encoding="utf-8"))
+        d = _ujson.loads(_union_quota_path(session).read_text(encoding="utf-8"))
         if isinstance(d, dict) and d.get("date") == today:
             return {"date": today, "shake": int(d.get("shake", 0)),
                     "battle": int(d.get("battle", 0)),
@@ -1413,19 +1448,19 @@ def _union_quota_today() -> dict:
     return {"date": today, "shake": 0, "battle": 0, "exchange": 0}
 
 
-def _union_quota_bump(kind: str) -> dict:
-    d = _union_quota_today()
+def _union_quota_bump(kind: str, session=None) -> dict:
+    d = _union_quota_today(session)
     d[kind] = int(d.get(kind, 0)) + 1
     try:
-        _UNION_QUOTA_FILE.write_text(_ujson.dumps(d, ensure_ascii=False), encoding="utf-8")
+        _union_quota_path(session).write_text(_ujson.dumps(d, ensure_ascii=False), encoding="utf-8")
     except Exception:  # 落盘失败不影响主流程
         pass
     return d
 
 
-def _union_quota_check(kind: str, limit: int) -> dict:
+def _union_quota_check(kind: str, limit: int, session=None) -> dict:
     """超限返回 {"blocked":True,...}（调用方直接 return，不发请求）；未超限返回当日计数。"""
-    d = _union_quota_today()
+    d = _union_quota_today(session)
     used = int(d.get(kind, 0))
     if used >= limit:
         name = {"shake": "摇水果", "battle": "公会战出战",
@@ -1437,18 +1472,23 @@ def _union_quota_check(kind: str, limit: int) -> dict:
 
 
 def _save_union_run(payload: dict) -> None:
-    """把最近一次「一键工会 / 工会动作」写进 data/union_run.json（只留最近 20 次）。"""
+    """把最近一次「一键工会 / 工会动作」写进 data/union_run.<uin>.json（只留最近 20 次）。
+
+    2026-11-06：按账号分文件，两个号的运行历史不再互相顶掉。
+    """
     try:
+        from .acct import acct_path
+        p = acct_path(_UNION_RUN_LOG)
         hist = []
-        if _UNION_RUN_LOG.exists():
-            loaded = _ujson.loads(_UNION_RUN_LOG.read_text(encoding="utf-8"))
+        if p.exists():
+            loaded = _ujson.loads(p.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 hist = loaded
         row = dict(payload)
         row["ts"] = _utime.strftime("%F %T")
         hist.append(row)
-        _UNION_RUN_LOG.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
-                                  encoding="utf-8")
+        p.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                     encoding="utf-8")
     except Exception:  # 落盘失败不影响主流程
         pass
 
@@ -2221,18 +2261,23 @@ _SGUO_RUN_LOG = _upath(__file__).resolve().parent.parent / "data" / "sanguo_raid
 
 
 def _save_sanguo_raid(payload: dict) -> None:
-    """把最近一次「三国一键出战」写进 data/sanguo_raid.json（只留最近 20 次）。"""
+    """把最近一次「三国一键出战」写进 data/sanguo_raid.<uin>.json（只留最近 20 次）。
+
+    2026-11-06：按账号分文件，两个号的运行历史不再互相顶掉。
+    """
     try:
+        from .acct import acct_path
+        p = acct_path(_SGUO_RUN_LOG)
         hist = []
-        if _SGUO_RUN_LOG.exists():
-            loaded = _ujson.loads(_SGUO_RUN_LOG.read_text(encoding="utf-8"))
+        if p.exists():
+            loaded = _ujson.loads(p.read_text(encoding="utf-8"))
             if isinstance(loaded, list):
                 hist = loaded
         row = dict(payload)
         row["ts"] = _utime.strftime("%F %T")
         hist.append(row)
-        _SGUO_RUN_LOG.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+        p.write_text(_ujson.dumps(hist[-20:], ensure_ascii=False, indent=1),
+                     encoding="utf-8")
     except Exception:  # 落盘失败不影响主流程
         pass
 

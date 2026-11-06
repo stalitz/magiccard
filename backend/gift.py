@@ -88,13 +88,21 @@ _QZ_REFERRER = "https://appimg2.qq.com/card/index.htm?appid=365&page=receive"
 
 # 每日送礼额度本地计数器（与游戏内 50 次/天上限对账；游戏内手动送的不计入本计数，
 # 但 freegift_get_frds 在额度用尽后返回空列表，工具会如实报「无可送」）。
-_DAILY_PATH = os.path.join("/tmp", "mc_gift_daily.json")
+# ★ 2026-11-06：原来是 `/tmp/mc_gift_daily.json` 单个文件，多账号共用一个计数 ——
+#   A 账号送满 50 人后，B 账号点「一键日常」直接被本地闸拦住（一次请求都不发），
+#   用户实测「一个账号送了另一个就不能送」。改为按账号（uin）分文件。
+_DAILY_BASE = os.path.join("/tmp", "mc_gift_daily.json")
 
 
-def _load_daily() -> dict:
+def _daily_path(session=None) -> str:
+    from .acct import acct_path
+    return str(acct_path(_DAILY_BASE, session))
+
+
+def _load_daily(session=None) -> dict:
     today = time.strftime("%Y-%m-%d")
     try:
-        with open(_DAILY_PATH) as f:
+        with open(_daily_path(session)) as f:
             d = json.load(f)
         if d.get("date") != today:
             return {"date": today, "sent": 0}
@@ -103,17 +111,17 @@ def _load_daily() -> dict:
         return {"date": today, "sent": 0}
 
 
-def _save_daily(d: dict) -> None:
+def _save_daily(d: dict, session=None) -> None:
     try:
-        with open(_DAILY_PATH, "w") as f:
+        with open(_daily_path(session), "w") as f:
             json.dump(d, f)
     except Exception:
         pass
 
 
-def gift_daily_remaining() -> int:
-    """返回今天还能通过本工具送的人数（DAILY_CAP - 今天已送）。"""
-    return max(0, DAILY_CAP - _load_daily().get("sent", 0))
+def gift_daily_remaining(session=None) -> int:
+    """返回今天还能通过本工具送的人数（DAILY_CAP - 今天已送）。按账号计。"""
+    return max(0, DAILY_CAP - _load_daily(session).get("sent", 0))
 
 # 变卡成功判定：code=0 且原始响应带 result="1"（见 HAR 两次成功样本）。
 # 50% 失败时服务端多半返回 code!=0 或其他 result 值 —— 一律当失败，记录后继续。

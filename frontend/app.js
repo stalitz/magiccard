@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261104d";
+const APP_VER = "20261106a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -349,6 +349,7 @@ function showDash(uin) {
   $("top-user").textContent = uin ? `QQ ${uin}` : "";
   logHistory();  // 登录后先恢复历史操作日志（刷新/重开仍在）
   log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
+  initFriendPoolPref();  // 此时 token 才落 sessionStorage —— 按账号重读一次偏好
   switchPane("overview");
   loadState();
   if (stateTimer) clearInterval(stateTimer);
@@ -4409,20 +4410,26 @@ async function unionChallenge() {
   return r;
 }
 
-// 公会战：本工具今日已发起出战次数（纯展示，localStorage 按日期跟踪）
+// 公会战：本工具今日已发起出战次数（纯展示，localStorage 按日期 + 账号跟踪）
 // 服务端任何已抓包（union act=1/15/22/25/27）都没有「3/3 剩余次数」字段，不臆造服务端剩余量；
 // 点「公会战出战」成功即 +1，真实剩余以游戏内为准。
+// ★ 2026-11-06：key 必须带账号 —— localStorage 是**整个浏览器共享**的（sessionStorage
+//   才是按标签页隔离），不带账号时两个号在两个标签页里会互相加数，显示的是两号之和。
+function gvgDayKey() {
+  let t = "";
+  try { t = sessionStorage.getItem("mc_token") || ""; } catch (e) {}
+  return "mc_gvg_challenge_" + (t ? t.slice(0, 8) + "_" : "")
+         + new Date().toISOString().slice(0, 10);
+}
 function gvgChallengeUsedToday() {
   try {
-    const k = "mc_gvg_challenge_" + new Date().toISOString().slice(0, 10);
-    return parseInt(localStorage.getItem(k) || "0", 10) || 0;
+    return parseInt(localStorage.getItem(gvgDayKey()) || "0", 10) || 0;
   } catch (e) { return 0; }
 }
 function gvgChallengeInc() {
   try {
-    const k = "mc_gvg_challenge_" + new Date().toISOString().slice(0, 10);
     const n = gvgChallengeUsedToday() + 1;
-    localStorage.setItem(k, String(n));
+    localStorage.setItem(gvgDayKey(), String(n));
   } catch (e) {}
 }
 function renderGvgFightCnt() {
@@ -6025,20 +6032,38 @@ async function lotPaiOnce() {
 }
 
 // ---------- 换卡「好友池」开关（默认开，选择持久化） ----------
-const FRIEND_POOL_KEY = "mc.friendPool";
+const FRIEND_POOL_KEY = "mc.friendPool";   // 旧 key（不带账号），仅用于一次性迁移
+// ★ 2026-11-06：偏好也要按账号 —— localStorage 整个浏览器共享，两个号共用一个开关，
+//   A 关了「全服玩家池」，B 打开页面也变成关的。
+function friendPoolKey() {
+  let t = "";
+  try { t = sessionStorage.getItem("mc_token") || ""; } catch (e) {}
+  return FRIEND_POOL_KEY + (t ? "." + t.slice(0, 8) : "");
+}
 
 function initFriendPoolPref() {
   const cb = $("ex-all-players");
   if (!cb) return;
   let on = true; // 默认开启：好友名单里含自己的小号，是有效换卡对象
   try {
-    const v = localStorage.getItem(FRIEND_POOL_KEY);
+    const v = localStorage.getItem(friendPoolKey());
     if (v !== null) on = v === "1";
+    else {
+      // 首次用新 key：继承旧的无账号 key（用户之前选的偏好不丢），然后迁移后再删旧 key
+      const old = localStorage.getItem(FRIEND_POOL_KEY);
+      if (old !== null) {
+        on = old === "1";
+        localStorage.setItem(friendPoolKey(), old);
+        localStorage.removeItem(FRIEND_POOL_KEY);
+      }
+    }
   } catch {}
   cb.checked = on;
-  cb.addEventListener("change", () => {
-    try { localStorage.setItem(FRIEND_POOL_KEY, cb.checked ? "1" : "0"); } catch {}
-  });
+  // 用 onchange 而不是 addEventListener：本函数会在登录成功后重跑一次（那时才有
+  // token，才能读到本账号的偏好），避免监听器重复叠加。
+  cb.onchange = () => {
+    try { localStorage.setItem(friendPoolKey(), cb.checked ? "1" : "0"); } catch {}
+  };
 }
 
 (async () => {

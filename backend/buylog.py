@@ -26,5 +26,16 @@ if not _logger.handlers:
 
 def log_buy(caller: str, cid: int, tid: int, code=None, ok: bool = False,
             note: str = "") -> None:
-    """记录一次买卡尝试。caller 标明来源（card_buy / zcg._buy_ten_face / engine）。"""
-    _logger.info(f"BUY | caller={caller} cid={cid} tid={tid} code={code} ok={ok} {note}")
+    """记录一次买卡尝试。caller 标明来源（card_buy / zcg._buy_ten_face / engine）。
+
+    ★ 2026-11-06：行首补 `uin=` —— 日志文件是共用的（logging handler 在 import 时
+      就固定了路径），多账号写同一份。没有 uin 时排查「箱里凭空多一张卡」根本分不清
+      是哪个号买的。日志共用可接受，**分不清才不可接受**。
+    """
+    try:
+        from .acct import acct_key
+        who = acct_key()
+    except Exception:  # noqa: BLE001
+        who = "?"
+    _logger.info(f"BUY | uin={who} caller={caller} cid={cid} tid={tid} "
+                 f"code={code} ok={ok} {note}")

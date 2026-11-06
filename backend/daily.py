@@ -47,7 +47,7 @@ async def _daily_send_gift(session):
     额度用尽或列表空如实回报。
     """
     card_name = _gift.FREEGIFT_NAME.get(_gift.FREEGIFT_ID_48, "48面卡")
-    remaining = _gift.gift_daily_remaining()
+    remaining = _gift.gift_daily_remaining(session)
     if remaining <= 0:
         yield {"ok": False, "code": -2,
                "text": f"今日送礼额度已用完（{_gift.DAILY_CAP}/{_gift.DAILY_CAP}），明天再送",
@@ -64,10 +64,10 @@ async def _daily_send_gift(session):
         failed = s.get("failed", 0)
         sent_list = s.get("sent_list") or []
         if sent > 0:
-            d = _gift._load_daily()
+            d = _gift._load_daily(session)
             d["sent"] = d.get("sent", 0) + sent
-            _gift._save_daily(d)
-            left = _gift.gift_daily_remaining()
+            _gift._save_daily(d, session)
+            left = _gift.gift_daily_remaining(session)
             yield {"ok": True, "code": 0,
                    "text": f"送礼【{card_name}·48面】成功 {sent} 人（按等级从高到低，今日 "
                            f"{_gift.DAILY_CAP - left}/{_gift.DAILY_CAP}）"
