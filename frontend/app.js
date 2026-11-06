@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261106b";
+const APP_VER = "20261106c";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -127,13 +127,20 @@ function showBadge(o) {
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
 }
 
-// 「集齐奖励」文字：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
+// 「集齐奖励」徽标：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
 // ★ 2026-11-06 真机实证：交「时尚女套装」实测 user.money +100 / user.exp +200，
 //   与卡库 100/200 完全对上 → t[6]=金币、t[7]=经验（此前只把 t[6] 当金币用）。
-function rewardTxt(o) {
+// ★ 2026-11-06 版式：原本这段写在列表第一行的 meta 里，加上后第一行过长、
+//   折成三行（第三行只剩几个字）。改为**放到第二行末尾**的短写「100金/200经」，
+//   完整文案放 title（悬停可看全称），第一行恢复成 名称+标签+张数/面值 两行版式。
+function rewardBadge(o) {
   const g = o.gold | 0, e = o.exp | 0;
-  if (!g && !e) return " · 集齐奖励 —";
-  return ` · 集齐 ${g.toLocaleString()} 金币 / ${e.toLocaleString()} 经验`;
+  if (!g && !e) return "";
+  const full = `集齐一套：${g.toLocaleString()} 金币 / ${e.toLocaleString()} 经验`;
+  const short = g === e
+    ? `集齐 ${g.toLocaleString()} 金币+经验`
+    : `集齐 ${g.toLocaleString()}金/${e.toLocaleString()}经`;
+  return `<span class="rw" title="${full}">${short}</span>`;
 }
 
 // ---------- 操作日志（落盘到服务器，按账号隔离：刷新/重开/换标签都在） ----------
@@ -3072,8 +3079,8 @@ async function runThemeQuery() {
     $("lst-title").textContent = "浏览套卡";
     $("lst-cnt").textContent = `${d.shown} / ${d.total} 套`;
     $("lst-foot").textContent = isMain
-      ? "按 发行/下架/闪卡 分组，组内按新上架排序；点套卡看明细与合成路径。「集齐 N 金币 / N 经验」= 上交一套的奖励（卡库 theme 第 7/8 项，2026-11-06 真机实测）。"
-      : "独立卡册（不在主卡箱显示），按新上架排序；点套卡看明细与合成路径。「集齐 N 金币 / N 经验」= 上交一套的奖励。";
+      ? "按 发行/下架/闪卡 分组，组内按新上架排序；点套卡看明细与合成路径。「集齐 N金/M经」= 上交一套得 N 金币 + M 经验（卡库第 7/8 项，2026-11-06 真机实测）。"
+      : "独立卡册（不在主卡箱显示），按新上架排序；点套卡看明细与合成路径。「集齐 N金/M经」= 上交一套得 N 金币 + M 经验。";
     if (!d.themes.length) {
       $("lib-list").innerHTML = '<div class="empty-tip">没有匹配的套卡，换个关键词/星级。</div>';
       return;
@@ -3094,10 +3101,28 @@ async function runThemeQuery() {
         `<span class="tag ${g.cls}">${g.label}</span>` +
         `<span class="meta">${items.length} 套</span></div>`;
       html += items.map((t) => {
+        // ★ 2026-11-06 版式：第一行只留 名称+星级+标签徽章（原来还挂着「N 张 · 面值 a~b」，
+        //   加上奖励后整行超宽 → 折成三行、第三行只剩几个字）。张数/面值/奖励统一搬到
+        //   第二行，且该行 nowrap + 省略号：条目的行数永远是 2 行，窄栏也不会出现孤字行。
+        //   奖励放最前（最重要且不能被截掉），完整文案在 title 与套卡详情里。
+        const rw = rewardBadge(t);
+        const subTxt = [
+          rw,
+          `主题 #${t.tid}`,
+          `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
+          `发行 ${fmtDate(t.publish)}`,
+          t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
+        ].filter(Boolean).join("　·　");
+        const subPlain = [
+          rw ? `集齐 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验` : "",
+          `主题 #${t.tid}`, `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
+          `发行 ${fmtDate(t.publish)}`,
+          t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
+        ].filter(Boolean).join(" · ");
         return `<div class="it" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
-          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}${rewardTxt(t)}</span></div>
-        <div class="sub">主题 #${t.tid}　·　发行 ${fmtDate(t.publish)}　·　${t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集"}</div></div>`;
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}</div>
+        <div class="sub sub1" title="${esc(subPlain)}">${subTxt}</div></div>`;
       }).join("");
       html += `</div>`;
     }
