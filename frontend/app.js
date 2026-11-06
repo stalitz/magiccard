@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261106e";
+const APP_VER = "20261107a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -3114,13 +3114,14 @@ async function runThemeQuery() {
         `<span class="meta">${items.length} 套</span></div>`;
       html += items.map((t) => {
         // ★ 2026-11-06 版式：张数/面值是扫列表时要一眼看到的信息 → 合并成一个徽章放第一行、
-        //   紧跟套名；第一行强制单行、名称过长才省略（徽章不会被挤到第二行），主题秀徽章挪到
-        //   第二行靠前处，避免 430px 窄栏把第一行尾部徽章直接裁掉。第二行 nowrap + 省略号，
+        //   紧跟套名；第一行强制单行、名称不参与收缩（超长名最多 45% 并省略），主题秀/已炼套数
+        //   徽章挪到第二行靠前处，避免窄栏把第一行尾部徽章裁掉。第二行 nowrap + 省略号，
         //   条目恒为两行、不出现孤字行；完整文案（含张数/面值/主题秀）在 title 与套卡详情里。
         const rw = rewardBadge(t);
         const subTxt = [
           rw,
           showBadge(t),
+          setsBadge(t),
           `主题 #${t.tid}`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
@@ -3128,13 +3129,14 @@ async function runThemeQuery() {
         const subPlain = [
           rw ? `集齐 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验` : "",
           t.show_total ? `主题秀 ${t.show | 0}/${t.show_total | 0}` : "主题秀 —",
+          t.sets > 0 ? `已炼 ${t.sets} 套` : ((!t.module || t.module === "") && t.kind !== "绝版" && t.kind !== "特殊" ? "未炼" : "非集卡册套"),
           `主题 #${t.tid}`, `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join(" · ");
         return `<div class="it th" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span>${specBadge(t)} ${stars(t.star)}
-          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}</div>
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}</div>
         <div class="sub sub1" title="${esc(subPlain)}">${subTxt}</div></div>`;
       }).join("");
       html += `</div>`;

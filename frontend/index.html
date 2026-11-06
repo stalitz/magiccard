@@ -132,7 +132,10 @@
   .btn.danger:hover{background:#c0392b}
   .btn.ok{background:var(--ok);color:#fff}
   .btn.ok:hover{background:#157a48}
-  .sel{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13.5px;
+  /* ★ 2026-11-07 修：原先是通用 `.sel`，会同时命中列表项/tchip 的「选中态」class="sel"
+     → 选中行被 max-width:340px 压短、第一行徽章挤爆、套名被省略到 0 宽（用户实测报障）。
+     静态用法全是 <select class="sel">，故限定为 select.sel，选中态只由 .it.sel/.tchip.sel 接管。 */
+  select.sel{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13.5px;
     background:#fff;color:var(--text);outline:none;max-width:340px}
   .num-in{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13.5px;
     width:90px;outline:none}
@@ -348,9 +351,11 @@
   .it .sub{font-size:12px;color:var(--muted);margin-top:3px;line-height:1.5}
   /* 套卡行：第一行强制单行（名称过长才省略，张数+面值徽章/徽章不换行），第二行 nowrap + 省略号。
      条目恒为 2 行，窄栏也不会折出「只剩几个字」的第三行。卡片列表行不受影响。 */
-  .it.th .r1{flex-wrap:nowrap;overflow:hidden;gap:6px}
+  .it.th .r1{flex-wrap:nowrap;overflow:hidden;gap:5px}
   .it.th .r1 > *{flex:none}
-  .it.th .r1 .nm{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 名称按内容宽、不参与收缩（短名不浪费空间），超长名最多占首行 45% 并省略；
+     极端长名+多徽章时宁可裁尾部徽章，也不能把名字压到 0 宽 */
+  .it.th .r1 .nm{flex:0 0 auto;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .it.th .r1 .face{font-size:11.5px;font-weight:700;color:#0a6fb5;background:#eaf5ff;
     border:1px solid #c9e4fa;border-radius:4px;padding:1px 6px;white-space:nowrap;cursor:help}
   .it .sub.sub1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1878,7 +1883,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261106e"></script>
+<script src="/app.js?v=20261107a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
