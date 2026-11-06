@@ -351,7 +351,12 @@ class ThemePlan:
         self.comp = comp
         self.name = str(t[1]).strip()
         self.star = int(t[2] or 0)
-        self.prize = int(t[6] or 0)
+        # ★ 集齐奖励（2026-11-06 真机实证：交「时尚女套装」实测 money +100 / exp +200，
+        #   与卡库 t[6]/t[7] 对上）——t[6] = 金币、t[7] = 经验。`prize` 保留为金币别名，
+        #   老调用点（面板/经济测算）不用改。
+        self.gold = int(t[6] or 0)
+        self.exp = int(t[7] or 0)
+        self.prize = self.gold
         self.ids = [int(x) for x in (t[11] or []) if x]
         gifts = str(t[9] or "").split("|")
         self.gifts = [g.strip() for g in gifts if g.strip()]  # t[9] 全量 qq秀 giftid
@@ -472,6 +477,7 @@ class ThemePlan:
         return {
             "tid": self.tid, "name": self.name, "star": self.star,
             "prize": self.prize, "giftid": self.giftid,
+            "gold": self.gold, "exp": self.exp,
             "ok": ok,                      # 底卡是否全为商店面值10
             "cards": len(self.ids),
             "recipes": sum(runs.values()),  # 还需炼的次数

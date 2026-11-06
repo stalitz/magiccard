@@ -11,13 +11,17 @@
 ## 会话 / 多账号架构（2026-10-31 落地）
 - 同端口多账号：`SESSIONS[token→LoginSession]` + `SessionProxy`（contextvar 路由）；前端 token 存 `sessionStorage` 经 `X-MC-Token` 头携带（按标签页隔离，普通开两个标签即各登各号），cookie 仅兜底。落盘 `SESSIONS_DIR/<token>.json`，无 token 走 `default`。各引擎缓存键改用真实 session。
 - ★★ **模块级缓存必须按账号分桶**（2026-11-04 真 bug）：`_travel_aux_cache` 曾是进程级单例，45s TTL 内 A 账号的食物/任务被 B 复用（3822843 显示 4821992 的库存）。→ 新增任何 `_xxx_cache = {...}` 都要按 `token/uin` 分桶，invalidate 只清当前账号。
-- **隔离现状清单（2026-11-04 全量排查）**：引擎 `AUTOS[token]`（炼卡）/ `_AUTO_EX[token]`（换卡）/ `_ENGINES[(token,mode)]`（灵宠×4 玩法）/ `_autos[token]`（挖地）✅；日志 `_UI_LOGS`/`_MATCH_LOGS`/`LOG_UIN` ✅。已修单例：`_travel_aux_cache`、`dig_auto._auto`、`_inv_cache`(8s) / `_mini_cache`(60s) / `_collection_cache`(120s)、`_home_all_running`。统一走 `main._acct_bucket(store)`。`gift._face_of/_name_cache`、`_MODE_PROP_FETCH` 是静态卡数据，无需分桶。
+- **隔离现状清单（2026-11-06 全量排查，含落盘状态）**：引擎 `AUTOS[token]`（炼卡）/ `_AUTO_EX[token]`（换卡）/ `_ENGINES[(token,mode)]`（灵宠×4 玩法）/ `_autos[token]`（挖地）✅；日志 `_UI_LOGS`/`_MATCH_LOGS`/`LOG_UIN` ✅。已修单例：`_travel_aux_cache`、`dig_auto._auto`、`_inv_cache`(8s) / `_mini_cache`(60s) / `_collection_cache`(120s)、`_home_all_running`。统一走 `main._acct_bucket(store)`。`gift._face_of/_name_cache`、`_MODE_PROP_FETCH` 是静态卡数据，无需分桶。
+- ★★ **落盘状态也必须按账号分（2026-11-06 `aff9f66`）**：内存分桶只解决一半 —— 同端口多号共进程，凡是写**固定路径文件**的日计数/限次/缓存都会串。用户实测：A 号送礼送满 50 人 → B 号点一键日常直接被本地闸拦下、0 请求。统一走新建的 `backend/acct.py`：`acct_key(session)`（**uin 优先**：额度/限次是游戏账号级，同号多 token 本就该共享，顺带合并 default 同号的坑）与 `acct_path(p, session)`（`x.json` → `x.<uin>.json`）。已改：送礼日计数 `/tmp/mc_gift_daily.<uin>.json`、工会日限次 `data/union_quota.<uin>.json`（摇水果3/公会战3/兑换1）、比赛主题 `/tmp/mc_match_theme.<uin>.json`、出战记录 `/tmp/mc_match_race.<uin>.jsonl`、猫家/工会/三国运行历史 `data/*.<uin>.json`、挖地 `_unknown` 按 `acct_key` 分桶；前端 localStorage（公会战已出战计数、好友池开关）key 加 token 前缀（localStorage 是整个浏览器共享，只有 sessionStorage 按标签页）。
+- **登记规则**：新增任何「每日 N 次 / 已领过 / 上次用过」类状态，**一律 `acct.acct_path()` 落盘 + 函数收 `session=None` 参数逐点传参**，不要图省事写 `/tmp/xxx.json`。日志类可共用文件，但每行必须带 `uin=`（如 `buylog`）——共用可以，「分不清是哪个号」不行。
+- 全局限流器（`travel_elf_auto._last_req_ts`、`dig_auto._last_req_ts`，最小请求间隔）**故意共享**：它保护的是整个 IP 不被服务端限流，不是账号状态。`exchange_peers.json`（手动卡友名单）是用户输入，默认跨号共享。
 - ⚠️ **default 与真 token 可能是同一个 QQ 号**（`/tmp/mc_sessions/default.json` 当前 = 4821992，与 `7k2x…` 同号）：无 token 的请求会落到 default 的**另一个 LoginSession**，若两边各起一个引擎就是同号双引擎抢炉/抢卡。排查串号先看这个。
 - 日志按账号：`LOG_UIN` contextvar 分流 → `<LOG_DIR>/global.log`（聚合）+ `<LOG_DIR>/<uin>.log`；引擎流水走 `engine_logger` 只落 `<uin>.log` + stdout（`server.sh` 另有 `/tmp/mc_<PORT>.log` 总览）。`LOG_DIR` 默认 `/tmp/mc_logs/<PORT>`。
 - ⚠️ `/api/me` 探针判 -1001 会 `clear()` 删落盘文件 → 重扫一次即可。
 - ⚠️ 界面日志（`<token>_op.log`）与引擎日志（`<uin>.log`）是两套；「跑一轮」走 SSE 直推前端，**不落引擎日志**，只有 `_log()` 才落盘。
 
 ## 真机硬约束（API 事实）
+- ★**集齐奖励字段（2026-11-06 用户实测钉死）**：卡库 `theme_card_list` 的 **t[6] = 金币、t[7] = 经验**。用户交「时尚女套装」(tid=45) 实测 `user.money +100`、`user.exp +200`，与该套 t[6]=100 / t[7]=200 完全对上（此前只把 t[6] 当金币用，t[7] 一直没解读）。规律：老套两值不同（1★ 100/200、2★ 常见 200/500、588/888），3★ 以上新套基本相等（888/888、5668/5668、8888/8888），顶格收集套 19999。落地：`card_query.indexes()` 出 `gold`/`exp`、`ThemePlan.gold/exp`（`prize` 保留成 gold 别名）、前端卡册列表与详情显示「集齐 N 金币 / N 经验」。`card_collection_add` 响应仍是空体，别指望从响应里取奖励。
 - 卡箱：changebox **18 硬顶**、storebox `<cur="168" max="200">` —— **cur 是已开通容量（168）**，max 是没花钱扩的上限；`nor` 才是普通卡数。简易箱 15 格。买卡只落换卡箱。**卡张数按两箱合计算**（保险箱的卡照样能投炉、能上交）。
 - ★**落箱规则（用户 2026-11-05）**：**炼成的卡优先进保险箱，保险箱满了才溢到换卡箱；只有买的 10 面底卡一定进换卡箱**。所以「还剩几格」必须按**两箱合计**算（`_free2`），只看换卡箱会漏掉「保险箱满 = 换卡箱也腾不出格」。跨箱只能 换卡箱→保险箱（`move_card(from_box=0)`）与 保险箱↔简易箱，**换卡箱不能直接进简易箱**。
 - ★**箱位闸（2026-11-05，`56cca35`）**：`两箱空位 < 本套还缺张数` → `_calc_sets` 返回 **0 套**（`net_plan(sets<=0)` 必须返回空；`max(1,sets)` 会抬回 1 → 超炼）。同一口径要同时拦「收尾买底卡」与「`_make_room` 卖 10 面底卡」，否则卖一张买一张空转、缺口不减。

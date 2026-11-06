@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261106a";
+const APP_VER = "20261106b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -125,6 +125,15 @@ function showBadge(o) {
   return n < total
     ? `<span class="own-badge show zero">主题秀 ${v}/${total}</span>`
     : `<span class="own-badge show">主题秀 ${v}/${total}</span>`;
+}
+
+// 「集齐奖励」文字：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
+// ★ 2026-11-06 真机实证：交「时尚女套装」实测 user.money +100 / user.exp +200，
+//   与卡库 100/200 完全对上 → t[6]=金币、t[7]=经验（此前只把 t[6] 当金币用）。
+function rewardTxt(o) {
+  const g = o.gold | 0, e = o.exp | 0;
+  if (!g && !e) return " · 集齐奖励 —";
+  return ` · 集齐 ${g.toLocaleString()} 金币 / ${e.toLocaleString()} 经验`;
 }
 
 // ---------- 操作日志（落盘到服务器，按账号隔离：刷新/重开/换标签都在） ----------
@@ -3063,8 +3072,8 @@ async function runThemeQuery() {
     $("lst-title").textContent = "浏览套卡";
     $("lst-cnt").textContent = `${d.shown} / ${d.total} 套`;
     $("lst-foot").textContent = isMain
-      ? "按 发行/下架/闪卡 分组，组内按新上架排序；点套卡看明细与合成路径。"
-      : "独立卡册（不在主卡箱显示），按新上架排序；点套卡看明细与合成路径。";
+      ? "按 发行/下架/闪卡 分组，组内按新上架排序；点套卡看明细与合成路径。「集齐 N 金币 / N 经验」= 上交一套的奖励（卡库 theme 第 7/8 项，2026-11-06 真机实测）。"
+      : "独立卡册（不在主卡箱显示），按新上架排序；点套卡看明细与合成路径。「集齐 N 金币 / N 经验」= 上交一套的奖励。";
     if (!d.themes.length) {
       $("lib-list").innerHTML = '<div class="empty-tip">没有匹配的套卡，换个关键词/星级。</div>';
       return;
@@ -3087,7 +3096,7 @@ async function runThemeQuery() {
       html += items.map((t) => {
         return `<div class="it" data-tid="${t.tid}">
         <div class="r1"><span class="nm">${esc(t.name)}</span> ${stars(t.star)}
-          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}</span></div>
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}${setsBadge(t)}${showBadge(t)}<span class="meta">${t.n} 张 · 面值 ${t.pmin}~${t.pmax}${rewardTxt(t)}</span></div>
         <div class="sub">主题 #${t.tid}　·　发行 ${fmtDate(t.publish)}　·　${t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集"}</div></div>`;
       }).join("");
       html += `</div>`;
@@ -3112,7 +3121,7 @@ async function openTheme(tid, focusCid = null) {
     if (!d.ok) throw new Error(d.message || "加载失败");
     const t = d.theme;
     $("dt-title").textContent = `${t.name}`;
-    $("dt-sub").textContent = `主题 #${t.tid} · ${t.n} 张`;
+    $("dt-sub").textContent = `主题 #${t.tid} · ${t.n} 张 · 集齐 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验`;
     // 套卡明细 = 该套的合成信息：按面值分层、每张卡只出现一次（不再逐卡铺「炼成 X ＝ …」，
     // 那样一张 10 面额素材卡会被重复写七八遍）。持有数/可炼/空炉 走 synthesis 接口。
     const anchor = d.cards.some((c) => c.id === Number(focusCid))
@@ -3124,7 +3133,7 @@ async function openTheme(tid, focusCid = null) {
          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}
          ${setsBadge(d)}${showBadge(d)}
          <span class="meta" style="margin-left:auto;color:var(--muted);font-size:12px">共 ${t.n} 张卡 · 面值区间以卡为准</span></div>
-       <div class="sub" style="padding:4px 0 0 2px;color:var(--muted);font-size:12px">发行 ${fmtDate(t.publish)}　·　${d.last_ts ? "最后收集 " + fmtDate(d.last_ts) : "主题秀未收集"}${t.source ? "　·　出处 " + esc(t.source) : ""}</div>
+       <div class="sub" style="padding:4px 0 0 2px;color:var(--muted);font-size:12px">发行 ${fmtDate(t.publish)}　·　${d.last_ts ? "最后收集 " + fmtDate(d.last_ts) : "主题秀未收集"}${t.source ? "　·　出处 " + esc(t.source) : ""}　·　<b>集齐奖励 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验</b></div>
        </div>` + renderSynTiers(syn);
     mountSynView(detail, syn, () => {
       const sel = detail.querySelector(".tchip.sel");

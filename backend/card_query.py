@@ -194,6 +194,12 @@ def indexes():
             "name": name,
             "star": int(t[2]) if t[2] is not None else 0,
             "publish": int(t[3]) if t[3] is not None else 0,
+            # ★ 集齐一套的奖励（2026-11-06 真机实证，用户交「时尚女套装」(tid45) 实测
+            #   user.money +100、user.exp +200，与卡库 t[6]=100 / t[7]=200 完全对上）：
+            #   t[6] = 金币，t[7] = 经验。此前只当 t[6] 是「金币」用（economy.prize），
+            #   t[7] 一直没解读过。
+            "gold": int(t[6]) if t[6] is not None else 0,
+            "exp": int(t[7]) if t[7] is not None else 0,
             "flash": flash,
             "offline": offline,
             "kind": kind,
@@ -379,7 +385,7 @@ def list_themes(q: str = "", star: int = 0, flash: int = -1,
         "themes": [{**{k: th[k] for k in
                     ("tid", "name", "star", "flash", "offline", "kind", "module",
                      "source", "composable", "transferable", "n", "pmin", "pmax",
-                     "publish")},
+                     "publish", "gold", "exp")},
                     "have": have_of(th),
                     "sets": (mini or {}).get(th["tid"], (0, 0))[0],
                     # show = 主题秀已获得立绘数（ob，来自 qqshow_str）——2026-10-17 实锤：
@@ -435,7 +441,8 @@ def theme_detail(tid: int, owned: dict | None = None, mini: dict | None = None,
     return {
         "theme": {k: th[k] for k in
                   ("tid", "name", "star", "flash", "offline", "kind", "module",
-                   "source", "composable", "transferable", "publish", "n")},
+                   "source", "composable", "transferable", "publish", "n",
+                   "gold", "exp")},
         # 套卡级「商店可买」标记：套内存在 10 面额基础卡 = 未下架在售套（buyable_themes 口径）
         "theme_buyable": tid in buyable_themes(),
         "sets": (mini or {}).get(tid, (0, 0))[0],

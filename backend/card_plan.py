@@ -55,6 +55,9 @@ def theme_meta() -> dict[int, dict]:
 
     theme_card_list 字段（19 项）实测语义:
       0 theme_id / 1 name / 2 star / 3 上架时间戳(publish，可能是未来=未上架)
+      6 集齐奖励·金币 / 7 集齐奖励·经验
+        （★ 2026-11-06 真机实证：用户交「时尚女套装」tid=45 后 money +100、exp +200，
+          与卡库 t[6]=100 / t[7]=200 完全对上；此前只把 t[6] 当金币用，t[7] 未解读）
       9 起炼素材: "cardId#n_x|cardId|..."，即炼这套需要的 4 张**外套**素材卡
      12 theme_type（9=闪卡）
 
