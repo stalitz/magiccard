@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261107a";
+const APP_VER = "20261107b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -92,7 +92,7 @@ function sourceTag(src) {
   return `<span class="tag src ${m[0]}" title="该套卡的实际获得出处">${m[1]}</span>`;
 }
 // 套卡属性标签：可合成/免合成（有无配方）+ 可变/不可变（能否变卡得到）
-function attrTags(o) {
+function attrTags(o, part = "both") {
   if (o === null || o === undefined) return "";
   const c = o.composable
     ? '<span class="tag comp" title="能从素材卡一层层合成">可合成</span>'
@@ -100,6 +100,10 @@ function attrTags(o) {
   const t = o.transferable
     ? '<span class="tag trans" title="可用≥面额的其他卡变卡得到">可变</span>'
     : '<span class="tag notrans" title="不能通过变卡得到">不可变</span>';
+  // ★ 2026-11-07：套卡列表第一行只放「可合成/免合成」（用户找可刷套时要一眼看到），
+  //   「可变/不可变」挪到第二行，给第一行的「主题 ID」徽章腾出宽度。其它页面仍用 both。
+  if (part === "comp") return c;
+  if (part === "trans") return t;
   return c + t;
 }
 // 「已炼 N 套 / 未炼」徽章：sets 来自集卡册进度（card_mini_get 的 num，游戏官方口径）。
@@ -137,6 +141,13 @@ function specBadge(o) {
   const cnt = n ? `${n} 张` : "";
   const txt = [cnt, face].filter(Boolean).join(" · ");
   return txt ? `<span class="face" title="套卡规格：${txt}">${txt}</span>` : "";
+}
+
+// 「主题 ID」徽标：短写 #tid，放第一行紧跟套名（2026-11-07 用户要求「一眼看到」）。
+// 自动炼卡/查卡都按 tid 定位，完整提示放 title，不占「主题 #xxxx」那么长。
+function tidBadge(o) {
+  const tid = Number(o.tid) || 0;
+  return tid ? `<span class="tid" title="主题 ID：${tid}（自动炼卡可直接填这个 ID）">#${tid}</span>` : "";
 }
 
 // 「集齐奖励」徽标：金币/经验取自卡库 theme_card_list 的 t[6]/t[7]。
@@ -3113,21 +3124,22 @@ async function runThemeQuery() {
         `<span class="tag ${g.cls}">${g.label}</span>` +
         `<span class="meta">${items.length} 套</span></div>`;
       html += items.map((t) => {
-        // ★ 2026-11-06 版式：张数/面值是扫列表时要一眼看到的信息 → 合并成一个徽章放第一行、
-        //   紧跟套名；第一行强制单行、名称不参与收缩（超长名最多 45% 并省略），主题秀/已炼套数
-        //   徽章挪到第二行靠前处，避免窄栏把第一行尾部徽章裁掉。第二行 nowrap + 省略号，
-        //   条目恒为两行、不出现孤字行；完整文案（含张数/面值/主题秀）在 title 与套卡详情里。
+        // ★ 2026-11-07 版式：主题 ID / 张数 / 面值 / 可合成 都是扫列表时要一眼看到的信息 → 全放第一行、
+        //   紧跟套名；第一行强制单行、名称不参与收缩（超长名最多 45% 并省略），可变、主题秀、
+        //   已炼套数徽章挪到第二行靠前处，给 ID 腾宽度且窄栏不裁第一行。第二行 nowrap + 省略号，
+        //   条目恒为两行、不出现孤字行；完整文案（含张数/面值/主题 ID）在 title 与套卡详情里。
         const rw = rewardBadge(t);
         const subTxt = [
           rw,
+          attrTags(t, "trans"),
           showBadge(t),
           setsBadge(t),
-          `主题 #${t.tid}`,
           `发行 ${fmtDate(t.publish)}`,
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join("　·　");
         const subPlain = [
           rw ? `集齐 ${(t.gold | 0).toLocaleString()} 金币 / ${(t.exp | 0).toLocaleString()} 经验` : "",
+          t.transferable ? "可变" : "不可变",
           t.show_total ? `主题秀 ${t.show | 0}/${t.show_total | 0}` : "主题秀 —",
           t.sets > 0 ? `已炼 ${t.sets} 套` : ((!t.module || t.module === "") && t.kind !== "绝版" && t.kind !== "特殊" ? "未炼" : "非集卡册套"),
           `主题 #${t.tid}`, `${t.n} 张 · 面值 ${t.pmin}~${t.pmax}`,
@@ -3135,8 +3147,8 @@ async function runThemeQuery() {
           t.last_ts ? "收集 " + fmtDate(t.last_ts) : "未收集",
         ].filter(Boolean).join(" · ");
         return `<div class="it th" data-tid="${t.tid}">
-        <div class="r1"><span class="nm">${esc(t.name)}</span>${specBadge(t)} ${stars(t.star)}
-          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t)}</div>
+        <div class="r1"><span class="nm">${esc(t.name)}</span>${tidBadge(t)}${specBadge(t)} ${stars(t.star)}
+          ${kindTag(t.kind)}${sourceTag(t.source)}${attrTags(t, "comp")}</div>
         <div class="sub sub1" title="${esc(subPlain)}">${subTxt}</div></div>`;
       }).join("");
       html += `</div>`;
