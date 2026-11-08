@@ -398,10 +398,32 @@ async def dress_cat(session) -> dict:
     return {"ok": True, "message": "竞技一键穿装完成（服务端自动穿最优装，已持久保存）"}
 
 
+# ---------- 竞技场出战安全边际（2026-11-08 真机实测后定调） ----------
+# 日志：我 ce=20004，对手 17728(−2276) 胜，19830(−174)/19839(−165)/19984(−20) 连负 3 场，
+# 输一样扣次数。旧版只判「ce < 我的战力」就打，按升序打完最低的后全是几乎同战力的硬骨头，
+# 而且只要列表里还有「低 20 点」的对手就永不触发刷新 → 当天免费刷新一次没用、4 次全打光。
+ARENA_SAFE_RATIO = 0.10      # 对手战力至少比自己低 10%
+ARENA_SAFE_MIN_GAP = 1000    # 低战力段的绝对下限（至少低 1000 点）
+ARENA_LOSE_STREAK_MAX = 2    # 连败 2 场直接停手，保留剩余次数
+
+
+def _ce_of(e) -> int:
+    """enemy_list 的 ce 可能是数字或字符串，统一转 int；缺失/异常按 0（不参选）。"""
+    try:
+        return int(e.get("ce") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def _safe_gap(my_ce) -> int:
+    return max(ARENA_SAFE_MIN_GAP, int(_ce_of({"ce": my_ce}) * ARENA_SAFE_RATIO))
+
+
 async def arena_auto(session, max_flush: int = 4, feed: bool = True):
     """竞技比赛自动（生成器，逐步 yield 以便前端实时显示）。
     开局一键穿装(act=27，持久化、只做一次) → 每场走完整流程：重读对手/自己战力 +
-    比战力挑最低 + 没有更低才刷新(act=7) + 出战(act=8)。
+    挑「战力差 ≥ 安全边际」里最低的 + 没有安全目标就刷新(act=7) + 出战(act=8)。
+    刷新用完仍没有安全目标则停手留次数；连败 2 场也停手（2026-11-08）。
     不并发：每场前 3s 冷却（从源头避开服务端限流），且每场都重新读对手/自己战力。
     竞技穿装与每日比赛(act=4 ids)不共享、持久保存，故只开局穿一次。
     """
@@ -449,26 +471,30 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
     wins, fights = 0, 0
     busy_total = 0
     stop_all = False
+    lose_streak = 0             # 连续明确战败（win==0）计数；赢了清零、结果未知不动
     BUSY_MAX = 20                   # 整轮最多容忍的 busy 次数（兜底收尾；正常靠 flush_left 与 surplus 自然结束）
     loop_guard, LOOP_MAX = 0, 40    # 总轮次硬上限：防「全员持续限流只跳过不扣次数」空转
     live = int(dp0.get("surplus") or 0)
     skip_uins = set()               # 本回合已打过（胜/负）或持续 busy 的对手 uin，绝不重复打同一个人
 
     def pick_target(enemies, my):
-        """挑本回合最优目标：比自己战力低、且本回合没打过，按战力升序取最低（最易打）。
+        """挑安全目标：战力比我低至少 _safe_gap(my)、本回合没打过，取其中战力最低的。
 
-        修复 10-01 用户反馈：原 sort(key=-ce) 取「比自己低里战力最高的」，等于专挑
-        只比自己低几十的硬骨头，极易输且反复打同一人。改为取最低战力对手。
+        修复 10-01：原 sort(key=-ce) 取「比我低里战力最高的」，专挑只低几十的硬骨头。
+        修复 2026-11-08：只判 ce<my 也不够 —— 低 20 点的照样打、照样输、照样扣次数。
         """
-        if my is None:
+        m = _ce_of({"ce": my})
+        if m <= 0:
             return None
+        gap = _safe_gap(m)
         cand = [e for e in enemies or []
                 if str(e.get("uin")) != str(uin)
-                and e.get("ce") is not None and e.get("ce") < my
+                and _ce_of(e) > 0
+                and m - _ce_of(e) >= gap
                 and str(e.get("uin")) not in skip_uins]
         if not cand:
             return None
-        return min(cand, key=lambda e: e["ce"])   # 战力最低 = 最易打
+        return min(cand, key=_ce_of)   # 差距够大里战力最低 = 最易打
 
     while True:
         loop_guard += 1
@@ -485,14 +511,31 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
             yield emit({"act": "arena:end", "ok": True,
                         "msg": f"今日竞技次数已用完（已打 {fights} 场）"})
             break
+        # 连败保护（2026-11-08）：明确输满 2 场就收手，别在同一批/接近战力的对手上继续送次数
+        if lose_streak >= ARENA_LOSE_STREAK_MAX:
+            yield emit({"act": "arena:limit", "ok": True,
+                        "msg": f"连败 {lose_streak} 场，停止挑战（保留 {live} 次，"
+                               f"不再硬碰战力接近的对手）"})
+            break
         my_ce = next((e.get("ce") for e in dp.get("enemy_list") or []
                       if str(e.get("uin")) == uin), my_ce0)
         enemies = dp.get("enemy_list") or []
         foe = pick_target(enemies, my_ce)
         if foe is None:
+            # 诊断文案：把「为什么刷/为什么停」写清楚（我多少、最接近差多少、门槛多少）
+            m = _ce_of({"ce": my_ce})
+            near = [_ce_of(e) for e in enemies
+                    if str(e.get("uin")) != str(uin) and _ce_of(e) > 0
+                    and str(e.get("uin")) not in skip_uins and _ce_of(e) < m] if m > 0 else []
+            if near:
+                why = (f"我 {m}，本批最接近的只低 {m - max(near)}"
+                       f"（需 ≥{_safe_gap(m)}）")
+            else:
+                why = f"我 {m or '未知'}，本批没有比我弱且未打过的对手"
             if flush_left <= 0:
-                yield emit({"act": "flush", "ok": False,
-                            "msg": "没有更低战力且未打过的对手，免费刷新已用完，结束"})
+                yield emit({"act": "arena:end", "ok": True,
+                            "msg": f"没有安全边际内的对手（{why}），免费刷新已用完 → "
+                                   f"保留 {live} 次不出战，可手动挑对手"})
                 break
             fr = await _act(session, EP_TRAVEL_PVP, 7)
             fd = fr.get("data") or {}
@@ -502,7 +545,8 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
                 break
             flush_left -= 1
             yield emit({"act": "flush", "ok": True,
-                        "msg": f"刷新对手（剩 {flush_left} 次），新对手 {len(fd.get('enemy_list') or [])} 个"})
+                        "msg": f"战力差不足（{why}）→ 刷新对手（剩 {flush_left} 次），"
+                               f"新对手 {len(fd.get('enemy_list') or [])} 个"})
             continue
         # 竞技穿装已在开局做一次并持久保存，这里无需每场重穿（与每日比赛每场临时算不同）。
         # 每场只挑战**一次**：3s 冷却已从源头避开限流。busy 一律**跳过该对手**转打下一个，
@@ -518,10 +562,24 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
             win = ba.get("iswin")
             wins += 1 if win == 1 else 0
             skip_uins.add(foe_uin)   # 无论输赢，本回合不再打这个人
+            retire = ""
+            if win == 1:
+                lose_streak = 0
+            elif win == 0:
+                lose_streak += 1
+                # 连败保护：明确输了就把本批剩余对手全部作废，逼下一轮走刷新分支换一批，
+                # 而不是继续在这批里挑「只低几十点」的下一个硬骨头。
+                if lose_streak < ARENA_LOSE_STREAK_MAX:
+                    for e in enemies:
+                        if str(e.get("uin")) != str(uin):
+                            skip_uins.add(str(e.get("uin")))
+                    retire = " · 本批对手作废，下一轮换一批"
+            # win 为 None（busy 但次数已扣、战报缺失）：不动连败计数，也不作废整批
             yield emit({"act": "arena:fight", "ok": True, "foe": foe.get("name"),
                         "ce": foe.get("ce"), "win": win,
                         "score": ba.get("pvp_score"),
-                        "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）{'胜 ✓' if win == 1 else ('负 ✗' if win == 0 else '')}"})
+                        "msg": f"vs {foe.get('name')}（ce {foe.get('ce')}）"
+                               f"{'胜 ✓' if win == 1 else ('负 ✗' if win == 0 else '')}{retire}"})
             continue
         desc = str(d.get("desc") or r.get("message") or "挑战失败")
         if "system busy" not in desc.lower():
