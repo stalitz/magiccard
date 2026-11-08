@@ -140,10 +140,15 @@ class DPTickController:
         #   200 格也会被铺开的 40 面中间卡吃满；而底层 40 面 op 要买 10 面底卡
         #   （净占格），本就不该抢在上溯动作之前。消融：MC_MERGE_READY=0。
         self.merge_ready = os.environ.get("MC_MERGE_READY", "1") == "1"
-        # 只有「同一种中间卡已经囤够 ≥2 组」才提前上溯。1★/2★ 浅链里每组刚好
-        # 凑齐一次，抢跑只会占掉关键路径炉位（实测 85 +0.59h、290 +1.21h）；
-        # 深链 / 真机紧箱里小米5·大麦3·糙米4 这种富余才是要清的库存。
-        self.merge_stack = max(1, int(os.environ.get("MC_MERGE_STACK") or 2))
+        # ★ 2026-11-09 方案 A（推翻 11-08 的「囤够 2 组」门槛）：
+        #   真机复核 tid=890 发现 stack=2 让 150 面提前 1.28h，却把 540 顶层
+        #   **推后 1.22h**、完工 +1.23h —— 门槛挑中的是小米5/大麦3 这类富余
+        #   支路，抢空主炉去炼非关键路径的 150，关键路径反被挤后。用户定调：
+        #   「不优先向上合并会拖慢顶层卡的开始时间，导致整套集齐延后」。
+        #   改为只发**当前 cp 最高档**的 op（cp = 自身时长 + 最长前驱链，越靠
+        #   顶层越大），每 tick 至多 merge_per_tick 个；富余支路不抢炉。
+        #   消融：MC_MERGE_READY=0 / MC_MERGE_PER_TICK（默认 1）。
+        self.merge_per_tick = max(1, int(os.environ.get("MC_MERGE_PER_TICK") or 1))
         # 「主炉只给不可偷炉的卡」（默认开）：40 面卡可走偷炉，4h/顶层只能主炉。
         #   旧逻辑按数组顺序抢主炉 → 40 面卡（1h 短链）把最后一个主炉占掉，
         #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
@@ -1457,7 +1462,8 @@ class DPTickController:
         # 消耗 3 张产 1 张、净腾 2 格，是紧箱下唯一不增加库存的动作；底层 40 面
         # op 的喂料是买来的 10 面底卡，不在这条通道里（否则就成了提前囤料）。
         # 安全性：仍是计划内合法 op（净需求内、绝不超炼），复用 early_ok 的
-        # 「喂料预留 + 空炉」检查，只改时机不改序；每 tick 最多填满空主炉。
+        # 「喂料预留 + 空炉」检查，只改时机不改序；2026-11-09 方案 A 起每 tick
+        # 只发 cp 最高档、至多 merge_per_tick 个（富余支路不抢主炉）。
         if self.merge_ready and main_cap - used_main > 0:
             merge_cand = []
             for j in range(plan["cursor"], len(ops)):
@@ -1471,18 +1477,19 @@ class DPTickController:
                     continue                       # 只收「中间卡 → 上层卡」
                 if any(f in protected or not has_slot(f) for f in fsj):
                     continue
-                # 「囤够 2 组」才抢跑：刚好凑齐一组的按骨架时刻走（浅链不退化）
-                needj = Counter(fsj)
-                if any(avail_count(f) < self.merge_stack * k
-                       for f, k in needj.items()):
-                    continue
                 if not early_ok(j, cj):
                     continue
                 merge_cand.append((j, cj, mj, fsj))
-            # 越靠顶层越优先（cp = 向上关键路径长度），同层按骨架顺序
-            merge_cand.sort(key=lambda x: (-ops[x[0]].get("cp", 0.0), x[0]))
+            # 方案 A：只留 cp 最高档（关键路径顶层），富余支路一律不抢主炉；
+            # 同档内按骨架顺序，每 tick 至多 merge_per_tick 个。
+            if merge_cand:
+                cp_top = max(ops[x[0]].get("cp", 0.0) for x in merge_cand)
+                merge_cand = [x for x in merge_cand
+                              if ops[x[0]].get("cp", 0.0) >= cp_top - EPS]
+            merge_cand.sort(key=lambda x: x[0])
+            n_merge = 0
             for j, cj, mj, fsj in merge_cand:
-                if used_main >= main_cap:
+                if used_main >= main_cap or n_merge >= self.merge_per_tick:
                     break
                 # 前一个合并可能吃掉了同一种喂料 → 重判
                 if any(not has_slot(f) for f in fsj) or not early_ok(j, cj):
@@ -1504,6 +1511,7 @@ class DPTickController:
                     feed_cids=[], steal=False,
                     note=f"DP精炼 {cj}（向上合并·料齐即炼）"))
                 issued[j] = True
+                n_merge += 1
                 n_ref += 1
                 n_early += 1
                 plan["discrepancy"] += 1
