@@ -133,6 +133,17 @@ class DPTickController:
         #   是下界当上界，料已齐/炉已空时也要空等。开关开 = 纯按顺序发，只看
         #   料齐+炉空，不看 start。
         self.order_only = os.environ.get("MC_ORDER_ONLY") == "1"
+        # ★ 2026-11-08 用户定调「齐了就应该直接向上炼，而不是非要把所有 40 面
+        #   都准备好」：喂料全部是**已炼出的中间卡**的 op（消耗 3 张 → 产 1 张、
+        #   净腾 2 格）只要有空主炉就立刻发，不管它在骨架里的 start 排到多久以后。
+        #   骨架只按 makespan 排期、box_cap 又按「换卡箱+保险箱」算得很宽，真机
+        #   200 格也会被铺开的 40 面中间卡吃满；而底层 40 面 op 要买 10 面底卡
+        #   （净占格），本就不该抢在上溯动作之前。消融：MC_MERGE_READY=0。
+        self.merge_ready = os.environ.get("MC_MERGE_READY", "1") == "1"
+        # 只有「同一种中间卡已经囤够 ≥2 组」才提前上溯。1★/2★ 浅链里每组刚好
+        # 凑齐一次，抢跑只会占掉关键路径炉位（实测 85 +0.59h、290 +1.21h）；
+        # 深链 / 真机紧箱里小米5·大麦3·糙米4 这种富余才是要清的库存。
+        self.merge_stack = max(1, int(os.environ.get("MC_MERGE_STACK") or 2))
         # 「主炉只给不可偷炉的卡」（默认开）：40 面卡可走偷炉，4h/顶层只能主炉。
         #   旧逻辑按数组顺序抢主炉 → 40 面卡（1h 短链）把最后一个主炉占掉，
         #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
@@ -1434,6 +1445,71 @@ class DPTickController:
             self._dbg.setdefault("无炉位", 0)
             self._dbg["无炉位"] += 1
             return False
+
+        # ============ pass 2a: 向上合并优先（2026-11-08） ============
+        # 用户原话：「连大麦都 3 张了，早都可以向上炼了……齐了就应该直接向上炼，
+        # 而不是非要把所有 40 面都准备好，你这样 200 卡箱都不够！」
+        # 真机复现（tid=890 美味粗粮）：箱内 小米5/大麦3/糙米4、150 面 0 张、
+        # 有 1 个空主炉，骨架却把「黄豆」（= 小米+大麦+糙米）排在 start=1800，
+        # 头动作是一张 40 面红薯 → pass 2 的 start 门直接 break → 本 tick 零动作，
+        # 6 个炉全在炼 40 面，中间卡越堆越多。
+        # 规则：只挑「喂料全是**非底卡**（已炼出的中间卡）」的 op —— 这类动作
+        # 消耗 3 张产 1 张、净腾 2 格，是紧箱下唯一不增加库存的动作；底层 40 面
+        # op 的喂料是买来的 10 面底卡，不在这条通道里（否则就成了提前囤料）。
+        # 安全性：仍是计划内合法 op（净需求内、绝不超炼），复用 early_ok 的
+        # 「喂料预留 + 空炉」检查，只改时机不改序；每 tick 最多填满空主炉。
+        if self.merge_ready and main_cap - used_main > 0:
+            merge_cand = []
+            for j in range(plan["cursor"], len(ops)):
+                opj = ops[j]
+                if issued[j] or opj["kind"] != "refine":
+                    continue
+                cj = opj["cid"]
+                mj = self._owner[cj]
+                fsj = mj.feeders(cj)
+                if not fsj or any(mj.is_base(f) for f in fsj):
+                    continue                       # 只收「中间卡 → 上层卡」
+                if any(f in protected or not has_slot(f) for f in fsj):
+                    continue
+                # 「囤够 2 组」才抢跑：刚好凑齐一组的按骨架时刻走（浅链不退化）
+                needj = Counter(fsj)
+                if any(avail_count(f) < self.merge_stack * k
+                       for f, k in needj.items()):
+                    continue
+                if not early_ok(j, cj):
+                    continue
+                merge_cand.append((j, cj, mj, fsj))
+            # 越靠顶层越优先（cp = 向上关键路径长度），同层按骨架顺序
+            merge_cand.sort(key=lambda x: (-ops[x[0]].get("cp", 0.0), x[0]))
+            for j, cj, mj, fsj in merge_cand:
+                if used_main >= main_cap:
+                    break
+                # 前一个合并可能吃掉了同一种喂料 → 重判
+                if any(not has_slot(f) for f in fsj) or not early_ok(j, cj):
+                    continue
+                picks = []
+                for f in fsj:
+                    sl = take_slot(f)
+                    if sl is None:                  # 理论不会（has_slot 已过）
+                        break
+                    picks.append((f, sl[0], sl[1]))
+                if len(picks) < len(fsj):
+                    continue
+                used_main += 1
+                for _c, _s, _st in picks:
+                    box_free_local += 1             # 喂料出箱 → 空位 +1
+                actions.append(Action(
+                    kind="refine", target=cj,
+                    feeders=[(s, st) for (_c, s, st) in picks],
+                    feed_cids=[], steal=False,
+                    note=f"DP精炼 {cj}（向上合并·料齐即炼）"))
+                issued[j] = True
+                n_ref += 1
+                n_early += 1
+                plan["discrepancy"] += 1
+                self._dirty = True
+                if self.dbg_op:
+                    self._oplog.append((round(elapsed / 3600, 3), j, cj, "向上合并"))
 
         while i < len(ops) and scanned <= self.scan_window:
             op = ops[i]
