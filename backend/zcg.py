@@ -165,13 +165,23 @@ async def _buy_ten_face(session) -> int | None:
 
 
 async def _box_state(session) -> dict:
-    """读主界面卡箱结构（换卡箱/保险箱/容量）。失败返回空结构。"""
+    """读主界面卡箱结构（换卡箱/保险箱/容量）。失败返回带 error 的空结构。
+
+    旧版把 -3001 / 空壳 / 异常一律静默吞成「空箱」，上层就会把「读箱失败」
+    当成「卡箱里没有 10 面卡」，界面只显示绿字「投卡 0 炉」，完全看不出出错。
+    """
+    empty = {"change": [], "store": [], "cap": {}}
     try:
         uin = plain_uin(session)
         r = await session.post(EP_MAINPAGE, code="", uin=uin)
-        return parse_full(r.get("raw") or "")
-    except Exception:
-        return {"change": [], "store": [], "cap": {}}
+        if r.get("code") not in (0, None):
+            return {**empty, "error": f"code={r.get('code')} {r.get('message') or ''}"}
+        st = parse_full(r.get("raw") or "")
+        if not st.get("cap", {}).get("change"):
+            return {**empty, "error": "主界面无卡箱数据（空壳响应）"}
+        return st
+    except Exception as e:  # noqa: BLE001
+        return {**empty, "error": str(e)}
 
 
 async def _deposit_from_box(session, puzi_id: int, steps: list[dict]) -> bool:
@@ -369,9 +379,19 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
     1) 逐个收炼完的炉（act=9 收卡 + act=5 收魔晶），收完立即把退回的 10 面卡重投空炉；
     2) 抽卡→投炉 循环：反复「抽一批(type=2) → 把卡箱 10 面卡全投空炉 → 还有机会再抽」，
        直到抽卡机会用尽（抽到箱满/机会用完即「一键抽完」）；
-    3) 抽卡机会用尽后，剩余空炉才用商店买 10 面卡投炉（绝不提前买）。
+    2.5) 把卡箱里「现成」的 10 面卡投进剩余空炉（不抽不买，2026-11-09 补）；
+    3) 箱内卡用尽后，剩余空炉才用商店买 10 面卡投炉（绝不提前买）。
     """
     steps: list[dict] = []
+    # 卡箱健康检查 + 基线：真机偶发 -3001 / 空壳时必须显式报错，否则「读箱失败」
+    # 会被当成「没有 10 面卡」，界面只显示绿字「投卡 0 炉」（2026-11-09 用户实测）。
+    box0 = await _box_state(session)
+    if box0.get("error"):
+        return {"ok": False, "code": -1,
+                "text": f"读取卡箱失败（{box0['error']}），本次跳过投料，请稍后重试",
+                "steps": steps}
+    ten0 = sum(1 for b in ("change", "store") for c in box0.get(b, [])
+               if _face(int(c.get("id") or 0)) == 10)
     st = await get_zcg_state(session)
     if not st.get("ok"):
         return {"ok": False, "code": st.get("code"), "text": st.get("text") or "读取珍藏阁失败",
@@ -436,7 +456,15 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
     if auto_draw:
         drawn_deposited = await _draw_and_refine_loop(session, steps)
 
-    # ---- 3) 抽卡机会用尽后，剩余空炉才商店买 10 面卡投炉（绝不提前买） ----
+    # ---- 2.5) 先把卡箱里「现成」的 10 面卡投进剩余空炉（不抽不买） ----
+    # 旧版 _deposit_all_from_box 只挂在「抽卡成功之后」：抽卡机会用尽 / 箱满 /
+    # 真机繁忙时循环直接 break，箱内 10 面卡一张都不投；第 3 步又只买新卡，
+    # 于是出现「换卡箱明明有 10 面卡，却投卡 0 炉」（2026-11-09 用户实测）。
+    # 放在抽卡循环之后、买卡之前：既保留「一键抽完，没次数才买」定调，
+    # 又保证箱内现成的卡优先于花钱买卡被消耗掉。
+    box_deposited = await _deposit_all_from_box(session, steps)
+
+    # ---- 3) 箱内卡用尽后，剩余空炉才商店买 10 面卡投炉（绝不提前买） ----
     st2 = await get_zcg_state(session)
     empty = [p for p in st2["puzi"] if 0 < p["id"] < 10000 and p["card_id"] == 0]
     bought = 0
@@ -445,11 +473,17 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
         if ok:
             bought += 1
 
-    total_deposited = drawn_deposited + bought
+    total_deposited = drawn_deposited + box_deposited + bought
+    hint = ""
+    if ten0 > 0 and total_deposited == 0 and empty:
+        # 有卡、有空炉，却一张没投：一定是 act=2 被真机拒了，别再显示成绿字 0 投
+        hint = (f"（卡箱有 {ten0} 张 10 面卡、{len(empty)} 个空炉却一张未投，"
+                f"疑似真机繁忙，建议重试）")
     return {"ok": True, "collected": collected, "deposited": total_deposited,
-            "drawn_deposited": drawn_deposited, "bought": bought,
-            "steps": steps, "state": st2,
-            "text": f"收卡 {collected} 炉，投卡 {total_deposited} 炉（抽卡 {drawn_deposited} + 商店买 {bought}）"}
+            "drawn_deposited": drawn_deposited, "box_deposited": box_deposited,
+            "bought": bought, "steps": steps, "state": st2,
+            "text": f"收卡 {collected} 炉，投卡 {total_deposited} 炉"
+                    f"（抽卡 {drawn_deposited} + 箱内现成 {box_deposited} + 商店买 {bought}）{hint}"}
 
 
 async def daily_zcg(session) -> dict:
