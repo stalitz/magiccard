@@ -291,6 +291,10 @@ class DPTickController:
         self.buy_fallback = 0           # 「ops 空、只剩底卡要买」时按 buy0_map 兜底的次数
         self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时把 sets 提到 2 的次数
         self.pipe_sets_blocked = 0      # 提套会吃掉本套合成卡而被拦下的次数（见 _pipe_consumes_set）
+        # ★ 2026-11-09 用户验收线：跨轮重叠峰 < 2N。pipe_sets 在 sets_fn 之后才提套，
+        #   _calc_sets 的箱位闸钳不到它，故闸放在 _solve_plan 的最终 sets 处。
+        self.pipe_2n = os.environ.get("MC_PIPE_2N", "1") == "1"   # 0 可消融（A/B）
+        self.pipe_sets_blocked_2n = 0  # 因「已占 + N >= 2N」被拦下的提套次数
         self.compact_sold = 0           # 腾箱卖卡累计张数（只卖 10 面底卡）
         self.compact_moved = 0          # 腾箱挪保险箱累计张数
         # ★★ 2026-10-28 事件驱动重解（默认开，`MC_EVENT_RESOLVE=0` 可关）：
@@ -479,7 +483,23 @@ class DPTickController:
             if (self.pipe_sets and sets > 0 and left >= 2
                     and box_free >= self.pipe_min_free and sets < 2):
                 _nd = sum(n for c, n in runs.items() if not m.is_base(c))
-                if _nd <= 0 and self._pipe_consumes_set(m, avail, pending):
+                # ★★ 2026-11-09 用户验收线：跨轮重叠峰值必须 < 2N。
+                #   pipe_sets 是在 sets_fn 返回**之后**把 1 提到 2 的，_calc_sets
+                #   的箱位闸钳不到它 → 闸必须放在最终 sets 定下来的这里。
+                #   本套已在箱/在途张数 + 再排一套(N) 达到 2N 就不再提套。
+                _two_n_ok = True
+                if self.pipe_2n and _nd <= 0:
+                    _own = set(m.ids)
+                    # 只数**箱内**占位：pending 是已投炉/在途（投炉时已从箱移除），
+                    # 不算峰值库存。按本套卡 id 过滤，多套同炼时别把别套的卡算进来。
+                    _inflight = sum(int(n) for c, n in box_stock.items()
+                                    if int(c) in _own and n)
+                    _two_n_ok = (_inflight + len(_own)) < 2 * len(_own)
+                    if not _two_n_ok:
+                        self.pipe_sets_blocked_2n += 1
+                if not _two_n_ok:
+                    pass                    # 保持 sets=1，本轮不再叠第二套
+                elif _nd <= 0 and self._pipe_consumes_set(m, avail, pending):
                     # ★ 2026-11-05 用户定调：「流水线不能影响快要集齐的套」。
                     #   提套会把本套的合成卡当下一套的素材吃掉 → 跳过本次提套。
                     self.pipe_sets_blocked += 1

@@ -1,4 +1,4 @@
-"""`_calc_sets` 箱位封顶回归（改 sets 口径 / 换卡箱容量语义后必跑）。
+"""`_calc_sets` 箱位封顶 + 禁单轮超炼 回归（改 sets 口径后必跑）。
 
 为什么需要（2026-10-28 真机事故）：
   1★ 的 sets 原口径 = `max(顶层三张 40 面的持有数)`，上限只按「炉位/卡位数」卡。
@@ -6,11 +6,17 @@
   于是 40 面一囤起来 sets 就跳到 5~6 → 一次排 18 张半成品 → 箱满 → 底卡买不进
   → 炉子清空后永久停摆（真机表现：同一个 40 面卡囤 13 张、三箱全满、零上交）。
 
+2026-11-09 用户定调的验收线：
+  跨轮重叠换时间、必然吃箱位，可以接受（相当于同时炼 2 套同星卡，峰值 < 2N）；
+  **一定不能单轮超炼**（1 套的料按 5~6 套重复炼）。故自动推断的 sets 硬上限 2，
+  但界面显式设的套数（surplus_sets>0）不受影响。
+
 判据：
   1. **公式**：`_calc_sets` 结果 ≤ max(1, **换卡箱空位** // 套内张数)；
      空位够时不能死顶 1（用户 2026-10-28：「空位 9 就能炼无限套」——
-     限的是同时铺开几套，不是总共能炼几套）；`_box_cur=0`（未知容量）不封顶。
-  2. **端到端**：生产默认路径（不勾 DP + max_rounds=0 不限轮）跑 178 蜻蜓，
+     限的是同时铺开几套，不是总共能炼几套）；`_box_cur=0`（未知容量）不封箱位。
+  2. **自动推断不超 2 套**，**显式套数不钳**。
+  3. **端到端**：生产默认路径（不勾 DP + max_rounds=0 不限轮）跑 178 蜻蜓，
      900 tick 内必须**至少上交 1 套**且换卡箱**不能顶满** —— 修前是 0 套 + 18/18。
 
 用法：python -m backend.engine_v2.tests._verify_sets_boxcap
@@ -18,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from collections import Counter
 
@@ -31,12 +38,21 @@ def _bare() -> AutoRefine:
     ar._tick_collected = {}
     ar._box_cur = 0
     ar._box_used = 0
+    ar._store_free = 0
+    ar._simple_free = 0
+    ar._freeze_msg = ""
+    ar._last_sets = {}
     return ar
+
+
+def _auto_cap() -> int:
+    return int(os.environ.get("MC_AUTO_MAX_SETS", "2") or 0)
 
 
 def check_formula() -> list[str]:
     errs: list[str] = []
     ar = _bare()
+    cap = _auto_cap()
     for tid, n_expect in ((178, 9), (85, 13)):
         p = ThemePlan(tid)
         assert len(p.ids) == n_expect, f"tid={tid} 套内张数应为 {n_expect}，实为 {len(p.ids)}"
@@ -64,10 +80,26 @@ def check_formula() -> list[str]:
         if empty != want2:
             errs.append(f"tid={tid} 空位充足时未放开：{empty} != {want2}")
 
-        # ③ 容量未知（0）→ 退回原口径
+        # ③ 容量未知（0）→ 箱位闸不生效，但「自动推断最多 2 套」仍生效
         ar._box_cur = 0
-        if ar._calc_sets(p, stock, Counter(), free_slots=7) != raw:
-            errs.append(f"tid={tid} box_cur=0 时应退回原口径")
+        want3 = min(raw, cap) if cap > 0 else raw
+        got3 = ar._calc_sets(p, stock, Counter(), free_slots=7)
+        print(f"     容量未知 结果={got3} 期望={want3}（自动上限={cap or '关'}）")
+        if got3 != want3:
+            errs.append(f"tid={tid} 自动推断套数未按 {want3} 封顶：{got3}")
+        if cap > 0 and got3 > 2:
+            errs.append(f"tid={tid} 单轮超炼未拦住：自动推断 sets={got3} > 2")
+
+    # ④ 界面显式设 6 套 → 用户主动要多套，不钳
+    ar = _bare()
+    ar.surplus_sets = 6
+    p = ThemePlan(178)
+    f40 = list(p.f40)[:3]
+    stock = Counter({c: 6 for c in f40})
+    explicit = ar._calc_sets(p, stock, Counter(), free_slots=7)
+    print(f"  显式套数=6 → _calc_sets={explicit}（应恒为 6）")
+    if explicit != 6:
+        errs.append(f"显式套数被误钳：{explicit} != 6")
     return errs
 
 
@@ -89,7 +121,7 @@ async def check_end2end() -> list[str]:
 
 
 def main() -> int:
-    print("① 公式（箱位封顶）")
+    print("① 公式（箱位封顶 + 禁单轮超炼）")
     errs = check_formula()
     print("② 端到端（生产默认路径：不勾 DP + 不限轮）")
     errs += asyncio.run(check_end2end())

@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from collections import Counter, defaultdict
@@ -916,6 +917,16 @@ class AutoRefine:
           正是 11-04 死了 58 分钟的那个机制。故加 `_plan_base_only` 限定。
         """
         sets = self._calc_sets_raw(plan, stock, pending, free_slots)
+        # ★★ 2026-11-09 用户验收线（禁单轮超炼）：
+        #   自动推断的套数最多 2 套 —— 2 套 = 合法的「跨轮重叠」（相当于同时炼
+        #   2 套同星卡，峰值 < 2N 可接受）。历史事故是 1★ 按 max(囤的 40 面)
+        #   把 sets 抬到 5~6，只为凑 1 套却按 5~6 套重复炼料 = 单轮超炼，
+        #   箱位被吃光、零上交。界面显式设的套数（surplus_sets>0）是用户主动
+        #   要多套，不钳；MC_AUTO_MAX_SETS=0 可消融回旧口径（仅供 A/B）。
+        if not (getattr(self, "surplus_sets", 0) and self.surplus_sets > 0):
+            _cap_auto = int(os.environ.get("MC_AUTO_MAX_SETS", "2") or 0)
+            if _cap_auto > 0:
+                sets = min(sets, _cap_auto)   # sets<=0 的缺口闸语义保持不变
         cur = int(box_cur or getattr(self, "_box_cur", 0) or 0)
         if cur > 0 and plan.ids:
             free = cur - int(getattr(self, "_box_used", 0) or 0)
