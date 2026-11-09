@@ -2,20 +2,33 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261109a";
+const APP_VER = "20261109b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
-// 全局劫持 fetch，自动把 token 注入 X-MC-Token 请求头；无 token 时不带（走扫码登录）。
+// 全局劫持 fetch：① 自动把 token 注入 X-MC-Token 请求头；② 请求途中若切了号，
+// 丢掉旧账号响应（换成空 JSON），否则慢响应会把 A 号数据回填到 B 号已重建的 DOM。
+let ACCT_GEN = 0;                       // 每次切号 +1
+function accountToken() { try { return sessionStorage.getItem("mc_token") || ""; } catch (e) { return ""; } }
+const ACCT_STALE = { ok: false, __stale: true, message: "" };
 (function () {
   const _fetch = window.fetch.bind(window);
   window.fetch = function (input, init) {
     init = init || {};
-    const tok = sessionStorage.getItem("mc_token");
-    if (tok) {
-      init.headers = Object.assign({}, init.headers, { "X-MC-Token": tok });
-    }
-    return _fetch(input, init);
+    const tok = accountToken();
+    if (tok) init.headers = Object.assign({}, init.headers, { "X-MC-Token": tok });
+    const url = typeof input === "string" ? input : (input && input.url) || "";
+    // 登录/登出类请求不替换：二维码是图片，/api/me 是切号动作自己发起的
+    const guard = url.indexOf("/api/login/") !== 0 && url.indexOf("/api/logout") !== 0;
+    return _fetch(input, init).then((r) => {
+      if (!guard || accountToken() === tok) return r;
+      let ct = "";
+      try { ct = r.headers && r.headers.get ? (r.headers.get("content-type") || "") : ""; } catch (e) {}
+      if (ct.indexOf("json") < 0) return r;
+      return new Response(JSON.stringify(ACCT_STALE), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    });
   };
 })();
 
@@ -221,6 +234,7 @@ async function logHistory() {
   try {
     const r = await fetch("/api/log?kind=op");
     const d = await r.json();
+    if (d && d.__stale) return;
     if (d && Array.isArray(d.entries)) {
       const seen = new Set(_opEntries.map((e) => e.ts + "|" + e.msg));
       for (const e of d.entries) {
@@ -293,6 +307,7 @@ async function mlogHistory() {
   try {
     const r = await fetch("/api/log?kind=match");
     const d = await r.json();
+    if (d && d.__stale) return;
     if (d && Array.isArray(d.entries)) {
       const seen = new Set(_matchEntries.map((e) => e.ts + "|" + e.msg));
       for (const e of d.entries) {
@@ -386,12 +401,14 @@ function showDash(uin) {
   $("dash-uin").textContent = uin || "(未知)";
   window.__myUin = String(uin || "");   // 每日比赛 PVP 榜用于标出「我」那一行
   $("top-user").textContent = uin ? `QQ ${uin}` : "";
-  logHistory();  // 登录后先恢复历史操作日志（刷新/重开仍在）
-  log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
-  initFriendPoolPref();  // 此时 token 才落 sessionStorage —— 按账号重读一次偏好
-  // ★ 2026-11-09：同一标签页「沿用会话」切号不刷新页面，页面级缓存会串。
-  //   这里统一作废按账号的缓存，并立刻按新账号重拉偷炉好友池（无需手动刷新页面）。
+  // ★ 2026-11-09：同一标签页「沿用会话」切号不刷新页面，页面级单例会串。
+  //   顺序不能乱：先停旧账号的自动循环 → 再清缓存/界面日志 → 最后按新账号重拉。
+  stopAllAccountLoops();
   resetAccountScopedCache();
+  initFriendPoolPref();  // 此时 token 才落 sessionStorage —— 按账号重读一次偏好
+  log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
+  logHistory();          // 服务端按 token 存；本地已先清空，不会混进上一个号
+  mlogHistory();         // 比赛页右栏同理（原来只在首次 initMatchOnce 拉一次）
   loadStealFriends(true);
   switchPane("overview");
   loadState();
@@ -902,6 +919,7 @@ async function travelFriendsList(silent) {
   try {
     const r = await fetch("/api/travel/friends").then((x) => x.json())
       .catch((e) => ({ ok: false, message: e.message }));
+    if (r && r.__stale) return;
     travelFriendsCache = r;
     renderTravelFriends();
     if (!silent) log(`[旅行] 好友列表：已开通 ${r.count ?? 0} 个，其中可浇 ${r.waterable ?? 0} 个（已种未成熟 · 今日未浇）。`, r.ok ? "ok" : "err");
@@ -1494,6 +1512,7 @@ async function loadState() {
   const box = $("state-box");
   try {
     const d = await (await fetch("/api/state")).json();
+    if (d && d.__stale) return;
     if (d.need_login || d.code === -1001 || /重新登陆/.test(d.message || "")) {
       forceLogin("会话已过期（skey 失效），请重新扫码登录");
       return;
@@ -1666,9 +1685,11 @@ const exState = {
 let scanTimer = null;  // 扫描进行中的计时器
 
 async function initExchangeOnce() {
-  if (exState.inited) return;
-  exState.inited = true;
-  bindExchangeEvents();
+  if (!exState.inited) {
+    exState.inited = true;
+    bindExchangeEvents();
+  }
+  if (acctLoaded("exchange")) return;
   // 拉一次已有手动名单
   try {
     const d = await (await fetch("/api/exchange/peers?tid=0")).json();
@@ -1750,6 +1771,7 @@ async function exLoadPayCards() {
   box.textContent = "加载中…";
   try {
     const st = await (await fetch("/api/state")).json();
+    if (st && st.__stale) return;
     const cb = (st.changebox || {}).cards || [];
     const sb = (st.storebox || {}).cards || [];
     const all = [...cb, ...sb];
@@ -2731,18 +2753,20 @@ let afFiltered = [];         // 过滤后的面额
 const AF_ITEM_H = 30;        // 每行高度(px)，需与 CSS 一致
 
 async function initLibOnce() {
-  if (priceChipsLoaded) return;
-  priceChipsLoaded = true;
-  try {
-    const d = await (await fetch("/api/cards/prices")).json();
-    if (d.ok && d.prices && d.prices.length) {
-      allPrices = d.prices;
-      buildAllFaces();
-    }
-  } catch { /* 非关键 */ }
-  // 模式切换默认动作
-  setLibMode("price");
-  runCardQuery();
+  if (!priceChipsLoaded) {
+    priceChipsLoaded = true;
+    try {
+      const d = await (await fetch("/api/cards/prices")).json();
+      if (d.ok && d.prices && d.prices.length) {
+        allPrices = d.prices;
+        buildAllFaces();
+      }
+    } catch { /* 非关键 */ }
+    // 模式切换默认动作
+    setLibMode("price");
+  }
+  if (acctLoaded("lib")) return;
+  runCardQuery();   // 卡册「已拥有/已集齐」按账号，切号必须重查
 }
 
 function buildAllFaces() {
@@ -3346,7 +3370,7 @@ let autoInitDone = false;
 let autoTimer = null;
 
 function initAutoOnce() {
-  if (autoInitDone) return;
+  if (!autoInitDone) {
   autoInitDone = true;
   $("auto-start").onclick = autoStart;
   $("auto-stop").onclick = autoStop;
@@ -3368,6 +3392,8 @@ function initAutoOnce() {
     pick.onchange = () => { $("auto-steal-friend").value = pick.value || ""; saveStealFriend(); };
     $("auto-steal-friend").oninput = () => { pick.value = ""; saveStealFriend(); };
   }
+  }
+  if (acctLoaded("auto")) return;   // 已为当前账号拉过数据，别重复请求
   loadAutoOptions();
   loadStealFriends();
   autoRefresh();
@@ -3437,12 +3463,73 @@ async function loadStealFriends(force = false) {
 
 // 切号（沿用会话 / 重新扫码）时统一作废「按账号」的模块级缓存 —— showDash 里调用。
 // 这些原本都是页面级单例，同标签页换号不刷新页面就会继续显示上一个账号的数据。
+// 按 token 记住「某页的数据已为当前账号加载过」。initXXXOnce 的事件绑定仍是一次性
+// （DOM 元素没变，重复 addEventListener 会触发两次），只有「拉数据 + 回填」走这里。
+let _acctLoaded = {};
+function acctLoaded(name) {
+  const tok = accountToken();
+  if (_acctLoaded[name] === tok) return true;
+  _acctLoaded[name] = tok;
+  return false;
+}
+
+// 切号时停掉所有按账号运行的自动循环 —— 否则 A 号启动的自动旅行/换卡/炼卡/灵宠
+// 会带着 B 号的新 token 继续发请求（不只是显示串号，是会真的对 B 号动手）。
+function stopAllAccountLoops() {
+  if (travelAutoTimer) { clearInterval(travelAutoTimer); travelAutoTimer = null; }
+  if (digPollTimer)    { clearInterval(digPollTimer);    digPollTimer = null; }
+  if (exAutoTimer)     { clearInterval(exAutoTimer);     exAutoTimer = null; }
+  if (scanTimer)       { clearInterval(scanTimer);       scanTimer = null; }
+  if (autoTimer)       { clearInterval(autoTimer);       autoTimer = null; }
+  if (matchSubTimer)   { clearInterval(matchSubTimer);   matchSubTimer = null; }
+  if (spTimer)         { clearInterval(spTimer);         spTimer = null; }
+  if (spLiveTimer)     { clearInterval(spLiveTimer);     spLiveTimer = null; }
+  digAutoRunning = false;
+  homeAllRunning = false;
+  lotRunning = false;
+}
+
 function resetAccountScopedCache() {
-  travelFriendsCache = null;      // 猫咪旅行「已开通好友」列表
-  exPayCache = null;              // 换卡支付卡箱
-  exPaySel = new Set();           // 换卡已勾选的卡
-  homeStateCache = null;          // 家/竞技场状态行
-  stealFriendsToken = null;       // 偷炉好友池
+  ACCT_GEN += 1;
+  _acctLoaded = {};
+  // 界面日志：logHistory/mlogHistory 是「合并」不是「替换」，不清就会两号混在一屏
+  _opEntries = [];
+  _matchEntries = [];
+  logRender([]);
+  mlogRender([]);
+  // 偷炉好友池 + 并发去重标记
+  stealFriendsToken = null;
+  stealFriendsPending = null;
+  // 各页缓存（全是账号数据；静态卡表 / 官方配置表不在此列）
+  travelFriendsCache = null;
+  travelLastState = null;
+  exPayCache = null;
+  exPaySel = new Set();
+  exState.manualPeers = [];
+  exState.apiPeers = [];
+  exState.themeCards = [];
+  exState.results = null;
+  exState.themeIds = new Set();
+  exState.pickCards = new Set();
+  exState.themeTid = 0; exState.themeName = "";
+  exState.price = ""; exState.manualText = ""; exState.cardKw = "";
+  cbState = { change: null, store: null };
+  cbChangeReady = false;
+  _propsCache = null;                 // /api/props 是账号道具库存，不是静态卡数据
+  digRelics = [];
+  homeStateCache = null;
+  matchState = null; matchTheme = null; matchPvp = null; matchUnion = null;
+  matchGold = null; matchGvg = null; matchSanguo = null;
+  matchUnionExtra = null; unionQuota = null; matchPvpExtra = null;
+  matchXiyou = null; matchXiyouTeam = null; matchSanguoLevels = null;
+  matchLog = null; matchSgBox = null;
+  sgPickChapter = 0; xyPickChapter = 0;
+  spRendered = new Set();
+  spPicked = { map: false, across: false, island: false };
+  spRecent = null; spPrevTs = 0; spAutoModes = null;
+  spSpiritesData = []; spLastData = null; spMode = "map";
+  autoLogCleared = false;
+  libState.curThemeTid = null;
 }
 
 async function loadAutoOptions() {
@@ -3711,7 +3798,7 @@ let cardboxInitDone = false;
 let cbState = { change: null, store: null };
 
 function initCardBoxOnce() {
-  if (cardboxInitDone) return;
+  if (!cardboxInitDone) {
   cardboxInitDone = true;
   $("cb-refresh").onclick = () => loadCardBox(true);
   // 点卡箱里任意一张卡 -> 弹窗显示所属套卡的合成路径；卖/移按钮区域不触发
@@ -3722,6 +3809,8 @@ function initCardBoxOnce() {
     const cid = Number(card.dataset.cid);
     if (cid) openSynth(cid);
   });
+  }
+  if (acctLoaded("cardbox")) return;   // 切号后必须重拉两箱，别显示上一个号的卡
   // 先填充 cbState（卡箱两栏），再初始化变卡表单（表单依赖 cbState 的箱卡数据）
   (async () => {
     await loadCardBox();
@@ -3734,6 +3823,7 @@ async function loadCardBox(withLog = false) {
   if (hint) hint.textContent = "读取中…";
   try {
     const d = await (await fetch("/api/state")).json();
+    if (d && d.__stale) return;
     if (!d.ok) {
       if (hint) hint.textContent = `读取失败：${d.message || d.code || ""}`;
       log(`读取卡箱失败：${d.message || d.code || ""}`, "err");
@@ -5396,6 +5486,7 @@ async function loadHomeState() {
   try {
     d = await fetch("/api/home/state").then((x) => x.json());
   } catch (e) { st.textContent = "读取失败：" + e; return; }
+  if (d && d.__stale) return;
   if (!d || d.ok === false) {
     st.textContent = "读取失败：" + (d && d.message || "?");
     homeStateCache = null;
@@ -6221,6 +6312,7 @@ let spAutoModes = null;  // /api/spirite/auto/status 的三套玩法各自运行
 //   island = 荒岛       c_island                         8 章  48 关（状态 hy_*，已证实）
 //   across = 穿越丛林   c_across                        11 章  62 关（状态未确认）
 // 三者的「关卡号」语义不同：大地图是 section_id（章内 1..N），另两套是**连续编号 seq**（跨章不重置）。
+let spLastData = null;  // 最近一次 /api/cat/travel 完整状态（原为隐式全局，切号必须清）
 let spMode = "map";
 let spTable = {};
 let spMapIds = [];
@@ -6509,7 +6601,10 @@ async function spLoadTable() {
 }
 
 function initSpiriteOnce() {
-  if (spInited) return;
+  if (spInited) {
+    if (!acctLoaded("spirite")) { spRefresh(); spPoll(); }
+    return;
+  }
   spInited = true;
   // 2026-09-19：控制按钮已移入各玩法格内（spRenderAll 动态生成 + 绑定），
   // 不再有固定 id 的 sp-refresh/sp-harvest/sp-start/sp-once/sp-stop 元素。
@@ -6540,6 +6635,7 @@ function initSpiriteOnce() {
     }
   });
   spLoadTable();
+  acctLoaded("spirite");
   spRefresh();
   spPoll();
 }
@@ -6734,6 +6830,7 @@ async function ovLoadProps() {
   if (!box) return;
   try {
     const d = await (await fetch("/api/props")).json();
+    if (d && d.__stale) return;
     const ps = d.props || [];
     box.innerHTML = ps.length
       ? ps.map((p) => '<span class="stat-chip" style="padding:3px 8px">'
@@ -6894,6 +6991,7 @@ async function spStop(mode, el) {
 async function spPoll() {
   try {
     const d = await (await fetch("/api/spirite/auto/status")).json();
+    if (d && d.__stale) return;
     const modes = d.modes || {};
     spAutoModes = modes;   // 供三行状态面板显示「● 自动中」徽标
     // 聚合三套玩法的日志（带玩法前缀），去重后写入面板
