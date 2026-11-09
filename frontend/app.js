@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261107b";
+const APP_VER = "20261109a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -389,6 +389,10 @@ function showDash(uin) {
   logHistory();  // 登录后先恢复历史操作日志（刷新/重开仍在）
   log(`已进入主面板，当前账号 ${uin || ""}`, "ok");
   initFriendPoolPref();  // 此时 token 才落 sessionStorage —— 按账号重读一次偏好
+  // ★ 2026-11-09：同一标签页「沿用会话」切号不刷新页面，页面级缓存会串。
+  //   这里统一作废按账号的缓存，并立刻按新账号重拉偷炉好友池（无需手动刷新页面）。
+  resetAccountScopedCache();
+  loadStealFriends(true);
   switchPane("overview");
   loadState();
   if (stateTimer) clearInterval(stateTimer);
@@ -3357,11 +3361,12 @@ function initAutoOnce() {
   if ($("auto-queue-tid")) $("auto-queue-tid").onkeydown = (e) => {
     if (e.key === "Enter") autoQueueAdd();
   };
-  // 偷炉好友下拉：选一个就填进输入框，输入框仍可手动改（如填不在好友列表里的 QQ）
+  // 偷炉好友下拉：选一个就填进输入框，输入框仍可手动改（如填不在好友列表里的 QQ）。
+  // 「常去好友」按账号存 sessionStorage：同标签页切号不会把 A 的 QQ 留给 B。
   const pick = $("auto-steal-pick");
   if (pick) {
-    pick.onchange = () => { $("auto-steal-friend").value = pick.value || ""; };
-    $("auto-steal-friend").oninput = () => { pick.value = ""; };
+    pick.onchange = () => { $("auto-steal-friend").value = pick.value || ""; saveStealFriend(); };
+    $("auto-steal-friend").oninput = () => { pick.value = ""; saveStealFriend(); };
   }
   loadAutoOptions();
   loadStealFriends();
@@ -3388,22 +3393,56 @@ async function autoQueueAdd() {
 
 // 偷炉「常去好友」下拉：从好友列表（card_user_list，194 人）里选，选完填进右边的输入框。
 // 按经验值倒序 —— 高等级好友更可能有炉且长期在线；自己会被后端排除。
-let stealFriendsLoaded = false;
-async function loadStealFriends() {
+// ★ 2026-11-09 多账号串池修复：后端 /api/players 按 token 各返各的好友池（实测
+//   4821992=194 人、3822843=20 人），但同一标签页「沿用会话」切号时页面不刷新，
+//   原来的模块级布尔 stealFriendsLoaded 让第二个账号一直显示第一个账号的列表。
+//   改为按 token 记忆 + 切号强制重拉 + 响应回来再校验 token（防慢响应覆盖新账号）。
+let stealFriendsToken = null;        // 当前下拉里装的是哪个账号的好友池
+let stealFriendsPending = null;      // 正在飞的请求属于哪个账号（防并发重复拉）
+function stealFriendKey(tok) { return "mc.stealFriend." + (tok || "").slice(0, 8); }
+function saveStealFriend() {
+  try {
+    const tok = sessionStorage.getItem("mc_token") || "";
+    sessionStorage.setItem(stealFriendKey(tok), ($("auto-steal-friend").value || "").trim());
+  } catch (e) {}
+}
+async function loadStealFriends(force = false) {
   const sel = $("auto-steal-pick");
   if (!sel) return;
-  if (stealFriendsLoaded) return;
+  const tok = sessionStorage.getItem("mc_token") || "";
+  if (stealFriendsPending === tok) return;
+  if (!force && stealFriendsToken === tok) return;
+  stealFriendsPending = tok;
   try {
     const r = await (await fetch("/api/players", { method: "POST" })).json();
+    // 请求途中又切了号 → 丢弃旧账号响应，别把 A 的好友池写进 B 的下拉
+    if ((sessionStorage.getItem("mc_token") || "") !== tok) return;
     const rows = (r.players || []).slice().sort((a, b) => (b.exp || 0) - (a.exp || 0));
     sel.innerHTML = `<option value="">不指定（自动挑）</option>` + rows.map((p) =>
       `<option value="${p.uin}">${esc(p.nick || p.uin)}（${p.uin}）</option>`).join("");
-    stealFriendsLoaded = true;
-    if ($("auto-steal-friend").value.trim()) sel.value = $("auto-steal-friend").value.trim();
+    stealFriendsToken = tok;
+    // 「常去好友」也按账号隔离：切号恢复本账号上次选的人，别留着上一个账号的 QQ
+    let saved = "";
+    try { saved = sessionStorage.getItem(stealFriendKey(tok)) || ""; } catch (e) {}
+    $("auto-steal-friend").value = saved;
+    sel.value = saved && Array.from(sel.options).some((o) => o.value === saved) ? saved : "";
     log(`偷炉好友列表已加载：${rows.length} 人`, "ok");
   } catch (e) {
     log("加载好友列表失败：" + e, "err");
+  } finally {
+    // 旧账号的慢响应不能把新账号的「进行中」标志清掉
+    if (stealFriendsPending === tok) stealFriendsPending = null;
   }
+}
+
+// 切号（沿用会话 / 重新扫码）时统一作废「按账号」的模块级缓存 —— showDash 里调用。
+// 这些原本都是页面级单例，同标签页换号不刷新页面就会继续显示上一个账号的数据。
+function resetAccountScopedCache() {
+  travelFriendsCache = null;      // 猫咪旅行「已开通好友」列表
+  exPayCache = null;              // 换卡支付卡箱
+  exPaySel = new Set();           // 换卡已勾选的卡
+  homeStateCache = null;          // 家/竞技场状态行
+  stealFriendsToken = null;       // 偷炉好友池
 }
 
 async function loadAutoOptions() {
