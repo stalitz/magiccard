@@ -1,80 +1,58 @@
 # 魔法卡片助手 · 长期记忆（铁律 + 指针）
 
-深细节看 `.workbuddy/memory/REFERENCE.md`（含 2026-11-04 精简前 MEMORY.md 逐字原文 + 2026-10-30 归档旧版）、`docs/`、`tests/`、`git log`；流水看 `YYYY-MM-DD.md`。
+全文归档：`.workbuddy/memory/REFERENCE.md`（含 2026-11-09 及更早各版 MEMORY.md 逐字原文）；流水 `.workbuddy/memory/YYYY-MM-DD.md`；其余细节 `docs/`、`tests/`、`git log`。本文件只留仍生效的铁律。
 
 ## 方法论
 - 现象 > 推测，禁单点采样下全局结论；写操作先回查定调原文（`git log -S`）。**高面值卡永不自动卖**，只卖 ≤10 面底卡。
-- ★本机 Bash `grep "a\|b"` 的 alternation **不生效**（静默空 → 误判「没这个东西」）→ 用 Grep tool 或 `grep -e`。
-- 只读排查先跑 `tools/live_contract_check.py`；httpx 探针必须 `headers={"Connection":"close"}`。
-- 基准出现「远超 tick 量级」的差异时，别用机制直觉解释，直接打逐 tick 时间线。
+- 本机 Bash `grep "a\|b"` alternation 静默失效 → 用 Grep tool 或 `grep -e`。只读排查先跑 `tools/live_contract_check.py`；httpx 探针加 `headers={"Connection":"close"}` + `trust_env=False`。基准「远超 tick 量级」的差异直接打逐 tick 时间线。
 
-## 会话 / 多账号架构（2026-10-31 落地）
-- 同端口多账号：`SESSIONS[token→LoginSession]` + `SessionProxy`（contextvar 路由）；前端 token 存 `sessionStorage` 经 `X-MC-Token` 头携带（按标签页隔离，普通开两个标签即各登各号），cookie 仅兜底。落盘 `SESSIONS_DIR/<token>.json`，无 token 走 `default`。各引擎缓存键改用真实 session。
-- ★★ **模块级缓存必须按账号分桶**（2026-11-04 真 bug）：`_travel_aux_cache` 曾是进程级单例，45s TTL 内 A 账号的食物/任务被 B 复用（3822843 显示 4821992 的库存）。→ 新增任何 `_xxx_cache = {...}` 都要按 `token/uin` 分桶，invalidate 只清当前账号。
-- **隔离现状清单（2026-11-06 全量排查，含落盘状态）**：引擎 `AUTOS[token]`（炼卡）/ `_AUTO_EX[token]`（换卡）/ `_ENGINES[(token,mode)]`（灵宠×4 玩法）/ `_autos[token]`（挖地）✅；日志 `_UI_LOGS`/`_MATCH_LOGS`/`LOG_UIN` ✅。已修单例：`_travel_aux_cache`、`dig_auto._auto`、`_inv_cache`(8s) / `_mini_cache`(60s) / `_collection_cache`(120s)、`_home_all_running`。统一走 `main._acct_bucket(store)`。`gift._face_of/_name_cache`、`_MODE_PROP_FETCH` 是静态卡数据，无需分桶。
-- ★★ **前端页面级单例也必须按账号失效（2026-11-09）**：同标签页「沿用会话」`resumeToken` 切号**不刷新页面**，`initAutoOnce` 的 `autoInitDone` 与偷炉下拉的 `stealFriendsLoaded` 都是模块级布尔 → 第二个账号永远显示第一个账号的好友池（后端 `/api/players` 按 token 实测 4821992=194 人 / 3822843=20 人，无责）。修法：`showDash()` 里 `resetAccountScopedCache()` 作废 `travelFriendsCache`/`exPayCache`/`exPaySel`/`homeStateCache`，`loadStealFriends(true)` 按 token 重拉 + `stealFriendsPending` 并发去重 + 响应回来再校验 token；「常去好友QQ」按 token 存 sessionStorage。**新增任何 `let xxxLoaded/xxxCache` 要么按 token 分桶，要么进 `showDash` 的统一失效清单**。静态卡数据缓存（`priceChipsLoaded`/`_propsCache`/`cardCache`）不用分。
-- ★★ **落盘状态也必须按账号分（2026-11-06 `aff9f66`）**：内存分桶只解决一半 —— 同端口多号共进程，凡是写**固定路径文件**的日计数/限次/缓存都会串。用户实测：A 号送礼送满 50 人 → B 号点一键日常直接被本地闸拦下、0 请求。统一走新建的 `backend/acct.py`：`acct_key(session)`（**uin 优先**：额度/限次是游戏账号级，同号多 token 本就该共享，顺带合并 default 同号的坑）与 `acct_path(p, session)`（`x.json` → `x.<uin>.json`）。已改：送礼日计数 `/tmp/mc_gift_daily.<uin>.json`、工会日限次 `data/union_quota.<uin>.json`（摇水果3/公会战3/兑换1）、比赛主题 `/tmp/mc_match_theme.<uin>.json`、出战记录 `/tmp/mc_match_race.<uin>.jsonl`、猫家/工会/三国运行历史 `data/*.<uin>.json`、挖地 `_unknown` 按 `acct_key` 分桶；前端 localStorage（公会战已出战计数、好友池开关）key 加 token 前缀（localStorage 是整个浏览器共享，只有 sessionStorage 按标签页）。
-- **登记规则**：新增任何「每日 N 次 / 已领过 / 上次用过」类状态，**一律 `acct.acct_path()` 落盘 + 函数收 `session=None` 参数逐点传参**，不要图省事写 `/tmp/xxx.json`。日志类可共用文件，但每行必须带 `uin=`（如 `buylog`）——共用可以，「分不清是哪个号」不行。
-- 全局限流器（`travel_elf_auto._last_req_ts`、`dig_auto._last_req_ts`，最小请求间隔）**故意共享**：它保护的是整个 IP 不被服务端限流，不是账号状态。`exchange_peers.json`（手动卡友名单）是用户输入，默认跨号共享。
-- ⚠️ **default 与真 token 可能是同一个 QQ 号**（`/tmp/mc_sessions/default.json` 当前 = 4821992，与 `7k2x…` 同号）：无 token 的请求会落到 default 的**另一个 LoginSession**，若两边各起一个引擎就是同号双引擎抢炉/抢卡。排查串号先看这个。
-- 日志按账号：`LOG_UIN` contextvar 分流 → `<LOG_DIR>/global.log`（聚合）+ `<LOG_DIR>/<uin>.log`；引擎流水走 `engine_logger` 只落 `<uin>.log` + stdout（`server.sh` 另有 `/tmp/mc_<PORT>.log` 总览）。`LOG_DIR` 默认 `/tmp/mc_logs/<PORT>`。
-- ⚠️ `/api/me` 探针判 -1001 会 `clear()` 删落盘文件 → 重扫一次即可。
-- ⚠️ 界面日志（`<token>_op.log`）与引擎日志（`<uin>.log`）是两套；「跑一轮」走 SSE 直推前端，**不落引擎日志**，只有 `_log()` 才落盘。
+## 多账号隔离（最高优先级）
+- 架构：`SESSIONS[token→LoginSession]` + `SessionProxy`(contextvar)；token 存 `sessionStorage` 经 `X-MC-Token` 传（按标签页隔离），cookie 兜底；落盘 `SESSIONS_DIR/<token>.json`，无 token 走 `default`。
+- ★三类状态一律按账号分：①后端内存缓存按 token/uin 分桶（`main._acct_bucket`，invalidate 只清当前号）；②落盘日计数/限次一律 `acct.acct_path(p, session)`（`x.json`→`x.<uin>.json`，`acct_key` **uin 优先**），函数加 `session=None` 逐点传参；③前端页面级单例进 `showDash()` 的 `resetAccountScopedCache()` 全量失效清单（2026-11-09 已落地，见下）；localStorage key 必须加 token 前缀（**localStorage 整浏览器共享，只有 sessionStorage 按标签页**）。
+- ★★ **前端隔离统一模式（2026-11-09 `20261109b`）**：`showDash()` 顺序固定为 `stopAllAccountLoops()`（清 8 个定时器 + running 标志）→ `resetAccountScopedCache()`（~40 个账号态 + 界面日志 + `_acctLoaded` + `ACCT_GEN++`）→ `logHistory()/mlogHistory()` 重拉 → 各页 `initXXXOnce()` 由 `acctLoaded(name)` 按 token 判定「数据重拉但事件只绑一次」。全局 fetch 包装**响应回来时**比对 token，不一致换 `ACCT_STALE` 空 JSON（关键回填点再短路 `__stale`），零调用点改动防慢响应覆盖。新增任何 `let xxxCache/xxxDone` 必须进这个清单或按 token 分桶。
+- 已修：`AUTOS`/`_AUTO_EX`/`_ENGINES`/`_autos`、日志 `_UI_LOGS`/`_MATCH_LOGS`/`LOG_UIN`、`_travel_aux_cache`、`dig_auto._auto`、`_inv_cache`/`_mini_cache`/`_collection_cache`、`_home_all_running`；送礼日计数、工会限次、比赛主题/出战记录、猫家/工会/三国历史、挖地 `_unknown`；前端偷炉好友池（`autoInitDone`/`stealFriendsLoaded`→按 token 重拉 + `stealFriendsPending` 并发去重 + 响应回来再校验 token）、常去好友QQ。
+- 故意共享：全局限流器（`_last_req_ts`，护 IP）、`exchange_peers.json`（用户输入）、静态卡数据（`priceChipsLoaded`/`allPrices`/`cardCache`/`spTable` 等官方配置表/`gift._name_cache`/`_MODE_PROP_FETCH`）。⚠️ **`_propsCache` 不是静态数据**（`/api/props` 账号道具库存，2026-11-09 复核纠正），必须按账号失效。
+- 日志：`LOG_UIN` → `global.log` + `<uin>.log`；界面日志 `<token>_op.log` 是另一套；「跑一轮」SSE 不落引擎日志，只有 `_log()` 落盘。
+- 坑：`/api/me` 探针判 -1001 会 `clear()` 删落盘文件（重扫即可）；default 无 token 可能与真 token 同 QQ 号 → 双引擎抢炉。
 
 ## 真机硬约束（API 事实）
-- ★**集齐奖励字段（2026-11-06 用户实测钉死）**：卡库 `theme_card_list` 的 **t[6] = 金币、t[7] = 经验**。用户交「时尚女套装」(tid=45) 实测 `user.money +100`、`user.exp +200`，与该套 t[6]=100 / t[7]=200 完全对上（此前只把 t[6] 当金币用，t[7] 一直没解读）。规律：老套两值不同（1★ 100/200、2★ 常见 200/500、588/888），3★ 以上新套基本相等（888/888、5668/5668、8888/8888），顶格收集套 19999。落地：`card_query.indexes()` 出 `gold`/`exp`、`ThemePlan.gold/exp`（`prize` 保留成 gold 别名）、前端卡册列表与详情显示「集齐 N 金币 / N 经验」。`card_collection_add` 响应仍是空体，别指望从响应里取奖励。
-- 卡箱：changebox **18 硬顶**、storebox `<cur="168" max="200">` —— **cur 是已开通容量（168）**，max 是没花钱扩的上限；`nor` 才是普通卡数。简易箱 15 格。买卡只落换卡箱。**卡张数按两箱合计算**（保险箱的卡照样能投炉、能上交）。
-- ★**落箱规则（用户 2026-11-05）**：**炼成的卡优先进保险箱，保险箱满了才溢到换卡箱；只有买的 10 面底卡一定进换卡箱**。所以「还剩几格」必须按**两箱合计**算（`_free2`），只看换卡箱会漏掉「保险箱满 = 换卡箱也腾不出格」。跨箱只能 换卡箱→保险箱（`move_card(from_box=0)`）与 保险箱↔简易箱，**换卡箱不能直接进简易箱**。
-- ★**箱位闸（2026-11-05，`56cca35`）**：`两箱空位 < 本套还缺张数` → `_calc_sets` 返回 **0 套**（`net_plan(sets<=0)` 必须返回空；`max(1,sets)` 会抬回 1 → 超炼）。同一口径要同时拦「收尾买底卡」与「`_make_room` 卖 10 面底卡」，否则卖一张买一张空转、缺口不减。
-- 炉：**主炉台数 = `<stovebox stovenum>`**（`cur` 恒 7 是卡位总数）。`cur=7` = **5 主卡位(slot 0~4) + 1 偷炉位(slot 6) + 1 个 VIP 卡位(slot 5，未开通→不列)**，能用 6 个。**加炉道具 = 把排队位升成炉位**（非加卡位）：3 炉 = 3 炼+2 排／4 炉 = 4 炼+1 排／5 炉 = 5 炼+0 排（道具最多 +2）。硬约束 `free_main = 主卡位数 − 占位卡数`（数出来的，开 VIP 自动 +1）。5 炉时 `MC_MAIN_QUEUE=1` 消融自动失效。
-- 加炉到期：mainpage **不下发到期时间**（`stove_acc_ts`/`stove_jiasukaTs` 恒 0；`tem_slot_end_time` 是简易箱，别混）。信号只有 `stovenum` 变小；到期=炉位降回排队位，卡大概率继续炼完。已做 `_busy_stoves` 只数合法炉号 `0..machines-1`（超额炉不占并发预算，否则额度变负→停摆）+ 《缩容取证》日志。
-- 引擎并发炉数每 tick 取 `cap.stove.stovenum`（**禁写死 3**）；`_main_cap` 判忙 **必须按 `Furnace.stove` 炉号去重**（按卡数会把「1 炼 + 1 排」算成 2 台 → 额度恒 0 → 引擎不动）。
-- 取卡：**「空 2 格」是取卡前的准入门槛**（防幸运事件多给一张），**不是每张占 2 格**。逐张取、每取一张按新空位重判；没得奖就还剩 1 格可接着取，得奖才多吃 1 格。被拒时炉不消失、卡不丢。
-- 炼卡时长 = 表值 × **0.6232**（只用于未投的卡预测）；在炉卡走 `btime+locktime`，永远精确。上交瞬间必须**整套各 1 张同时在箱**。
-- 卡友 `card_user_theme_list(tid)`：每页 100 人（`node.uin` 用 `&#x7C;` 打包 10 个，需 `html.unescape`）。**分页环形**，翻到末页会绕回早前页、不返空；**部分主题被封顶=逻辑仅 1 页**（如床 1818：page1==page0）。识别：page1==page0 判封顶（`capped_tids` 上报）；深页并入全局去重后 **0 新增**判翻完（不能只比 page0，否则多页套死循环）。多套策略：主套先翻完，其余源套逐页交替。
-- 好友列表 `card_user_list` ≈194 人、不分页、**含本人**（uin 无前导 0）→ 偷炉必须按**数值**判「是不是我」（只比字符串会偷自己 → 冷却 120s + 自拉黑 30 分钟）。
-- ★换卡箱会被「非本套杂卡」永久锁死：`_box_compaction` 三段——卖多余 10 面底卡 / 挪本套合成卡 / **箱紧且保险箱有位时杂卡按面额降序挪保险箱（只挪不卖）**，腾到够一次「买 3 张立即投炉」即停。保险箱满（168/168）则只能用户自己清。
+- 奖励：`theme_card_list` **t[6]=金币、t[7]=经验**（时尚女套装 tid=45 交实测 100/200）；`card_collection_add` 空体。规律：老套两值不同，3★ 以上多相等，顶格 19999。
+- 箱：changebox 18 硬顶 / storebox `cur=168` 是**已开通容量**（`max=200` 非当前）、`nor` 普通卡数 / 简易箱 15 格。★**炼成卡优先进保险箱、满则溢到换卡箱；只有买的 10 面底卡一定进换卡箱** → 空位一律两箱合计 `_free2`。跨箱只支持 换→保 与 保↔简，换卡箱不能直接进简易箱。
+- 箱位闸：两箱空位 < 本套缺张数 → `_calc_sets` 返 0（`net_plan(sets<=0)` 返空，禁 `max(1,...)`）；同口径同时拦「收尾买底卡」与 `_make_room` 卖底卡。
+- 炉台数每 tick 取 `<stovebox stovenum>`（**禁写死 3**）；`cur=7` = 5 主卡位 + 1 偷炉 + 1 VIP(未开不列)；加炉道具是把排队位升炉位（3 炉=3 炼+2 排 … 5 炉=5 炼+0 排）。`_main_cap` 按 `Furnace.stove` 炉号去重判忙；`_busy_stoves` 只数 `0..machines-1`。到期无时间戳（`tem_slot_end_time` 是简易箱），只看 stovenum 变小。
+- 取卡「空 2 格」是**准入门槛**非每张占 2 格，逐张重判；被拒炉不消失。时长=表值×0.6232（未投卡预测），在炉走 `btime+locktime`。上交瞬间必须整套各 1 张同在箱。
+- 卡友 `card_user_theme_list(tid)` 每页 100、uin 需 `html.unescape`；分页环形、部分主题封顶（page1==page0）；深页全局去重 0 新增才判翻完。好友列表 ≈194 人含本人 → 偷炉按**数值**判自己。
+- 杂卡锁死换卡箱：`_box_compaction` 三段（卖多余 10 面 / 挪本套合成卡 / 箱紧时杂卡按面额降序挪保险箱**只挪不卖**），腾够一次买 3 张即停；保险箱满只能人工清。
 
-## 调度引擎（在线 RCPSP，滚动重规划）
-- 禁 god-function，planner/executor 分离。「优化初始序」类补丁**一律无效**（四次复现）；CP-SAT 只作标尺。
-- ★**中间卡料齐即向上炼（2026-11-08 定调 `cdf4753`，2026-11-09 修正 `9dd2deb`）**：执行层 pass 2a（`MC_MERGE_READY`）只收 feeders 全非底卡的 refine op（3→1 净腾 2 格），绕过 `start` 门占空主炉、复用 `early_ok` 预留、标记 issued + `_dirty`；底层 40 面 op（喂料是买的 10 面底卡）绝不进。**11-08 的「囤够 `MC_MERGE_STACK`=2 组」门槛已证伪并删除**：真机复现 tid=890 时它让 150 面早 1.28h，却把 540 顶层**推后 1.22h、完工 +1.23h**（挑中小米5/大麦3 这类富余支路，抢主炉炼非关键路径）；不是「换箱位的代价」，是抢错炉。现方案 A：只发 `cp` 最高档（cp=自身时长+最长前驱链，越顶层越大）、每 tick 至多 `MC_MERGE_PER_TICK`(1) 个。890（3 主炉）完工 15.65→15.01h、540 首炼 6.29→5.65h、箱峰值 29→23、40 面峰值 20→13；5 主炉完工锁死 13.75h 但箱峰值 17→15。⚠️ **A 未消退化**（与无条件 stack=1 相同）：3 主炉 85 +0.59h / 290 +1.21h，5 主炉 60 +1.22h / 709 +1.59h；真机 5 主炉口径下 85/290/59/890 均不退化。根因：CP 目标只有 makespan、`box_cap=change_cur+store_cur` 且仅当 `Σneed0>box_cap` 才启用 → 箱位从不进模型，DP 只在「炉位数+前驱」下最优，真机不是。下一步候选：箱位压力闸门 / 按链深自适应。
-- `sets` 封顶 = **换卡箱空位 // 套内张数**（真机爆箱事故，箱位才是硬约束，改炉位口径无效）。排队位任何场景都不该用。`reserve` 禁无条件 +2。
-- ★★ **用户 2026-11-09 定调的验收线（跨轮重叠 vs 单轮超炼）**：**跨轮重叠换时间、必然吃箱位，可以接受**；跨轮重叠等价于「同时炼 2 套同星卡」，因此**峰值 < 套内卡数 N × 2 都算可接受**；**一定不能是单轮超炼**（把 1 套的料按多套重复炼）。判别：`sets=2` 的两套完整净需求 = 合法跨轮重叠；`sets` 被 `_calc_sets_raw` 按囤卡 `max(have)` 放大到 5~6 而只为凑 1 套 = 单轮超炼。⚠️ 现状 `_calc_sets` 只有 `sets=min(sets, free//N)` 箱位封顶，186 格两箱、N=13 时上限约 12 套 → **没有 2 的硬上限，这条验收线尚未落地**。模型数据（W=2，1~5 星 × K=2~5 = 20 档）：20/20 时间更短（平均 −24%），峰 < 2N 为 17/20，越线 3 档全是 **5★67 的 K=2/3/4**（87/76/70 vs 2N=70）；W=2 峰 ≤ N 为 0/20。
-- 买卡空位只认 `change_free`（`_run_plan` / `_album_prebuy` / `_box_compaction` 三处）；决策前必须 `_read_state()` 重读。**决策间隔是第一性能变量**（K=1 50.85h → K=200 168.76h），生产 `interval=45.0`。
-- ★**集齐 > 取卡（2026-11-05 修正）**：`_collect_tight_ex` 三层——①空位==0→延后；②缺口**全是可买底卡**（`miss_comp` 空，与补集卡册同口径）且空位≤缺口→延后先集齐上交；③含合成卡→**不延后**（延后=不投炉=缺口不减=死锁）。11-04 曾一律收紧成「空位==0」，把「先集齐再取卡」的前提删掉 → 取卡吃光买底卡格位。有逃逸阀（连续 60 次延后且 bought 没涨→放行）。
-- 腾位 `candidates()` 跳过 `_recent_buys` 里 5 分钟内买进的卡，否则「买一张→卖掉刚买那张」空转（真机 bought 214 次、进度零）。
-- 必需卡判据 = **`net_plan` 净需求树**（`_is_collect_essential`，runs/buy 里还要它才算必需）；**distinct 口径是错的**（一个 id 要 7 张时误判「不缺」→ 预买全延后 → 熔断 35 分钟）。`as_take=True` 仅取卡/炉内卡用（先把它从在途扣掉）；买卡/变卡不扣。`_net_now` 按家底签名缓存。★逃逸阀：本 tick 无 refine 动作时不延后预买。
-- ★**买底卡铁律（2026-11-03）**：「卡没集齐时一个 10 面都不要买，只占位；收了最后一张在炼卡才一次买齐上交。」落地：`abs_slots==0`（无空主炉、无 1 tick 内空出的）→ `base_quota=0`，不留「箱宽松就囤」的口子。唯一批量买 10 面 = `_album_prebuy`。
-  - ⚠️ 别加「非底卡喂料必须在箱才买它的料」这类前置过滤（试过回退：一次只投 1 炉，85 4.45→5.04h）；也别改成「整波不齐就不买」（箱常只剩 1~2 格会死锁）。
-- ★**额度按「炉」成组花**（2026-11-04）：买卡与投炉本就同 tick（`buy_sametick` + 虚拟槽，执行层买完重读真实 slot）。pass 1 建 `waves`（一波 = 一个 refine op 的整套底卡），先按波填齐再按缺口补；按卡种累加会让额度全砸同一张卡 → 一炉凑不齐。
+## 调度引擎（在线 RCPSP）
+- 禁 god-function，planner/executor 分离；「优化初始序」类补丁一律无效（四次复现），CP-SAT 只作标尺。生产 `interval=45.0`（决策间隔第一性能变量：K=1 50.85h → K=200 168.76h）。
+- 方案 A（`cdf4753`/`9dd2deb`）：执行层 pass 2a `MC_MERGE_READY` 只收 feeders 全非底卡的 refine（3→1 净腾 2 格），绕 `start` 门、按 `cp` 最高档、每 tick ≤ `MC_MERGE_PER_TICK`(1)；底层 40 面 op 绝不进。`MC_MERGE_STACK=2` 门槛已证伪删除（抢主炉炼非关键路径拖慢顶层）。A 仍有退化档（3 炉 85/290、5 炉 60/709）；根因 CP 目标只有 makespan、箱位不进模型 → 下一步候选：字典序 `min makespan → min 峰值库存` / 箱位压力闸门。
+- ★★ **用户 2026-11-09 验收线**：跨轮重叠换时间、吃箱位可接受，等价于同时炼 2 套同星卡，**峰值 < 2N 都算可接受**；**绝不能单轮超炼**（`sets` 被 `_calc_sets_raw` 按囤卡 `max(have)` 放大到 5~6 而只凑 1 套）。`sets=2` 两套完整净需求 = 合法。现状 `_calc_sets` 只有 `free//N` 封顶、无 2 硬上限 → **未落地**。W=2 模型 20/20 更快（平均 −24%）、17/20 峰<2N；越线 3 档全是 5★67 低炉档。
+- `sets` 封顶 = 换卡箱空位 // 套内张数 N（箱位才是硬约束）；排队位任何场景都不该用；`reserve` 禁无条件 +2。
+- ★集齐 > 取卡：`_collect_tight_ex` 三层（空位 0 延后 / 缺口全是可买底卡且空位≤缺口 → 延后先集齐上交 / 含合成卡不延后），60 次逃逸阀。11-04 曾删掉前提导致取卡吃光买卡格位。
+- 买卡空位只认 `change_free`（`_run_plan`/`_album_prebuy`/`_box_compaction`），决策前 `_read_state()` 重读；★买底卡铁律 `abs_slots==0 → base_quota=0`，唯一批量买 = `_album_prebuy`；额度按「炉」成组花（waves）；`candidates()` 跳过 5 分钟内 `_recent_buys`（否则买一张卖一张空转）。必需卡判据 = `net_plan` 净需求树（distinct 口径错）；`as_take=True` 仅取卡/炉内卡；本 tick 无 refine 时不延后预买。别加「整波不齐就不买」类前置过滤（实测回退）。
 
-## 已结案（别再查）
-`net_plan` 中间层漏算（证伪）／290×2 +1.28h（骨架不纠正，已修）／5★ BF +0.34h（判定差异，不做）／精灵饿着（代价≈0，不建模）／「取卡 2 格致 750h 卡死」（过期，实测仅 5★ +1.61h）。
-
-## 基准（DP、45s/tick、两箱合计口径）
-单轮：1★85 **4.45** / 2★290 **14.43** / 3★59 **45.41** / 4★60 **50.83** / 5★709 **104.45**；4 主炉：85 **3.79**、290 **13.76**。
-多轮（BF）：178×2 3.79 / 178×3 5.69 / 85×3 13.18 / 290×2 21.26；收礼变卡：178×1 2.52 / 85×1 2.52 / 290×1 12.53 / 178×3 5.04。
-`MC_SIM_TAKE2=0` / `MC_BUY_FREE=0` 仅供历史对照。
+## 基准（DP、45s/tick、两箱合计）
+单轮：1★85 4.45 / 2★290 14.43 / 3★59 45.41 / 4★60 50.83 / 5★709 104.45；4 主炉：85 3.79、290 13.76。多轮 BF：178×2 3.79 / 178×3 5.69 / 85×3 13.18 / 290×2 21.26；收礼变卡 178×1 2.52 / 85×1 2.52 / 290×1 12.53 / 178×3 5.04。`MC_SIM_TAKE2=0`/`MC_BUY_FREE=0` 仅历史对照。
 
 ## 验收 / 运维
-- 改 backend 必须 `./server.sh stop && start` 真重载（`/api/auto/*` 不重载模块）；改完必须实际 `git commit`（分批：代码+测试 / 文档）；scratch 脚本不提交不删除。
-- 前端改 `app.js` 必同时 bump `index.html` 的 `?v=` **和** `app.js` 里的 `APP_VER` 常量（只改一处 → 日志里的版本号不可信）。按钮即时响应、文案禁代码标识。
-- 勿杀未知服务：`:8000` 本项目 / `:8777` agent-chat / `:9222` headless Chrome。
-- ★OCI 云部署：新开端口必须两步——①`sudo firewall-cmd --permanent --add-port=<port>/tcp && --reload` ②云控制台 Security List 加 TCP 入站。`command -v iptables` 在 opc PATH 会误报"无防火墙"（须 `sudo /sbin/iptables -S`）。SSH 140.83.54.40:22 opc，密钥 `~/Downloads/ssh-key-2021-12-04.key`。
+- 改 backend 必须 `./server.sh stop && start` 真重载（`/api/auto/*` 不重载模块）；改完必须实际 `git commit`（分批：代码+测试 / 文档）；scratch 脚本不提交不删除。重启后自动炼卡/换卡引擎为 stopped，需界面重新点开始。
+- 前端改 `app.js` 必同时 bump `index.html` 的 `?v=` **和** `APP_VER`（只改一处 → 日志版本号不可信）；`Cache-Control: no-store`。按钮即时响应、文案禁代码标识。★类名 `sel` 双用途：通用下拉样式必须写 `select.sel`，否则 `.sel{max-width:340px}` 把选中行压短；套卡首行名称 `flex:0 0 auto` 不参与收缩。
+- 勿杀未知服务：`:8000` 本项目 / `:8777` agent-chat / `:9222` headless Chrome。OCI 新开端口两步：① `sudo firewall-cmd --permanent --add-port=<port>/tcp && --reload` ② 云控制台 Security List 加 TCP 入站；`command -v iptables` 在 opc PATH 会误报（须 `sudo /sbin/iptables -S`）。SSH 140.83.54.40:22 opc，密钥 `~/Downloads/ssh-key-2021-12-04.key`。
 - 生产默认不勾 DP = 旧引擎，**不再修**（只作 A/B），DP 稳定后直接删；多套/多星一律勾 DP。bench 必须含 `dp=False, mr=0` 一档。
+- **默认指本地 8000**；未专门说「云端 / 140.83.54.40 / 8001」时一律指本地（`SESSIONS_DIR=/tmp/mc_sessions/`）。
 
-## 旅行（猫咪）要点
-- 次数：`day_limit_cnt=12` = 4 猫各 3 次 = 3 轮/天，**每天重置、与投喂数无关** → 投喂数是纯成本项。硬限制是「没食物不能出发」，既没食物又没三叶草=停摆。
-- 食物等级：A(quality=3) 500/个 +20min；C(quality=1) 360/个 +15min；quality 2/4 商店买不到。默认已切 **C + 每猫 1 个**（日耗 1080 三叶草）。4 猫必须各喂**不同**食物（4 种掉不同碎片池，A/C 一一对应：曲奇饼↔夹心饼干、寿司↔饭团、牛排↔汉堡、回忆棒棒糖↔回忆便当）。
-- 收获（act=23）前后比 act=3 食物清单可定性「旅行是否掉食物」；该对比已在 `run_once` 与 `harvest_returned`（界面「收获」按钮）两处埋点，结果以 `act=harvest_gain` 回前端。
+## 旅行（猫咪）
+- `day_limit_cnt=12` = 4 猫各 3 次 = 3 轮/天，每天重置、与投喂数无关；硬限制是没食物不能出发。默认 **C 级 + 每猫 1 个**（日耗 1080 三叶草）；4 猫必须各喂不同食物（A/C 一一对应 4 个碎片池）。
+- 收获（act=23）前后比 act=3 食物清单可定性「旅行是否掉食物」；已在 `run_once` 与 `harvest_returned` 埋点，以 `act=harvest_gain` 回前端。
+
+## 已结案（别再查）
+`net_plan` 中间层漏算（证伪）／290×2 +1.28h（已修）／5★ BF +0.34h（不做）／精灵饿着（代价≈0）／「取卡 2 格致 750h 卡死」（过期）。
 
 ## 未闭环
-1. 多套顺序敏感 —— **用户 2026-10-30 决定记录不修**（3 套 16.29~20.64h 差 27%；2 套幅度小；真机常见 178+85 顺序无关）。真因=4 炉位前期分配（在线 RCPSP），无单一静态规则，**别再重查归因**。
+1. 多套顺序敏感 —— 用户 2026-10-30 决定**记录不修**（真因=前期炉位分配，无单一静态规则，**别再重查归因**）。
 2. 金币/魔力余额与退避、翻牌产出、每日上限未建模。
-3. 收礼 `freegift_id` 83/86/7 未实证；后端不解析 `<elf>` 节点，无喂食端点。
-4. 贪心 `_make_room` 死角仍在（`keep_ids` 保护在炼套卡 → 卖不动），按上条不再修。
-5. 「旅行是否掉食物」待一次真机收获 + `act=harvest_gain` 日志确认。
-
-## 会话约定
-- **默认指本地 8000**：未专门说「云端 / 140.83.54.40 / 8001」时一律指本地（`SESSIONS_DIR=/tmp/mc_sessions/`）。之前多次误去云端查本地现象，属方向错。
-- ★前端类名 `sel` 是双用途：`<select class="sel">` 的下拉样式 + JS 给 `.it`/`.tchip`/`.pk` 加的选中态。任何**通用**下拉样式必须写成 `select.sel`，否则 `.sel{max-width:340px}` 会把选中行压短（2026-11-07 实测：配合套卡首行 nowrap + 名称可收缩，直接把套名压到 0 宽）。套卡首行名称必须 `flex:0 0 auto`（不参与收缩），宁可裁尾部徽章也不能压没名字。
+3. 收礼 `freegift_id` 83/86/7 未实证；后端不解析 `<elf>`，无喂食端点。
+4. 贪心 `_make_room` 死角仍在（`keep_ids` 保护在炼套卡）。
+5. 「旅行是否掉食物」待一次真机收获确认。
+6. ~~前端页面级单例四类串号~~ **2026-11-09 已全量修复**（`20261109b`，仿真 21/21 PASS，详见当日日志）。
