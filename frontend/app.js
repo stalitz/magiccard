@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261109b";
+const APP_VER = "20261110a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -1508,8 +1508,73 @@ async function onSlotAction(e) {
   await loadState();
 }
 
+// 总览页附加状态：珍藏阁炉位 + 礼物箱件数。
+// 独立渲染到 #ov-extras（不进 state-box，因为 loadState 每次会整体覆盖它），
+// 且只打 /api/overview/extras（两次非 mainpage 的只读真机请求）。
+async function ovLoadExtras() {
+  const el = $("ov-extras");
+  if (!el) return;
+  const tok = sessionStorage.getItem("mc_token") || "";
+  let d;
+  try {
+    d = await (await fetch("/api/overview/extras")).json();
+  } catch (e) {
+    if ((sessionStorage.getItem("mc_token") || "") === tok)
+      el.innerHTML = `<div class="err" style="grid-column:1/-1">读取失败：${esc(e)}</div>`;
+    return;
+  }
+  // 全局 fetch 包装已在响应回来时按 token 判 stale；这里再比一次防切号瞬间回填
+  if (!d || d.__stale || (sessionStorage.getItem("mc_token") || "") !== tok) return;
+  if (d.ok === false) {
+    el.innerHTML = chip("珍藏阁 / 礼物箱",
+      '<span style="color:var(--danger)">读取失败</span>', esc(d.message || "未登录"));
+    return;
+  }
+  el.innerHTML = ovExtrasHtml(d);
+}
+
+function ovExtrasHtml(d) {
+  const z = d.zcg || {}, g = d.gift || {};
+  let zc;
+  if (!z.ok) {
+    zc = chip("珍藏阁", '<span style="color:var(--danger)">读取失败</span>', esc(z.text || ""));
+  } else {
+    const ps = z.puzi || [];
+    const done = ps.filter((p) => p.finished).length;
+    const busy = ps.filter((p) => p.state === "炼制中").length;
+    const empty = ps.filter((p) => p.state === "空").length;
+    const mj = z.mojing || {};
+    const mjSum = (Number(mj.cmj) || 0) + (Number(mj.hmj) || 0) + (Number(mj.zmj) || 0);
+    let sub = `${empty} / ${ps.length} 空位 · 魔晶 ${mjSum}`;
+    const nexts = ps.filter((p) => p.state === "炼制中" && p.done_at > 0)
+                    .map((p) => p.done_at).sort((a, b) => a - b);
+    if (nexts.length) {
+      const left = Math.round(nexts[0] - Date.now() / 1000);  // 取整，否则 fmtLeft 会显示 59.999… 秒
+      sub += left > 0 ? ` · 最快 ${fmtLeft(left)}后可收` : " · 即将可收";
+    }
+    if (done) sub += " · 可点一键日常收炉";
+    const v = done
+      ? `<span style="color:var(--accent);font-weight:700">${done} 炉可收</span>`
+      : (busy ? `${busy} 炉炼制中` : "全部空闲");
+    zc = chip("珍藏阁", v, sub);
+  }
+  let gc;
+  if (!g.ok) {
+    gc = chip("礼物箱", '<span style="color:var(--danger)">读取失败</span>', esc(g.text || ""));
+  } else {
+    const cap = Number(g.cap) || 50, cnt = Number(g.count) || 0;
+    const near = cnt >= 45;   // gift.DEFAULT_UPPER：快满阈值，留 5 格缓冲
+    const sub = near ? "快满了，建议收礼变卡" : `还可收 ${Math.max(0, cap - cnt)} 件`;
+    gc = chip("礼物箱",
+      near ? `<span style="color:var(--danger);font-weight:700">${cnt} / ${cap}</span>` : `${cnt} / ${cap}`,
+      sub);
+  }
+  return zc + gc;
+}
+
 async function loadState() {
   const box = $("state-box");
+  ovLoadExtras();   // 附加状态独立拉取，不随主状态失败而缺席
   try {
     const d = await (await fetch("/api/state")).json();
     if (d && d.__stale) return;
@@ -3492,6 +3557,9 @@ function stopAllAccountLoops() {
 function resetAccountScopedCache() {
   ACCT_GEN += 1;
   _acctLoaded = {};
+  // 总览附加状态是 DOM 直写（不落模块级缓存），切号时也要先清，别让旧号数据闪一下
+  const _ovEx = $("ov-extras");
+  if (_ovEx) _ovEx.innerHTML = '<span class="spinner"></span>正在读取珍藏阁 / 礼物箱…';
   // 界面日志：logHistory/mlogHistory 是「合并」不是「替换」，不清就会两号混在一屏
   _opEntries = [];
   _matchEntries = [];

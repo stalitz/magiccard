@@ -3154,6 +3154,47 @@ async def home_state():
     return st
 
 
+@app.get("/api/overview/extras")
+async def overview_extras():
+    """总览页附加状态：珍藏阁炉位 + 礼物箱件数（只读，各 1 次真机读）。
+
+    刻意不复用 /api/home/state：那个端点要打 7 次 travel_match/travel_pvp，
+    总览 60s 轮询带上它会平白放大真机请求量。card_user_zcg(act=1) 与
+    freegift_get_list 都不是 card_user_mainpage，不与一键日常读箱抢限流窗口。
+    """
+    if err := _require_login():
+        return err
+    zcg_res, gift_res = await asyncio.gather(
+        zcg_mod.get_zcg_state(_session),
+        gf.gift_inbox(_session),
+        return_exceptions=True,
+    )
+    if isinstance(zcg_res, Exception) or not isinstance(zcg_res, dict) or not zcg_res.get("ok"):
+        z = {"ok": False,
+             "text": (zcg_res.get("text") or "珍藏阁读取失败") if isinstance(zcg_res, dict)
+                     else f"珍藏阁读取异常：{zcg_res}"}
+    else:
+        puzi = []
+        for p in zcg_res.get("puzi") or []:
+            if not (0 < int(p.get("id") or 0) < 10000):
+                continue          # 只列 3 个免费炉，跳过魔法阵/VIP 位
+            puzi.append({
+                "id": p.get("id"), "state": p.get("state"), "finished": bool(p.get("finished")),
+                "name": p.get("name") or "",
+                "done_at": (int(p.get("begin") or 0) + int(p.get("smelt_time") or 0))
+                           if int(p.get("card_id") or 0) > 0 else 0,
+            })
+        z = {"ok": True, "puzi": puzi, "mojing": zcg_res.get("mojing") or {},
+             "now": time.time()}
+    if isinstance(gift_res, Exception) or not isinstance(gift_res, dict) or not gift_res.get("ok"):
+        g = {"ok": False, "cap": 50, "count": 0,
+             "text": f"礼物箱读取失败：{gift_res.get('code') if isinstance(gift_res, dict) else gift_res}"}
+    else:
+        g = {"ok": True, "cap": int(gift_res.get("cap") or 50),
+             "count": int(gift_res.get("count") or 0), "code": gift_res.get("code")}
+    return {"ok": True, "zcg": z, "gift": g}
+
+
 @app.post("/api/home/like")
 async def home_like(req: dict = None):
     """点赞。body {target: "match"|"arena"}。"""

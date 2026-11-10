@@ -1019,6 +1019,10 @@
               <div id="state-box" class="state-box">
                 <span class="spinner"></span>正在读取游戏数据…
               </div>
+              <!-- 珍藏阁 / 礼物箱：独立容器，避免被 loadState() 的 innerHTML 覆盖 -->
+              <div id="ov-extras" class="state-box" style="margin-top:10px">
+                <span class="spinner"></span>正在读取珍藏阁 / 礼物箱…
+              </div>
             </div>
             <div style="margin-top:14px;border-top:1px dashed var(--line);padding-top:12px">
               <h3 style="margin-bottom:10px">炼卡道具</h3>
@@ -1887,7 +1891,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261109b"></script>
+<script src="/app.js?v=20261110a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">
