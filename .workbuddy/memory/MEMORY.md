@@ -42,6 +42,7 @@
 
 ## 验收 / 运维
 - 改 backend 必须 `./server.sh stop && start` 真重载（`/api/auto/*` 不重载模块）；改完必须实际 `git commit`（分批：代码+测试 / 文档）；scratch 脚本不提交不删除。重启后自动炼卡/换卡引擎为 stopped，需界面重新点开始。
+- 总览附加状态（2026-11-10）：`GET /api/overview/extras` = 珍藏阁 `card_user_zcg act=1` + 礼物箱 `freegift_get_list` 各 1 读；**别复用 `/api/home/state`**（7 次 travel 请求，挂 60s 轮询会放大真机压力），也别打 mainpage。前端 `#ov-extras` 是独立容器（不能进 `state-box`，会被 `loadState()` 覆盖），切号时进 `resetAccountScopedCache()` 清空。
 - 前端改 `app.js` 必同时 bump `index.html` 的 `?v=` **和** `APP_VER`（只改一处 → 日志版本号不可信）；`Cache-Control: no-store`。按钮即时响应、文案禁代码标识。★类名 `sel` 双用途：通用下拉样式必须写 `select.sel`，否则 `.sel{max-width:340px}` 把选中行压短；套卡首行名称 `flex:0 0 auto` 不参与收缩。
 - 勿杀未知服务：`:8000` 本项目 / `:8777` agent-chat / `:9222` headless Chrome。OCI 新开端口两步：① `sudo firewall-cmd --permanent --add-port=<port>/tcp && --reload` ② 云控制台 Security List 加 TCP 入站；`command -v iptables` 在 opc PATH 会误报（须 `sudo /sbin/iptables -S`）。SSH 140.83.54.40:22 opc，密钥 `~/Downloads/ssh-key-2021-12-04.key`。
 - 生产默认不勾 DP = 旧引擎，**不再修**（只作 A/B），DP 稳定后直接删；多套/多星一律勾 DP。bench 必须含 `dp=False, mr=0` 一档。
