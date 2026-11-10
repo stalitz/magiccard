@@ -5,6 +5,8 @@
 # 多开：用不同端口 + 不同 MC_SESSIONS_DIR 起多个实例
 #   例：./server.sh start 8001 /tmp/mc_a.json
 #       ./server.sh start 8002 /tmp/mc_b.json
+# 局域网访问（2026-11-10）：默认绑 0.0.0.0，手机连同一 WiFi 访问 http://<本机IP>:<端口>。
+#   只想本机可访问时：MC_HOST=127.0.0.1 ./server.sh start
 cd "$(dirname "$0")"
 PYBIN=/Users/stalitz/.workbuddy/binaries/python/envs/mc/bin/python3
 
@@ -14,11 +16,12 @@ PORT="${2:-8000}"
 SESS="${3:-}"
 ACCOUNTS="${MC_SESSIONS_DIR:-/tmp/mc_sessions}"
 LOG="/tmp/mc_${PORT}.log"
+MC_HOST="${MC_HOST:-0.0.0.0}"
 
 case "$1" in
   start)
     # 前置环境变量仅对本次 python 进程生效：PORT/MC_SESSION_FILE/MC_LOG 由 mc_api 与启动器读取
-    ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT")
+    ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT" MC_HOST="$MC_HOST")
     [ -n "$SESS" ] && ENVARGS+=(MC_SESSION_FILE="$SESS")
     # ★ 剥掉宿主代理环境变量（2026-11-05 真机事故）：从带 HTTP_PROXY/HTTPS_PROXY 的
     #   shell 启动时，后台常驻进程会继承那个临时端口；端口随会话失效后，任何
@@ -29,6 +32,7 @@ case "$1" in
         "${ENVARGS[@]}" $PYBIN - <<'PY'
 import os, sys
 port = int(os.environ.get("PORT", "8000"))
+host = os.environ.get("MC_HOST", "0.0.0.0")
 sess = os.environ.get("MC_SESSION_FILE", "/tmp/mc_session.json")
 log = os.environ.get("MC_LOG", "/tmp/mc.log")
 PYBIN = "/Users/stalitz/.workbuddy/binaries/python/envs/mc/bin/python3"
@@ -41,7 +45,7 @@ os.chdir("/Users/stalitz/www/魔法卡片")
 fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 os.dup2(fd, 1); os.dup2(fd, 2)
 os.execv(PYBIN, [PYBIN, "-m", "uvicorn",
-         "backend.main:app", "--host", "127.0.0.1",
+         "backend.main:app", "--host", host,
          "--port", str(port), "--log-level", "warning"])
 PY
     # 自校验：脚本原先无论成败都打印 "started"，bind 失败时用户/助手都看不出来。
@@ -51,6 +55,10 @@ PY
     done
     if lsof -iTCP:$PORT -sTCP:LISTEN -n -P >/dev/null 2>&1; then
       echo "started -> http://localhost:$PORT (账号目录: $ACCOUNTS, log: $LOG)"
+      if [ "$MC_HOST" != "127.0.0.1" ]; then
+        LAN=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+        [ -n "$LAN" ] && echo "局域网   -> http://${LAN}:${PORT}  (bind ${MC_HOST})"
+      fi
     else
       echo "启动失败：:$PORT 无监听。最后日志："
       tail -5 "$LOG"
