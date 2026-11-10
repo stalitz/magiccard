@@ -46,6 +46,7 @@
 - 勿杀未知服务：`:8000` 本项目 / `:8777` agent-chat / `:9222` headless Chrome。OCI 新开端口两步：① `sudo firewall-cmd --permanent --add-port=<port>/tcp && --reload` ② 云控制台 Security List 加 TCP 入站；`command -v iptables` 在 opc PATH 会误报（须 `sudo /sbin/iptables -S`）。SSH 140.83.54.40:22 opc，密钥 `~/Downloads/ssh-key-2021-12-04.key`。
 - 生产默认不勾 DP = 旧引擎，**不再修**（只作 A/B），DP 稳定后直接删；多套/多星一律勾 DP。bench 必须含 `dp=False, mr=0` 一档。
 - **默认指本地 8000**；未专门说「云端 / 140.83.54.40 / 8001」时一律指本地（`SESSIONS_DIR=/tmp/mc_sessions/`）。
+- 局域网/手机（2026-11-10）：`server.sh` 的 uvicorn host 由 `MC_HOST` 控制，**默认 `0.0.0.0`**，手机同 WiFi 访问 `http://<本机IP>:8000`（当前 `ipconfig getifaddr en0` = 192.168.128.77，DHCP 会变）；`MC_HOST=127.0.0.1 ./server.sh start` 回退只本机。手机登录**不必扫码**：登录页 `/api/login/sessions` 直接列出服务端已有会话，点选沿用；「QQ 一键登录」的回调是 `location.origin`（内网 IP）在手机上不通，别用。⚠️ 该端点无鉴权返回 token，绑 0.0.0.0 等于把全部账号登录态暴露给同网段，只在可信 WiFi 用。
 
 ## 旅行（猫咪）
 - `day_limit_cnt=12` = 4 猫各 3 次 = 3 轮/天，每天重置、与投喂数无关；硬限制是没食物不能出发。默认 **C 级 + 每猫 1 个**（日耗 1080 三叶草）；4 猫必须各喂不同食物（A/C 一一对应 4 个碎片池）。
