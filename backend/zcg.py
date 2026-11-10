@@ -38,6 +38,7 @@
     立即收卡被服务端拒绝），完成时间 = begin + smelt_time；now >= 该值即炼完可收。
     收卡后 card_id/begin 归 0（已用真机 timestamp 反推确认：begin 是起始非完成时间）。
 """
+import asyncio
 import time
 import re
 
@@ -48,6 +49,57 @@ from .auto_refine import parse_full
 from . import buylog
 
 
+class _BoxReadError(Exception):
+    """读主界面卡箱连续失败（-3001 限流 / 空壳 / 网络），重试已耗尽。"""
+
+    def __init__(self, reason: str, attempts: int):
+        super().__init__(reason)
+        self.reason = reason
+        self.attempts = attempts
+
+
+# 读主界面（card_user_mainpage）统一入口：轻度节流 + 有限退避重试。
+# 用户 2026-11-10 定调：一键日常只是「偶尔」报 -3001，自动换卡时在游戏里也能成功，
+# 所以**不做互斥、不削并发**，只让偶发失败自愈。-3001 冷却 ~15s（exchange.py:351），
+# 三次退避覆盖大部分窗口；非 -3001 错误同样重试，避免空壳响应被当成空卡箱。
+_MIN_MAINPAGE_INTERVAL = 0.35        # 同进程 mainpage 读最小间隔（削突发，护账号/IP）
+_BOX_RETRY_WAITS = (1.5, 4.0, 8.0)  # 共 4 次尝试、最长约 14s
+_last_mainpage_ts = 0.0
+
+
+async def _read_mainpage(session) -> dict:
+    """读一次主界面卡箱；失败按 -3001/空壳/异常有限退避重试，仍失败抛 _BoxReadError。
+
+    所有读箱点（_box_state / _box_ten_cards / 买卡后找 slot）都走这里，
+    杜绝「偶发 -3001 被静默当成空箱」以及「第一次读失败就整轮放弃」。
+    """
+    global _last_mainpage_ts
+    err = "未知"
+    attempts = 0
+    for wait in (0.0,) + _BOX_RETRY_WAITS:
+        attempts += 1
+        if wait:
+            await asyncio.sleep(wait)
+        gap = _MIN_MAINPAGE_INTERVAL - (time.monotonic() - _last_mainpage_ts)
+        if gap > 0:
+            await asyncio.sleep(gap)
+        _last_mainpage_ts = time.monotonic()
+        try:
+            r = await session.post(EP_MAINPAGE, code="", uin=plain_uin(session))
+        except Exception as e:  # noqa: BLE001
+            err = f"请求异常 {e!r}"
+            continue
+        if r.get("code") not in (0, None):
+            err = f"code={r.get('code')} {r.get('message') or ''}"
+            continue
+        st = parse_full(r.get("raw") or "")
+        if not st.get("cap", {}).get("change"):
+            err = "主界面无卡箱数据（空壳响应）"
+            continue
+        return st
+    raise _BoxReadError(err, attempts)
+
+
 def _face(cid: int) -> int:
     """卡面值（面额）。price==10 即 10 面卡。"""
     return int((card_plan.card_details([cid]).get(cid) or {}).get("price") or 0)
@@ -55,6 +107,17 @@ def _face(cid: int) -> int:
 
 def _name(cid: int) -> str:
     return (card_plan.card_details([cid]).get(cid) or {}).get("name") or f"卡{cid}"
+
+
+def _slot_val(v) -> int:
+    """卡箱 slot → int。⚠️ 不能写 `int(v or -1)`：首格 slot=0 会被误判成 -1，
+    导致第 1 张卡永远被当成「读不到落点」而不投（2026-11-10 回归实测）。"""
+    if v is None or v == "":
+        return -1
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return -1
 
 
 async def get_zcg_state(session) -> dict:
@@ -100,18 +163,14 @@ async def _box_ten_cards(session) -> list[tuple]:
     box_type: 0=换卡箱（直接 act=2 投）；1=保险箱（先 move_card 挪到换卡箱再投）。
     珍藏阁 act=2 只吃换卡箱（保险箱卡直接投会 -10 系统繁忙）。
     """
-    try:
-        uin = plain_uin(session)
-        r = await session.post(EP_MAINPAGE, code="", uin=uin)
-        st = parse_full(r.get("raw") or "")
-    except Exception:
-        return []
+    # 读箱失败必须上抛，绝不能 return [] —— 那会把「限流」伪装成「箱里没有 10 面卡」
+    st = await _read_mainpage(session)
     out = []
     for box, bt in (("change", 0), ("store", 1)):
         for c in st.get(box, []):
             cid = int(c.get("id") or 0)
             if cid > 0 and _face(cid) == 10:
-                out.append((cid, int(c.get("slot") or -1), bt))
+                out.append((cid, _slot_val(c.get("slot")), bt))
     return out
 
 
@@ -172,21 +231,19 @@ async def _box_state(session) -> dict:
     """
     empty = {"change": [], "store": [], "cap": {}}
     try:
-        uin = plain_uin(session)
-        r = await session.post(EP_MAINPAGE, code="", uin=uin)
-        if r.get("code") not in (0, None):
-            return {**empty, "error": f"code={r.get('code')} {r.get('message') or ''}"}
-        st = parse_full(r.get("raw") or "")
-        if not st.get("cap", {}).get("change"):
-            return {**empty, "error": "主界面无卡箱数据（空壳响应）"}
-        return st
-    except Exception as e:  # noqa: BLE001
-        return {**empty, "error": str(e)}
+        return await _read_mainpage(session)
+    except _BoxReadError as e:
+        return {**empty, "error": f"{e.reason}（已重试 {e.attempts - 1} 次）"}
 
 
 async def _deposit_from_box(session, puzi_id: int, steps: list[dict]) -> bool:
     """给指定空炉投一张 10 面卡（仅从卡箱：换卡箱直投 / 保险箱挪）。不抽不买。"""
-    pick = await _pick_ten_card(session, steps, auto_draw=False)
+    try:
+        pick = await _pick_ten_card(session, steps, auto_draw=False)
+    except _BoxReadError as e:
+        steps.append({"act": "box_error",
+                      "text": f"读卡箱失败（{e.reason}），停止投料（不是箱内无卡）"})
+        return False
     if not pick:
         return False
     card_id, slot_id = pick
@@ -202,13 +259,30 @@ async def _do_deposit(session, puzi_id: int, card_id: int, slot_id: int, steps: 
                            puzi_id=puzi_id, slot_id=slot_id, uin=None)
     rc = r.get("data") or r
     code = int(rc.get("code", r.get("code")) or -1)
-    st_p = await get_zcg_state(session)
-    p_now = next((x for x in st_p["puzi"] if x["id"] == puzi_id), None)
-    ok = bool(p_now and p_now["card_id"] == card_id)
+    # 写后立刻复读炉状态可能被真机缓存/限流挡住；单次判失败会把「其实投成了」
+    # 记成 0 投，进而让 _deposit_all_from_box 提前 break。有限次延迟确认。
+    ok = False
+    confirmed = False
+    for attempt in range(3):
+        try:
+            st_p = await get_zcg_state(session)
+        except Exception:  # noqa: BLE001
+            st_p = {}
+        puzi = st_p.get("puzi") or []
+        p_now = next((x for x in puzi if x["id"] == puzi_id), None)
+        confirmed = bool(puzi) and st_p.get("ok", True) is not False
+        if p_now and p_now["card_id"] == card_id:
+            ok = True
+            break
+        if attempt < 2:
+            await asyncio.sleep(0.5)
+    tail = ("成功" if ok else
+            ("code=%s（炉未开始炼，可能失败）" % code if confirmed else
+             "投卡结果未能确认（读炉状态失败），请稍后查看炉位"))
     steps.append({"act": "deposit", "puzi_id": puzi_id, "card_id": card_id,
                   "name": _name(card_id), "code": code, "ok": ok,
-                  "text": f"炉{puzi_id} 投「{_name(card_id)}」(10面) "
-                          + ("成功" if ok else f"code={code}（炉未开始炼，可能失败）")})
+                  "confirmed": confirmed,
+                  "text": f"炉{puzi_id} 投「{_name(card_id)}」(10面) " + tail})
     return ok
 
 
@@ -217,7 +291,8 @@ async def _deposit_all_from_box(session, steps: list[dict]) -> int:
     n = 0
     while True:
         st = await get_zcg_state(session)
-        empties = [p for p in st["puzi"] if 0 < p["id"] < 10000 and p["card_id"] == 0]
+        empties = [p for p in (st.get("puzi") or [])
+                   if 0 < p["id"] < 10000 and p["card_id"] == 0]
         if not empties:
             break
         ok = await _deposit_from_box(session, empties[0]["id"], steps)
@@ -235,11 +310,15 @@ async def _deposit_from_buy(session, puzi_id: int, steps: list[dict]) -> bool:
         steps.append({"act": "buy", "puzi_id": puzi_id,
                       "text": f"炉{puzi_id} 空，商店无可买 10 面卡，停止投料"})
         return False
-    stb = await session.post(EP_MAINPAGE, code="", uin=plain_uin(session))
-    stb_box = parse_full(stb.get("raw") or "")
-    slot = next((int(c.get("slot") or -1) for c in stb_box.get("change", [])
+    try:
+        stb_box = await _read_mainpage(session)
+    except _BoxReadError as e:
+        steps.append({"act": "buy", "card_id": bcid,
+                      "text": f"商店买卡后读不到落点 slot（{e.reason}），跳过"})
+        return False
+    slot = next((_slot_val(c.get("slot")) for c in stb_box.get("change", [])
                  if int(c.get("id") or 0) == bcid), None)
-    if slot is None:
+    if slot is None or slot < 0:
         steps.append({"act": "buy", "card_id": bcid,
                       "text": f"商店买「{_name(bcid)}」但读不到落点 slot，跳过"})
         return False
@@ -264,6 +343,10 @@ async def _draw_and_refine_loop(session, steps: list[dict]) -> int:
         # 抽前确保换卡箱 ≥1 空位（否则抽不进；满箱且有 10 面卡会先投炉腾位，无 10 面卡才挪杂卡去保险箱）
         await _ensure_free_change_slot(session, steps)
         st0 = await _box_state(session)
+        if st0.get("error"):
+            steps.append({"act": "draw",
+                          "text": f"读卡箱失败（{st0['error']}），停止抽卡"})
+            break
         ch0 = st0.get("change", [])
         cap0 = st0.get("cap", {}).get("change", {})
         if int(cap0.get("cur", 0)) - len(ch0) < 1:
@@ -306,6 +389,11 @@ async def _ensure_free_change_slot(session, steps: list[dict]) -> None:
     只有「箱满且一张 10 面卡都没有（全是杂卡）」才挪杂卡去保险箱。
     """
     st = await _box_state(session)
+    if st.get("error"):
+        # 读箱失败 ≠ 箱满：不能拿空结构算 free=0 去挪卡/投卡
+        steps.append({"act": "make_room",
+                      "text": f"读卡箱失败（{st['error']}），跳过腾位，不做任何写操作"})
+        return
     ch = st.get("change", [])
     cap = st.get("cap", {}).get("change", {})
     free = int(cap.get("cur", 0)) - len(ch)
@@ -316,7 +404,8 @@ async def _ensure_free_change_slot(session, steps: list[dict]) -> None:
     if tens:
         # 有 10 面卡 → 优先投炉(炼)消耗它腾位；不挪杂卡去保险箱
         zs = await get_zcg_state(session)
-        empties = [p for p in zs["puzi"] if 0 < p["id"] < 10000 and p["card_id"] == 0]
+        empties = [p for p in (zs.get("puzi") or [])
+                   if 0 < p["id"] < 10000 and p["card_id"] == 0]
         if empties:
             ok = await _deposit_from_box(session, empties[0]["id"], steps)
             if ok:
@@ -329,7 +418,7 @@ async def _ensure_free_change_slot(session, steps: list[dict]) -> None:
     for c in ch:
         cid = int(c.get("id") or 0)
         if cid > 0 and _face(cid) != 10:
-            mr = await session.move_card(cid, int(c.get("slot") or -1), from_box=0)
+            mr = await session.move_card(cid, _slot_val(c.get("slot")), from_box=0)
             if isinstance(mr, dict) and mr.get("ok"):
                 steps.append({"act": "make_room", "card_id": cid,
                               "text": f"换卡箱满且无 10 面卡，挪「{_name(cid)}」到保险箱腾 1 位"})
@@ -353,7 +442,7 @@ async def _pick_ten_card(session, steps: list[dict], auto_draw: bool = False) ->
         # 保险箱 → 换卡箱（珍藏阁 act=2 只吃换卡箱，保险箱直投 -10）
         mr = await session.move_card(cid, src_slot, from_box=1)
         if isinstance(mr, dict) and mr.get("ok"):
-            return (cid, int(mr.get("dest_slot") or -1))
+            return (cid, _slot_val(mr.get("dest_slot")))
         steps.append({"act": "move", "card_id": cid,
                       "text": f"保险箱「{_name(cid)}」挪箱失败（{(mr or {}).get('message')}），跳过"})
     return None
@@ -365,7 +454,8 @@ async def _redeploy_ten(session, prefer_other_than: int | None = None,
     优先投到别的空炉(让多炉都转起来)，没有别的空炉时投回刚收完的本炉。"""
     steps = steps or []
     st = await get_zcg_state(session)
-    empties = [p for p in st["puzi"] if 0 < p["id"] < 10000 and p["card_id"] == 0]
+    empties = [p for p in (st.get("puzi") or [])
+               if 0 < p["id"] < 10000 and p["card_id"] == 0]
     if not empties:
         return False
     target = next((p for p in empties if p["id"] != prefer_other_than), empties[0])
@@ -398,7 +488,7 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
                 "steps": steps}
     now = time.time()
     # 只处理 3 个免费炉（id 1..3）；10001+ 是锁定/特殊位，不碰
-    normal = [p for p in st["puzi"] if 0 < p["id"] < 10000]
+    normal = [p for p in (st.get("puzi") or []) if 0 < p["id"] < 10000]
     finished = [p for p in normal if p["card_id"] > 0 and p["finished"]]
 
     # 炼制中的炉跳过，等自然炼完（不加速）
@@ -438,7 +528,7 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
                           "text": f"炉{p['id']} 收魔晶 code={code2}（无 add_* 到账，可能已收过）"})
         # 收卡成功以「收后该炉是否清空」判定（code 不可靠，成功也可能 -3）
         st_c = await get_zcg_state(session)
-        p_c = next((x for x in st_c["puzi"] if x["id"] == p["id"]), None)
+        p_c = next((x for x in (st_c.get("puzi") or []) if x["id"] == p["id"]), None)
         ok_collect = bool(p_c and p_c["card_id"] == 0)
         if not ok_collect:
             steps.append({"act": "collect", "puzi_id": p["id"],
@@ -466,7 +556,8 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
 
     # ---- 3) 箱内卡用尽后，剩余空炉才商店买 10 面卡投炉（绝不提前买） ----
     st2 = await get_zcg_state(session)
-    empty = [p for p in st2["puzi"] if 0 < p["id"] < 10000 and p["card_id"] == 0]
+    empty = [p for p in (st2.get("puzi") or [])
+             if 0 < p["id"] < 10000 and p["card_id"] == 0]
     bought = 0
     for p in empty:
         ok = await _deposit_from_buy(session, p["id"], steps)
@@ -474,14 +565,20 @@ async def run_zcg(session, auto_draw: bool = True) -> dict:
             bought += 1
 
     total_deposited = drawn_deposited + box_deposited + bought
+    box_errors = [s for s in steps if s.get("act") == "box_error"]
     hint = ""
-    if ten0 > 0 and total_deposited == 0 and empty:
+    if box_errors:
+        # 中途读箱失败：本次结果不完整，别当作「正常完成」
+        hint = (f"（中途读卡箱失败 {len(box_errors)} 次，已停止投料；"
+                f"本次投卡数可能不完整，建议稍后重试）")
+    elif ten0 > 0 and total_deposited == 0 and empty:
         # 有卡、有空炉，却一张没投：一定是 act=2 被真机拒了，别再显示成绿字 0 投
         hint = (f"（卡箱有 {ten0} 张 10 面卡、{len(empty)} 个空炉却一张未投，"
                 f"疑似真机繁忙，建议重试）")
     return {"ok": True, "collected": collected, "deposited": total_deposited,
             "drawn_deposited": drawn_deposited, "box_deposited": box_deposited,
             "bought": bought, "steps": steps, "state": st2,
+            "partial": bool(box_errors),
             "text": f"收卡 {collected} 炉，投卡 {total_deposited} 炉"
                     f"（抽卡 {drawn_deposited} + 箱内现成 {box_deposited} + 商店买 {bought}）{hint}"}
 

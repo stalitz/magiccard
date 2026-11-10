@@ -12,6 +12,7 @@ import asyncio
 import sys
 
 from backend import zcg
+from backend.constants import EP_MAINPAGE
 
 CIDS = (13841, 13844, 13845, 13910, 5251, 6173)
 FAIL = []
@@ -101,6 +102,113 @@ def restore():
         setattr(zcg, n, f)
 
 
+class RetrySession(FakeSession):
+    """只在 mainpage 读上模拟偶发 -3001；act=2 写永远成功。
+
+    用户 2026-11-10 定调：真实场景是「偶尔报」，自动换卡并发时写接口照样通，
+    所以不做互斥。这里按请求序号注入限流，验证有限退避重试能自愈。
+    """
+    uin = "0004821992"
+
+    def __init__(self, cards, fail_first=0, fail_after=0, zcg_glitch=False):
+        super().__init__(cards)
+        self.fail_first = fail_first
+        self.fail_after = fail_after
+        self.zcg_glitch = zcg_glitch
+        self.mainpage_calls = 0
+        self.glitch_pending = False
+
+    async def post(self, endpoint, **p):
+        if endpoint == EP_MAINPAGE:
+            self.mainpage_calls += 1
+            n = self.mainpage_calls
+            if (n <= self.fail_first) or (self.fail_after and n > self.fail_after):
+                return {"code": -3001, "message": "系统繁忙", "raw": ""}
+            return {"code": 0, "raw": "OK"}
+        if p.get("act") == 2:
+            self.act2 += 1
+            cid, pid = int(p["card_id"]), int(p["puzi_id"])
+            self.puzi[pid] = cid
+            self.cards = [c for c in self.cards if c["id"] != cid]
+            if self.zcg_glitch:
+                self.glitch_pending = True
+            return {"code": 0}
+        return {"code": 0}
+
+
+async def fake_state_glitch(session):
+    """投卡后的第一次炉状态复读失败（无 puzi），第二次正常。"""
+    if session.glitch_pending:
+        session.glitch_pending = False
+        return {"ok": False, "code": -3001, "text": "繁忙"}  # 故意不带 puzi
+    return await fake_get_zcg_state(session)
+
+
+_RETRY_ORIG = {
+    "get_zcg_state": zcg.get_zcg_state,
+    "_deposit_from_buy": zcg._deposit_from_buy,
+    "parse_full": zcg.parse_full,
+    "_BOX_RETRY_WAITS": zcg._BOX_RETRY_WAITS,
+    "_MIN_MAINPAGE_INTERVAL": zcg._MIN_MAINPAGE_INTERVAL,
+}
+
+
+async def retry_specs():
+    """专项：真实 _read_mainpage + 模拟限流，验证偶发失败自愈而不整轮放弃。"""
+    zcg._BOX_RETRY_WAITS = (0.01, 0.01)   # 3 次尝试，避免真等 14s
+    zcg._MIN_MAINPAGE_INTERVAL = 0.0
+    zcg.get_zcg_state = fake_get_zcg_state
+    zcg._deposit_from_buy = fake_deposit_from_buy
+    try:
+        # F: 开头两次 mainpage -3001，第三次恢复 → 仍投满 3 炉，不整轮放弃
+        s = RetrySession(CIDS[:3], fail_first=2)
+        zcg.parse_full = lambda raw: {"change": list(s.cards), "store": [],
+                                      "cap": {"change": {"cur": 18, "max": 18}}}
+        r = await zcg.run_zcg(s)
+        ck(r["ok"] and r["deposited"] == 3 and all(s.puzi.values()),
+           "F 偶发 -3001 退避重试后投满 3 炉",
+           f"deposited={r.get('deposited')} mainpage_calls={s.mainpage_calls}")
+        ck(s.mainpage_calls >= 3, "F 确实发生了重试", f"calls={s.mainpage_calls}")
+
+        # G: 一直 -3001 → 有上界、显式回报、零写
+        s = RetrySession(CIDS[:3], fail_first=99)
+        zcg.parse_full = lambda raw: {"change": list(s.cards), "store": [],
+                                      "cap": {"change": {"cur": 18, "max": 18}}}
+        r = await zcg.run_zcg(s)
+        ck((not r["ok"]) and "读取卡箱失败" in r["text"] and "已重试" in r["text"],
+           "G 重试耗尽后显式回报", r["text"])
+        ck(s.act2 == 0 and s.buy_calls == 0 and s.mainpage_calls == 3,
+           "G 重试次数有上界且零写", f"calls={s.mainpage_calls} act2={s.act2}")
+
+        # H: 投卡后首次复读炉状态失败（无 puzi）→ 不抛 KeyError、延迟确认后计数成功
+        zcg.get_zcg_state = fake_state_glitch
+        s = RetrySession(CIDS[:3], zcg_glitch=True)
+        zcg.parse_full = lambda raw: {"change": list(s.cards), "store": [],
+                                      "cap": {"change": {"cur": 18, "max": 18}}}
+        r = await zcg.run_zcg(s)
+        ck(r["ok"] and r["deposited"] == 3 and all(s.puzi.values()),
+           "H 复读炉状态短暂失败不误判 0 投",
+           f"deposited={r.get('deposited')}")
+        ck(not any("未能确认" in (x.get("text") or "") for x in r["steps"]),
+           "H 延迟确认后不再留下未确认提示")
+        zcg.get_zcg_state = fake_get_zcg_state
+
+        # I: 投成 1 张后读箱持续 -3001 → 标记 partial，不伪装成正常完成
+        s = RetrySession(CIDS[:3], fail_after=4)
+        zcg.parse_full = lambda raw: {"change": list(s.cards), "store": [],
+                                      "cap": {"change": {"cur": 18, "max": 18}}}
+        r = await zcg.run_zcg(s)
+        ck(r["deposited"] >= 1 and r.get("partial") is True and
+           "不完整" in r["text"],
+           "I 中途读箱失败标为部分完成、保留已投计数",
+           f"deposited={r.get('deposited')} partial={r.get('partial')}")
+        ck(any(x.get("act") == "box_error" for x in r["steps"]),
+           "I steps 里如实记录读箱失败（不是箱内无卡）")
+    finally:
+        for k, v in _RETRY_ORIG.items():
+            setattr(zcg, k, v)
+
+
 async def main():
     patch()
     try:
@@ -145,6 +253,8 @@ async def main():
         ck(s.buy_calls == 0, "E 炉被填满后不买卡", f"buy_calls={s.buy_calls}")
     finally:
         restore()
+
+    await retry_specs()
 
     print(f"\n{len(PASS)} PASS / {len(FAIL)} FAIL", file=sys.stderr)
     if FAIL:
