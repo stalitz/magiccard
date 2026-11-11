@@ -52,6 +52,7 @@
 - 总览附加状态：`GET /api/overview/extras` = 珍藏阁 `act=1` + 礼物箱 `freegift_get_list` 各 1 读；**别复用 `/api/home/state`**（7 次 travel 太重），也别打 mainpage。`#ov-extras` 独立容器（不能进 `state-box`），切号进 `resetAccountScopedCache()` 清空。
 - 前端改 `app.js` 必同时 bump `index.html` 的 `?v=` **和** `APP_VER`；`Cache-Control: no-store`。按钮即时响应、文案禁代码标识。通用下拉必须写 `select.sel`；套卡首行名称 `flex:0 0 auto`。
 - 勿杀未知服务：`:8000` 本项目 / `:8777` agent-chat / `:9222` headless Chrome。OCI 新开端口两步：firewall-cmd + 云控制台 Security List。SSH 140.83.54.40:22 opc，密钥 `~/Downloads/ssh-key-2021-12-04.key`。
+- ★ 云端部署（2026-11-11 实证）：`/home/opc/mc` **无 .git**（文件快照，不随本地 commit 自动更新），venv Python 3.12.16，`start.sh` 是 `while true` 守护循环（父进程别杀）。同步：`git archive --format=tar HEAD backend frontend tools docs README.md | ssh … 'tar -xf - -C /home/opc/mc'`，**排除 `server.sh`**（硬编码 macOS 路径）与 `travel_*friends.json` / `sched_cmp/prod_sim_*.json`；同步前先 `cp -a` 备份。改完只 kill **8001 的 uvicorn 子进程**，守护循环 3s 自动拉起；环境变量 `MC_SESSIONS_DIR=/home/opc/mc/sessions`、`MC_LOG_DIR=/home/opc/mc/logs`。云端 8000 是 `/www/daily-fresh-master`，别碰。云端 sessions 常为空 → 需重新扫码。
 - 生产默认不勾 DP = 旧引擎，**不再修**（只作 A/B）；多套/多星一律勾 DP。**默认指本地 8000**，未专门说云端一律本地（`SESSIONS_DIR=/tmp/mc_sessions/`）。
 - 局域网/手机：`server.sh` host 由 `MC_HOST` 控制，**默认 `0.0.0.0`**；手机同 WiFi 访问 `http://<本机IP>:8000`（192.168.128.77，DHCP 会变）。**不必重新扫码**：登录页 `/api/login/sessions` 可沿用会话；「QQ 一键登录」回调 `location.origin` 在手机不通。⚠️ 该端点无鉴权返回 token，只在可信 WiFi 用。
 
