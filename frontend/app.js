@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261110a";
+const APP_VER = "20261111a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -412,6 +412,10 @@ function showDash(uin) {
   loadStealFriends(true);
   switchPane("overview");
   loadState();
+  // 切号时 stopAllAccountLoops() 已清掉 3s 灵宠轮询，但后端引擎按 token 分桶、
+  // 新号的引擎可能仍在跑 → 按新 token 拉一次状态，由 spPoll 的 anyRunning
+  // 自维持续上定时器。replay=false：不把引擎历史日志重放进刚清空的操作日志。
+  spPoll(false);
   if (stateTimer) clearInterval(stateTimer);
   if ($("auto-refresh").checked) stateTimer = setInterval(loadState, 60000);
 }
@@ -6829,7 +6833,39 @@ function spRenderAll(d) {
   }
 }
 
+// 两个数据源共用一份渲染：/api/cat/travel（真机完整，15s spTick + 手动 spRefresh）
+// 与 /api/spirite/auto/status 的 engine.last_state（3s spPoll 快照）。后者字段不全时
+// 不能把有效值覆盖成 0 / '-'，否则两路轮询交替写 DOM，次数会在「剩 5」和「剩 0」
+// 之间来回跳。无效 = undefined/null/''/NaN；0 是合法值，不回退。
+function spMergeState(d) {
+  const prev = spLastData || {};
+  const src = d || {};
+  const okNum = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
+  const out = Object.assign({}, prev, src);
+  for (const k of ["free_explore_cnt", "today_fri_explore_cnt", "fri_explore_ts",
+                   "power", "section_id", "pass_id"]) {
+    const v = okNum(src[k]) ? src[k] : (okNum(prev[k]) ? prev[k] : undefined);
+    if (v === undefined) delete out[k]; else out[k] = v;
+  }
+  // 钱包 / 碎片 / 灵宠列表：新数据是空壳时保留上一份，避免 chip 闪成「-」
+  for (const k of ["wallet", "pieces", "spirites"]) {
+    const nv = src[k];
+    if ((!nv || (Array.isArray(nv) && !nv.length)) && prev[k] !== undefined) out[k] = prev[k];
+  }
+  // 嵌套计数器：island.today_cnt / across.used 缺失时沿用上一份
+  for (const k of ["island", "across"]) {
+    const nv = src[k], pv = prev[k];
+    if (nv && typeof nv === "object" && pv && typeof pv === "object") {
+      out[k] = Object.assign({}, nv);
+      const cnt = k === "island" ? "today_cnt" : "used";
+      if (!okNum(nv[cnt]) && okNum(pv[cnt])) out[k][cnt] = pv[cnt];
+    }
+  }
+  return out;
+}
+
 function spRenderState(d) {
+  d = spMergeState(d);
   spLastData = d;
   // 2026-09-19 精简：状态只留一套（下方三行面板，三套玩法同屏）。
   // 工具栏的那几块「免费次数 / 当前探险 / 累计收获」chip 已删，别再往里写（元素不存在会炸）。
@@ -7056,29 +7092,33 @@ async function spStop(mode, el) {
   finally { if (restore) restore(); }
 }
 
-async function spPoll() {
+async function spPoll(replay = true) {
   try {
     const d = await (await fetch("/api/spirite/auto/status")).json();
     if (d && d.__stale) return;
     const modes = d.modes || {};
     spAutoModes = modes;   // 供三行状态面板显示「● 自动中」徽标
-    // 聚合三套玩法的日志（带玩法前缀），去重后写入面板
+    // 遍历后端返回的全部玩法（4 个：map/island/across/invite）。历史上写死三个，
+    // 只跑「邀请好友探险」时 anyRunning 恒 false → 首次轮询就把 3s 定时器清掉，
+    // 界面「自动中」徽标不出现也不消失，看起来像刚启动就停了。
     let anyRunning = false;
     const logs = [];
-    for (const m of ["map", "island", "across"]) {
+    for (const m of Object.keys(modes)) {
       const st = modes[m] || {};
       if (st.running) anyRunning = true;
       for (const lg of (st.logs || [])) logs.push({ mode: m, ...lg });
     }
-    logs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    for (const lg of logs) {
-      const key = lg.mode + "|" + lg.ts + "|" + lg.action + "|" + (lg.detail || "");
-      if (spRendered.has(key)) continue;
-      spRendered.add(key);
-      const tag = (SP_MODE_LABELS[lg.mode] ? SP_MODE_LABELS[lg.mode][0] : lg.mode) + " ";
-      const txt = tag + lg.action + (lg.detail ? "：" + lg.detail : "");
-      spSay(txt, lg.ok ? "ok" : "warn");
-      if (!/进行中/.test(lg.action)) log("灵宠·" + txt, lg.ok ? "ok" : "warn");
+    if (replay) {
+      logs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+      for (const lg of logs) {
+        const key = lg.mode + "|" + lg.ts + "|" + lg.action + "|" + (lg.detail || "");
+        if (spRendered.has(key)) continue;
+        spRendered.add(key);
+        const tag = (SP_MODE_LABELS[lg.mode] ? SP_MODE_LABELS[lg.mode][0] : lg.mode) + " ";
+        const txt = tag + lg.action + (lg.detail ? "：" + lg.detail : "");
+        spSay(txt, lg.ok ? "ok" : "warn");
+        if (!/进行中/.test(lg.action)) log("灵宠·" + txt, lg.ok ? "ok" : "warn");
+      }
     }
     // 当前玩法的运行态 → 按钮 + 状态条
     // 「累计收获」工具栏 chip 已删，数值并进三行面板的「● 自动中」徽标（见 spRenderAll）。
@@ -7088,7 +7128,7 @@ async function spPoll() {
     // 按钮态（开始/停止 disabled）由下方 spRenderAll 按 spAutoModes[mode].running 统一刷新
     // 刷新三行面板的「自动中」徽标（用上次完整状态，避免随轮询清空）
     if (spLastData) spRenderAll(spLastData);
-    if (cur.finished && cur.message && !running) {
+    if (replay && cur.finished && cur.message && !running) {
       const fk = "finish|" + spMode;
       if (!spRendered.has(fk)) { spRendered.add(fk); spSay(cur.message, "ok"); }
     }

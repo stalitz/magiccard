@@ -154,13 +154,23 @@ class SpiriteAuto:
             "spirites": ex.get("hy_put_spirites") or [],
             "explore_ts": int(ex.get("hy_explore_ts") or 0),
             "today_cnt": d.get("today_hy_explore_cnt"),
+            "daily_max": ISLAND_DAILY_MAX,
         }
         across = {
             "used": d.get("torrid_zone_explore_cnt"),
             "ts": d.get("fri_explore_ts"),
+            "daily_max": ACROSS_DAILY_MAX,
         }
         self.last_state = {
             "mode": self.opts.get("mode") or "map",
+            # ⚠️ 前端 spRenderAll 读的是 /api/cat/travel 的字段名。历史上这里只存
+            # free / fri_used / fri_ts 三个别名，spPoll 每 3s 拿 last_state 渲染时会把
+            # 「剩 5」刷成「剩 0」，15s 后又被真机数据刷回 5 → 数字来回跳。
+            # 保留旧别名（其它调用方可能用），同时补齐前端契约字段；值原样透出，
+            # 不做 `or 0`，避免空壳响应把 0 当真实值。
+            "free_explore_cnt": d.get("free_explore_cnt"),
+            "today_fri_explore_cnt": d.get("today_fri_explore_cnt"),
+            "fri_explore_ts": d.get("fri_explore_ts"),
             "free": int(d.get("free_explore_cnt") or 0),
             "section_id": d.get("section_id"),
             "pass_id": d.get("pass_id"),
