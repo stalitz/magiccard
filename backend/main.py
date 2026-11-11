@@ -45,6 +45,7 @@ from . import xiyou as xy
 from . import cathome as ch
 from . import zcg as zcg_mod
 from . import cat_dress as cd
+from . import activities as acts
 from . import buylog
 from .constants import (EP_BUY, EP_COLLECTION_GET, EP_MAINPAGE, EP_MINI_GET, EP_PROPS_INFO,
                         EP_RANDOM_GET, EP_REGISTER, EP_SPIRITE, EP_USER_LIST,
@@ -3193,6 +3194,25 @@ async def overview_extras():
         g = {"ok": True, "cap": int(gift_res.get("cap") or 50),
              "count": int(gift_res.get("count") or 0), "code": gift_res.get("code")}
     return {"ok": True, "zcg": z, "gift": g}
+
+
+# 月任务实时状态是账号数据 → 按 token 分桶（静态活动总表在 activities.py 里全局共享）
+_act_month_cache: dict[str, dict] = {}       # token -> {"ts","data"}
+
+
+@app.get("/api/overview/activities")
+async def overview_activities():
+    """总览「进行中的活动」：静态在期名单/规则/剩余天数 + 个人月任务进度（只读）。
+
+    静态表 6h 全局缓存，月任务 60s 按账号缓存；总览 60s 轮询不会放大真机请求。
+    刻意不复用 /api/home/state（7 次 travel）与 card_user_mainpage（读频限流）。
+    """
+    if err := _require_login():
+        return err
+    try:
+        return await acts.overview(_session, _acct_bucket(_act_month_cache))
+    except Exception as e:                                   # noqa: BLE001
+        return {"ok": False, "message": f"活动状态读取异常：{e}"}
 
 
 @app.post("/api/home/like")

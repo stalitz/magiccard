@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261111a";
+const APP_VER = "20261111b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -1576,9 +1576,66 @@ function ovExtrasHtml(d) {
   return zc + gc;
 }
 
+// 进行中的活动：静态活动总表（免登录）+ 月任务实时进度，全部只读。
+// 独立渲染到 #ov-acts；切号时由 resetAccountScopedCache() 先清空。
+async function ovLoadActs() {
+  const el = $("ov-acts");
+  if (!el) return;
+  const tok = sessionStorage.getItem("mc_token") || "";
+  let d;
+  try {
+    d = await (await fetch("/api/overview/activities")).json();
+  } catch (e) {
+    if ((sessionStorage.getItem("mc_token") || "") === tok)
+      el.innerHTML = `<div class="err" style="grid-column:1/-1">读取失败：${esc(e)}</div>`;
+    return;
+  }
+  // 全局 fetch 包装已按 token 判 stale；这里再比一次，防切号瞬间旧号响应回填
+  if (!d || d.__stale || (sessionStorage.getItem("mc_token") || "") !== tok) return;
+  if (d.ok === false) {
+    el.innerHTML = `<div class="err" style="grid-column:1/-1">读取失败：${esc(d.message || "未登录")}</div>`;
+    return;
+  }
+  const cnt = $("ov-acts-count");
+  if (cnt) cnt.textContent = `共 ${(d.activities || []).length} 个`;
+  el.innerHTML = ovActsHtml(d);
+}
+
+function ovActsHtml(d) {
+  const out = [];
+  const m = d.month || {};
+  if (m.ok) {
+    out.push(`<div class="act-month"><b>月任务</b> · 集齐 <b>${m.suit_done} / ${m.suit_total}</b>`
+      + ` · 积分 ${m.score} · 奖励档 ${m.reward_done} / ${m.reward_total} · 第 ${m.period} 期`
+      + (m.rank > 0 ? ` · 本月第 ${m.rank} 名` : "") + `</div>`);
+  } else {
+    out.push(`<div class="act-month">月任务：<span style="color:var(--danger)">${esc(m.text || "读取失败")}</span></div>`);
+  }
+  if (d.static_ok === false) {
+    out.push(`<div class="err" style="grid-column:1/-1">${esc(d.static_error || "活动表读取失败")}</div>`);
+  }
+  const acts = d.activities || [];
+  if (!acts.length && d.static_ok !== false) {
+    out.push('<div class="hint" style="grid-column:1/-1">暂无进行中的活动</div>');
+  }
+  for (const a of acts) {
+    const left = a.long_term ? "长期" : (a.days_left > 0 ? `剩 ${a.days_left} 天`
+      : `剩 ${Math.max(1, a.hours_left || 0)} 小时`);
+    const rule = a.rule || "", short = rule.slice(0, 300);
+    out.push(`<div class="act-card">`
+      + `<div class="t">${esc(a.title || "")}</div>`
+      + `<div class="meta">${esc(a.code || "")} · ${esc(a.start_txt || "")}~${esc(a.end_txt || "")} · ${left}</div>`
+      + `<div class="meta">${a.cards || 0} 套卡 / ${a.gifts || 0} 档礼包${a.jf ? " · " + esc(a.jf) : ""}</div>`
+      + (short ? `<details><summary>规则</summary><div class="rule">${esc(short)}${rule.length > 300 ? "…" : ""}</div></details>` : "")
+      + `</div>`);
+  }
+  return out.join("");
+}
+
 async function loadState() {
   const box = $("state-box");
   ovLoadExtras();   // 附加状态独立拉取，不随主状态失败而缺席
+  ovLoadActs();     // 活动状态同理；后端 60s 按账号缓存，60s 轮询不放大真机请求
   try {
     const d = await (await fetch("/api/state")).json();
     if (d && d.__stale) return;
@@ -3564,6 +3621,10 @@ function resetAccountScopedCache() {
   // 总览附加状态是 DOM 直写（不落模块级缓存），切号时也要先清，别让旧号数据闪一下
   const _ovEx = $("ov-extras");
   if (_ovEx) _ovEx.innerHTML = '<span class="spinner"></span>正在读取珍藏阁 / 礼物箱…';
+  const _ovAc = $("ov-acts");
+  if (_ovAc) _ovAc.innerHTML = '<span class="spinner"></span>正在读取活动状态…';
+  const _ovAcCnt = $("ov-acts-count");
+  if (_ovAcCnt) _ovAcCnt.textContent = "";
   // 界面日志：logHistory/mlogHistory 是「合并」不是「替换」，不清就会两号混在一屏
   _opEntries = [];
   _matchEntries = [];
