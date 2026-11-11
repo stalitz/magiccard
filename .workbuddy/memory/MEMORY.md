@@ -17,6 +17,7 @@
 - 坑：`/api/me` 探针判 -1001 会 `clear()` 删落盘文件（重扫即可）；default 无 token 可能与真 token 同 QQ 号 → 双引擎抢炉。
 
 ## 真机硬约束（API 事实）
+- ★ **主界面左侧「活动/任务列表」= 服务端大池子按周/月轮换**（2026-11-11 复核，用户纠正我「没抓包」的错判）：`card_run_base`（无参 POST）的 `version_list.activityInfo` → 免登录静态 XML `appimg2.qq.com/card/mk/activity_info_v_<ver>.xml`（当前 **v_1288**，264KB）：`Activity_Main_Info` 63 条活动池 + `Activity_Exchange_Info` 66 条带起止时间 + `Activity_Rule_Info` 48 条 HTML 规则 + `dzp_config`(转盘) + `ac_item` 348 条。现成解析 `backend/item_dict.py`（`parse_version_list`/`_fetch`/`DEFAULT_URLS`，⚠️ 多 `<?xml?>` 头须剔除包 `<wrap>`）。周任务每周三 0 点刷新，周/月/双月/超长期并存（实证 `mmgj` 11-11~11-17 / `xiaofei1` 11 月 / `mofashangdian` 10-14~12-09 / `yincanggoumai` 2021~2030）。**别再说需要抓包**：2026-09-15 主界面启动抓包 CSV 就在 `~/Downloads/card.qzone.qq.com抓包`，结论在 `2026-09-15.md:67` / `REFERENCE.md:3`。活动表只是规则配置，**实时进度与领奖端点仍未定位**（`card_monthtask` 等 -1 缺参、`card_act_travel` = activity is end）。
 - 奖励：`theme_card_list` **t[6]=金币、t[7]=经验**（时尚女套装 tid=45 交实测 100/200）；`card_collection_add` 空体。规律：老套两值不同，3★ 以上多相等，顶格 19999。
 - 箱：changebox 18 硬顶 / storebox `cur=168` 是**已开通容量**（`max=200` 非当前）、`nor` 普通卡数 / 简易箱 15 格。★**炼成卡优先进保险箱、满则溢到换卡箱；只有买的 10 面底卡一定进换卡箱** → 空位一律两箱合计 `_free2`。跨箱只支持 换→保 与 保↔简，换卡箱不能直接进简易箱。
 - 箱位闸：两箱空位 < 本套缺张数 → `_calc_sets` 返 0（`net_plan(sets<=0)` 返空，禁 `max(1,...)`）；同口径同时拦「收尾买底卡」与 `_make_room` 卖底卡。
