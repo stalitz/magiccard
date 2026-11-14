@@ -1753,14 +1753,23 @@ class AutoRefine:
             steal = bool(a.steal)
             friend = None
             if steal:
-                if self._steal_cooldown_until > time.time():
-                    continue
-                friend = await self._pick_steal_friend(st)
+                if self._steal_cooldown_until <= time.time():
+                    friend = await self._pick_steal_friend(st)
                 if not friend:
-                    self.steal_blocked = "DP 想偷炉但挑不到有空主炉的好友"
-                    continue
-                payload.pop("code", None)
-                payload["opuin"] = friend
+                    # ★★ 2026-11-14：**拿不到偷炉 ≠ 丢掉这个动作**。
+                    #   进入「让主炉」分支的前提是主炉余量 > 0（主炉还在我手上），
+                    #   旧版这里直接 `continue` 把动作扔了；而它要让位的那张「需主炉
+                    #   的卡」通常料还没齐 → 主炉与偷炉两边同时空着（每 tick 45s 白等）。
+                    if st["cap"].get("stove", {}).get("free_main", 0) > 0:
+                        steal = False
+                        self.steal_blocked = "偷炉不可用 → 退回主炉"
+                    else:
+                        self.steal_blocked = "偷炉不可用且主炉已满"
+                        continue
+                else:
+                    payload.pop("code", None)
+                    payload["opuin"] = friend
+            if steal:
                 r = await self.s.post(EP_STEAL, **payload)
             else:
                 r = await self.s.post(EP_REFINE, **payload)
@@ -1775,13 +1784,7 @@ class AutoRefine:
                           "detail": f"{plan.cname(target)}（{plan.name}） {msg}"})
             if not ok:
                 if steal:
-                    now = time.time()
-                    if code == -33031:
-                        self._steal_cooldown_until = now + 120   # 全局限制，不拉黑好友
-                    else:
-                        if friend:
-                            self._friend_fail[friend] = now + 1800
-                        self._steal_cooldown_until = now + 120
+                    self._steal_fail_policy(code, friend)
                 continue
             # ---- 成功：同步本地库存/炉位（与 _refine_steal 同口径）----
             self.stats["refined"] += 1
@@ -3019,13 +3022,18 @@ class AutoRefine:
 
         busy = {str(c.get("opuin")) for c in st.get("stove", [])
                 if c.get("opuin") and not _is_me(c.get("opuin"))}
-        # 优先用「常去好友」：未被失败缓存、其炉上没挂着我未取回的卡，且确实有空主炉
-        # （探测失败 -1 时仍交给服务端裁决，别因为探测抖动放弃常去好友）
+        # ★★ 2026-11-14：**指定好友 = 只用它，不换人**（用户定调：真机都是指定好友）。
+        #   旧版会因「被失败缓存 / 探测到满炉 / 炉上挂着我的卡」回落去扫描别的好友，
+        #   与用户意图相反，而且指定的人通常就是自己想借的那台。现在：指定了就只投它，
+        #   失败交给服务端裁决、下一 tick 继续对同一个好友重试（不拉黑、不全局冷却，
+        #   见 `_steal_fail_policy`）。唯一例外：它炉上还挂着我未取的卡（-33084）→
+        #   本 tick 先不投，等收卡再来 —— **仍然不换人**。
         pref = self.preferred_steal_friend
-        if (pref and not _is_me(pref) and pref not in busy
-                and self._friend_fail.get(pref, 0) <= now):
-            if await self._friend_stove_empty(pref) != 0:
-                return pref
+        if pref and not _is_me(pref):
+            _pn = str(pref).lstrip("0") or str(pref)
+            if any((u.lstrip("0") or u) == _pn for u in busy):
+                return None
+            return pref
         # 否则按「等级高优先」扫描：从 exp 降序列表头部取前 N 个，第一个有空主炉就借
         # （exp 是等级代理，用户定调等级高≈活跃；原「从最后 12 名往回」是 uin 序、
         #  与活跃度无关，已废弃 —— 2026-10-12）
@@ -3044,6 +3052,32 @@ class AutoRefine:
                 return uin
             chosen = uin                      # 退化候选：测不到空炉也尝试一次
         return chosen
+
+    def _steal_fail_policy(self, code, friend) -> None:
+        """偷炉失败后的退避策略（2026-11-14 重写）。
+
+        旧版：`-33031` 之外**一律**「拉黑该好友 30 分钟 + 全局冷却 120s」。
+        120s = 8 个 tick（45s/tick），即一次「好友炉满」就把偷炉整体停掉；而
+        `-33003`（该好友炉满）/ `-33084`（该好友挂着我未取的卡）都只是**单个好友**
+        的问题，换个人几乎必成（好友 194 人）。偷炉可用率被自己压到很低 —— 这正是
+        「DP 按 M+1 台排计划、执行层只拿到 M 台」的机制级原因（`dp_controller`
+        的 40 面卡 mclass=(0,2) + steal_cap=1）。
+
+        新口径：
+          · `-33031` 全局限制（我自己已有一炉在偷）→ 只设全局冷却，不拉黑好友；
+          · **指定好友**（真机常态）→ 不拉黑、不冷却，下一 tick 对同一个好友重试；
+          · 其它（好友炉满 / 挂着我没取的卡 / 未知）→ 只拉黑该好友，不全局冷却。
+        """
+        now = time.time()
+        if code == -33031:
+            self._steal_cooldown_until = now + 120
+            return
+        pref = str(self.preferred_steal_friend or "")
+        _f = str(friend or "")
+        if pref and _f and (_f.lstrip("0") or _f) == (pref.lstrip("0") or pref):
+            return                        # 指定好友：失败就重试，不拉黑不冷却
+        if friend:
+            self._friend_fail[friend] = now + 1800
 
     async def _refine_steal(self, st, tid, target, need_cnt, plan, slots, friend,
                             stock: Counter, pending: Counter, steps) -> None:
@@ -3080,17 +3114,13 @@ class AutoRefine:
             st["cap"]["change"]["used"] = max(0, used - sum(1 for _s, _t in picked if _t == 0))
             pending[target] += 1
         else:
-            # 偷炉失败分两类（2026-09-17 真机实测）：
-            #   -33031「同时只能偷一个炉子」= 全局限制（我还有一炉在偷），与好友无关，
-            #          禁止拉黑好友，只做全局冷却，等那炉收取后自然恢复。
-            #   其它（好友炉满 / 挂着我未取的卡等）= 好友相关 → 拉黑换人。
-            now = time.time()
-            if code == -33031:
-                self._steal_cooldown_until = now + 120
-            else:
-                if friend:
-                    self._friend_fail[friend] = now + 1800
-                self._steal_cooldown_until = now + 120
+            # 偷炉失败分三类（2026-11-14 重写，见 `_steal_fail_policy`）：
+            #   -33031 全局限制（我还有一炉在偷）→ 只冷却，不拉黑；
+            #   指定好友 → 不拉黑不冷却，下一 tick 对同一个人重试；
+            #   其它好友问题（炉满 / 挂着我未取的卡）→ 只拉黑该好友。
+            #   ★ 旧版这里 `else` 分支同时设全局冷却 120s，等于「好友炉满一次，
+            #     偷炉停 8 个 tick」—— DP 计划的第 M+1 台机器就此长期拿不到。
+            self._steal_fail_policy(code, friend)
 
     async def _buy_for(self, tid: int, target: int, short: dict, steps: list[dict]) -> bool:
         """就地为 (套 tid 的) target 这一炉补买缺的底卡。全成功返回 True。"""
