@@ -1670,6 +1670,8 @@ class AutoRefine:
         #   边界态保格位的前提是**真有东西要投炉**；没有可投的，格位留着也是空着。
         has_refine = any(a.kind == "refine" for a in actions)
         slots_dirty = False
+        bought_this_tick = 0
+        sync_noted = False
         for a in actions:
             if a.kind == "collect":
                 continue              # 上交已在 tick 第 3 步做过（DP 看到的是上交后状态）
@@ -1724,6 +1726,7 @@ class AutoRefine:
                         self._mark_bought(a.cid)
                         stock[a.cid] += 1
                         slots_dirty = True      # 新卡还没有 slot 记录，refine 前要重读
+                        bought_this_tick += 1
                         st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                     msg = r.get("message") or err_msg(r.get("code"))
                     self._log("买卡", ok, f"{card_name(a.cid)}（DP预买） {msg}")
@@ -1734,6 +1737,21 @@ class AutoRefine:
                 continue
             if a.kind != "refine":
                 continue              # 其余未知动作不执行（保底）
+            # ★ 2026-11-15 真机实测（10708702 首轮）：买卡写请求返回 code=0 之后，
+            #   mainpage 仍可能读到旧快照（新卡没有 slot 记录、旧槽号已错位），
+            #   重读一次也拿不到 → 首 tick 4 次投炉全失败（「买后未落箱」
+            #   「喂料槽已不在箱内」），下个 tick 自愈但白丢 45s + errors=8。
+            #   本 tick 买过卡就一律不投炉，留到下 tick（间隔 45s 远超真机
+            #   同步时间）按真实槽位重解。腾箱/买卡动作照常执行，不受影响。
+            if bought_this_tick:
+                if not sync_noted:
+                    sync_noted = True
+                    self._log("DP调度", True,
+                              f"本 tick 预买 {bought_this_tick} 张，"
+                              f"等箱位同步后下个 tick 再投炉")
+                    steps.append({"action": "DP调度", "ok": True,
+                                  "detail": f"预买 {bought_this_tick} 张，等箱位同步"})
+                continue
             target = a.target
             tid_c = owner.get(target) or self.queue[0]
             plan = self.plans[tid_c]
