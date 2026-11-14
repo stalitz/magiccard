@@ -686,6 +686,14 @@ class AutoRefine:
         # （194 人，顺序=游戏界面顺序，非卡友）。
         self.steal_enabled = True            # 偷炉总开关
         self.steal_search_depth = 12         # 每 tick 扫描的好友深度（按等级降序取前 N）
+        # ★ 2026-11-14：窗口内**真正发 mainpage 探测**的上限。深度 12 意味着未指定
+        #   好友时要连打 12 次 `card_user_mainpage`，而它正是 -3001（~15 次/10s
+        #   读频次限流）的唯一触发点；本 tick 还要读自己的 mainpage（_read_state /
+        #   _refresh_caps）→ 撞窗概率很高。真机常态是指定好友（零探测），这里只在
+        #   「没指定」时兜底，探测 4 个足够（命中不了就交给服务端裁决）。
+        self.steal_probe_max = 4
+        # 偷炉降级（DP 按 M 台重排）的最短持有时长，防 60s 短冷却造成每 tick 抖动
+        self._steal_down_until = 0.0
         self._friends = None                 # 好友 uin 列表（card_user_list，uin 序，缓存）
         self._friends_by_exp = None          # 同上但按 exp(等级代理)降序，活跃优先
         self._friend_cache: dict = {}         # uin -> (empty_count, ts)：好友炉空槽缓存
@@ -1588,6 +1596,30 @@ class AutoRefine:
                 #   首次真机到期时把超额炉的卡原样打出来（id/flag/剩余），
                 #   下次看日志就能定性，不用再猜。
                 self._log("DP调度", True, _shrink_report(st, n_stove))
+        # ★★ 2026-11-14：把「此刻偷炉还偷不偷得到」同步给 DP —— 拿不到第 5 台
+        #   就要按 M 台重排，而不是继续按 M+1 台估工期。
+        #   判据复用执行层已有的失败策略状态（`_steal_fail_policy` 设的冷却）：
+        #   冷却未到期 = 偷不到。已有偷炉在炼时容量仍是 1（池被自己的作业占着，
+        #   不是不可用；否则在炉的 class-2 作业会超出容量）。
+        _steal_busy = any(getattr(f, "steal", False) and f.cid > 0
+                          for f in ws.furnaces)
+        _now = time.time()
+        _cooling = self._steal_cooldown_until > _now
+        if _steal_busy:
+            self._steal_down_until = 0.0        # 已在偷 = 第 5 台在用，立刻恢复
+        elif _cooling and self._steal_down_until <= _now:
+            # 刚进冷却 → 降级并锁定 90s（≈2 tick）。不锁的话 60s 短冷却会变成
+            # 「降→升→降」每 tick 反复作废 memo 重解，抖动成本大于收益。
+            self._steal_down_until = _now + 90
+        _steal_avail = _steal_busy or (not _cooling
+                                       and self._steal_down_until <= _now)
+        if self._dp_ctrl.set_steal_cap(_steal_avail):
+            # 容量一变骨架与 memo 全部作废（控制器内做），这里只留可观测记录
+            self._log("DP调度", True,
+                      (f"偷炉可用 → DP 按 {n_stove + 1} 台排"
+                       if _steal_avail else
+                       f"偷炉暂不可用 → DP 按 {n_stove} 台重排（拿不到第 "
+                       f"{n_stove + 1} 台就不按它估工期）"))
         if not self.steal_enabled:
             ws.steal_free = 0      # 没勾偷炉 → DP 不排偷炉（与贪心 can_steal 同口径）
         completed = {t: self.plans[t].rounds for t in self.queue}
@@ -3043,6 +3075,7 @@ class AutoRefine:
         ordered = self._friends_by_exp or friends
         window = ordered[:self.steal_search_depth]
         chosen = None
+        probes = 0
         for uin in window:
             if _is_me(uin):
                 continue
@@ -3050,9 +3083,20 @@ class AutoRefine:
                 continue
             if uin in busy:
                 continue
+            if probes >= self.steal_probe_max:
+                # ★ 2026-11-14：探测配额用完 → 剩下的当退化候选直接投（服务端裁决），
+                #   不再继续打 mainpage（-3001 是读频次限流，探测越多越毒）。
+                chosen = chosen or uin
+                break
+            probes += 1
             e = await self._friend_stove_empty(uin)
             if e > 0:
                 return uin
+            if e < 0:
+                # 读失败 = 多半已被限流（-3001）/网络异常：继续扫只会把限流拖成
+                # 整段冷却，且本函数是「挑一个能投的人」，不是必须探明不可。
+                # 立刻停手，用当前退化候选（没有就它自己）交给服务端裁决。
+                return chosen or uin
             chosen = uin                      # 退化候选：测不到空炉也尝试一次
         return chosen
 

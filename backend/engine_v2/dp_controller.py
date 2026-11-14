@@ -170,6 +170,14 @@ class DPTickController:
         #     等待，不应急买、不计 discrepancy。旧的 `MC_BUY_GUARD` 硬门已删 ——
         #     它让 4★ 买卡 191→204、收益归零，属错误修法。）
         self.steal_enabled = bool(steal_enabled)   # 偷炉可规划（class 2）
+        # ★★ 2026-11-14：偷炉池**运行时容量**（0/1），与上面的静态开关分开。
+        #   `steal_enabled` 回答「允不允许偷炉」；这里回答「此刻还偷不偷得到」。
+        #   真机拿不到偷炉位（好友炉满 / 好友炉上挂着我没取的卡 / 全局冷却中）时
+        #   执行层调 `set_steal_cap(False)` → 骨架 mclass 从 (0,2) 退回 (0,)、
+        #   inst.steal_cap 置 0 → 重解按 M 台排。
+        #   旧行为是恒按 M+1 台排：拿不到第 5 台时工期估计系统性乐观，执行层只能
+        #   在「计划已排满 5 台」的假设下空等（本轮空转归因的最后一环）。
+        self._steal_cap = 1 if self.steal_enabled else 0
         # ★ 喂料底卡预买提前量（单位=tick）：买来的卡要下一 tick 才落箱/才知道
         #   slot，所以「下一 tick 会空」的炉必须在**本 tick** 就把料买进来，
         #   否则炉空那一 tick 才开始买 → 空转 1 tick（45s）× 每炉次。
@@ -320,6 +328,28 @@ class DPTickController:
         self.streak_resolve_cap = 16
         self._dbg: dict = {}            # 临时插桩（提前发失败原因），验收后删
 
+    # ---- 偷炉池运行时容量（执行层每 tick 同步，变化才作废缓存）----
+    def set_steal_cap(self, avail: bool) -> bool:
+        """同步「此刻偷炉是否可用」→ 偷炉池容量 1/0。
+
+        只做状态切换 + 缓存作废：`_skeleton` 一并置空，下一拍 `decide` 会按新
+        容量重建骨架（40 面卡 mclass 在 (0,2)/(0,) 之间切换）与 inst.steal_cap，
+        然后重解 —— 即「拿不到第 5 台就按 M 台重排」。返回是否发生变化。
+
+        只在**冷却/不可用**时降为 0：已有偷炉在炼时容量仍是 1（池被自己的作业
+        占着，不是不可用），否则在炉的 class-2 作业会超出容量、解可能不可行。
+        """
+        new = 1 if (self.steal_enabled and avail) else 0
+        if new == self._steal_cap:
+            return False
+        self._steal_cap = new
+        self._skel = None
+        self._skel_sig = None
+        self._skel_box_cap = None
+        self._memo = {}
+        self._plan = None
+        return True
+
     # ---- 静态骨架（类型级），active 套集合 / 箱容变化才重建 ----
     def _skeleton(self, active):
         """类型级骨架：非底卡 = 精炼类型；底卡 = 买卡类型（mclass [1]、
@@ -348,7 +378,7 @@ class DPTickController:
                 mats.append(())
             else:
                 dur.append(float(m.secs(c)))
-                if self.steal_enabled and m.is_40(c):
+                if self._steal_cap and m.is_40(c):
                     mclass.append((0, 2))     # 40 面：主炉或偷炉
                 else:
                     mclass.append((0,))
@@ -869,7 +899,7 @@ class DPTickController:
                 "box_cap": box_cap, "mclass": mclassL, "types": live, "n": nL,
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
                 "cp": cpL, "init_stock": init_stockL,
-                "steal_cap": 1 if self.steal_enabled else 0}
+                "steal_cap": self._steal_cap}
         if self.buy_free:
             inst["buy_free"] = True
             if self.ub_only:
@@ -1067,7 +1097,7 @@ class DPTickController:
         # 腾箱在箱紧时卖多余 10 面底卡 / 挪合成卡（_box_compaction），腾出
         # 的位当 tick 即可被 pass 1 买卡用上（sell/move 动作排在 buy 前，
         # executor 按序执行）。
-        base_window = 2 * (self.machines + (1 if self.steal_enabled else 0)) + 2
+        base_window = 2 * (self.machines + self._steal_cap) + 2
         # ★ 窗口还要受**箱容**约束（2026-10-26，用户定调「不要囤卡，提前买齐就是囤卡」）：
         # 一个可炼 op 平均吃 3 张喂料 → 窗口 W 等于让 3W 张毛需求同时在箱。
         # 18 格换卡箱下 W=10 → 30 张 → 8 条 d=2 链全铺开，13 张半成品各 1 张
