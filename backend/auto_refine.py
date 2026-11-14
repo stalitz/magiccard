@@ -1777,11 +1777,14 @@ class AutoRefine:
             ok = code == 0
             msg = r.get("message") or err_msg(code)
             tag = "DP偷炉" if steal else "DP炼卡"
+            # 可观测性：DP 计划里是偷炉、执行时退回主炉的，必须在日志里看得见。
+            # （`steal_blocked` 只是个属性，前端不读、也不落盘，光靠它等于没观测。）
+            _fb = "（偷炉不可用→退回主炉）" if (not steal and a.steal) else ""
             self._log(tag, ok,
                       f"{plan.cname(target)}（{plan.name}）"
-                      f"{('@' + friend) if (steal and friend) else ''} {msg}")
+                      f"{('@' + friend) if (steal and friend) else ''}{_fb} {msg}")
             steps.append({"action": tag, "ok": ok,
-                          "detail": f"{plan.cname(target)}（{plan.name}） {msg}"})
+                          "detail": f"{plan.cname(target)}（{plan.name}）{_fb} {msg}"})
             if not ok:
                 if steal:
                     self._steal_fail_policy(code, friend)
