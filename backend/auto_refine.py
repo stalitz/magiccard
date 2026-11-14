@@ -3075,7 +3075,13 @@ class AutoRefine:
         pref = str(self.preferred_steal_friend or "")
         _f = str(friend or "")
         if pref and _f and (_f.lstrip("0") or _f) == (pref.lstrip("0") or pref):
-            return                        # 指定好友：失败就重试，不拉黑不冷却
+            # 指定好友（用户口径：真机都用指定好友）：**不拉黑、不换人**，只给一个
+            # 短冷却 ≈ 1.3 个 tick 后继续对同一人重试。
+            # 为什么不是「完全不禁」：`_log` 没有节流，每次失败都会 append 一条日志 +
+            # `stats["errors"] += 1` + 落盘；tick 是 45s，好友炉满时会变成每 45s 刷一条。
+            # 旧版的 120s 全局冷却恰好把这个盖住了，去掉冷却就得自己补一个更短的。
+            self._steal_cooldown_until = now + 60
+            return
         if friend:
             self._friend_fail[friend] = now + 1800
 
