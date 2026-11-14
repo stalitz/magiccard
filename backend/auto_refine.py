@@ -1683,7 +1683,7 @@ class AutoRefine:
                 if a.kind == "sell":
                     r = await self.s.sell_card(
                         a.slot, a.cid, box_type=(1 if a.slottype == 0 else 2))
-                    how = "卖10面底卡"
+                    how = "卖杂卡" if "杂卡" in (a.note or "") else "卖10面底卡"
                 else:
                     r = await self.s.move_card(a.cid, a.slot, from_box=0)
                     how = "挪保险箱"

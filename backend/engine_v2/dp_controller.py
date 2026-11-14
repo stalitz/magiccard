@@ -680,7 +680,10 @@ class DPTickController:
         每 tick 发出换卡箱装不下的买卡 → 执行层逐张失败。同理「挪保险箱」
         确实腾出换卡箱位，旧版却没算进去（保守方向，一并修正）。
 
-        触发：change_free <= 2 或 box_free <= 4（同贪心）。安全边界：
+        触发：change_free <= 2 或 box_free <= 4（同贪心）。四段：
+        1) 卖多余 10 面底卡（本主题，保留 due/protect）；2) 挪本主题多余合成卡进
+        保险箱；3) 挪非本主题杂卡进保险箱（无损，保险箱满则停）；4) 保险箱也满时
+        卖非本主题的 ≤10 面卡（**只在挪不动时才走**，见 3)/4) 注释）。安全边界：
         ① 只卖 is_base 且 price==10 的底卡（铁律：高面值卡永不自动卖；
           10 面卡 sell_card 只换回面值等额金币，卖+买无损，绝不动 40 面
           素材与合成卡—— tid=709 底卡 57 面也不卖，保守）；
@@ -819,6 +822,36 @@ class DPTickController:
                 want -= 1
                 n_moved += 1
                 n_free_change += 1
+        # ---- 4) 保险箱也装不下时：卖「非在炼套」的 ≤10 面底卡（2026-11-14）----
+        #   第 3 段只能挪；保险箱满时挪不动（真机 4821992：换卡箱 17/18、保险箱
+        #   164/168）→ 换卡箱永久空 1 格 → 取卡门槛（要空 2 格）与买卡预算同时
+        #   归零。用户原话「本来一键抽卡就会卖的，10 面的卖了也能买，之前不也是
+        #   直接卖的吗」→ 允许卖。铁律不变：只卖 `_owner` 里没有（非本主题）
+        #   且面额 ≤10 的卡；本主题卡（可能是素材）、≥40 面卡一律不动。
+        short = max(0, 4 - ws.change_free) - max(0, ws.store_free)
+        if short > 0:
+            cards_map4 = (next(iter(self.models.values())).cards
+                          if self.models else {})
+            sellable: list[tuple[int, int, int]] = []
+            for cid, slot, slottype in list(ws.slots):
+                if cid <= 0 or slottype != 0:
+                    continue
+                if self._owner.get(cid) is not None:
+                    continue                  # 本主题的卡：绝不卖
+                c4 = cards_map4.get(cid)
+                face = int(c4[3] or 0) if c4 else 0
+                if 0 < face <= 10:
+                    sellable.append((face, cid, slot))
+            sellable.sort()                   # 面额升序：先卖最便宜的
+            for _face, cid, slot in sellable:
+                if short <= 0:
+                    break
+                actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                      slottype=0,
+                                      note=f"DP腾箱卖杂卡{cid}(面{_face})"))
+                n_sold += 1
+                n_free_change += 1
+                short -= 1
         if n_sold or n_moved:
             self.compact_sold += n_sold
             self.compact_moved += n_moved
