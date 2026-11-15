@@ -1584,7 +1584,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # ★ 纯 DP 兜底：UB 上界内一条完整路径都没走通（LB 偏紧 / UB 不可达）时，
     #   放开上界重搜一遍 —— 宁可慢、宁可爆预算，也不交付贪心表。
     #   `MC_DP_PURE_RETRY=0` 可关；第二遍节点预算 `MC_DP_PURE_RETRY_NODES`。
-    if PURE and v >= INF and _os.environ.get("MC_DP_PURE_RETRY", "1") == "1":
+    # ★★ 2026-11-15：retry 只给**冷启**（预算 ≥ `MC_DP_PURE_RETRY_MIN_TB`，默认
+    #   1.0s），warm 重解（0.3s）绝不 retry —— 否则每 tick 卡 8s（实测
+    #   time_budget=0.3s 跑 8.32s / 21.8 万节点），真机 tick 间隔 45s 被吃掉。
+    #   5★ 实测：dive + 0.3s B&B 走不到叶子，必须靠冷启 retry 才拿到
+    #   102.45h/1 轮的完整解（禁 retry 会退回 312.5h/0 轮）。
+    if PURE and v >= INF \
+            and time_budget >= float(_os.environ.get(
+                "MC_DP_PURE_RETRY_MIN_TB", "1.0") or 1.0) \
+            and _os.environ.get("MC_DP_PURE_RETRY", "1") == "1":
         BOUND_V[0] = INF
         stats["pure_retry"] = True
         _nb0 = node_budget
