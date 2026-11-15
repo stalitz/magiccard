@@ -726,16 +726,52 @@ class DPTickController:
         out.sort(reverse=True)
         return out
 
+    def _redundant_base_in_change(self, ws, keep: int = 1):
+        """本主题 ≤10 面底卡里，箱内核数超过 keep 的冗余份数（可直卖，1:1 无损）。
+
+        ★ 2026-11-15 真机 10708702：上一轮提前买了 9 张 10 面喂料底卡（23922
+          拜织女），「买后等箱位同步」把它们拆成跨 tick 的囤货；change_free 13→4
+          → pipe_min_free=6 提套闸关闭 → need0={} → 3 主炉 + 1 偷炉空 4 小时。
+          而 `_junk_in_change` 只看「非在炼套」的杂卡，对本主题冗余底卡一张也
+          看不见 → 3~5 格无人区的第二个变体。
+        只处理「在炼套、是底卡、0<面额<=10」三类同时成立的卡；合成卡、高
+          面值、杂卡一律不碰。keep=1 = 只留本套上交必需的 1 张；喂料底卡
+          按用户口径「买来即消耗」，不该在箱里留缓冲（真机 9 张 → 卖 8 张，
+          两箱本套张数 16→8，正好让「跨轮峰值 < 2N」闸放行）。
+        """
+        cards_map = (next(iter(self.models.values())).cards
+                     if self.models else {})
+        by_cid: Dict[int, list] = {}
+        for cid, slot, slottype in ws.slots:
+            if cid <= 0 or slottype != 0:
+                continue
+            m = self._owner.get(cid)
+            if m is None or not m.is_base(cid):
+                continue                      # 杂卡 / 合成卡：绝不在这里卖
+            c = cards_map.get(cid)
+            face = int(c[3] or 0) if c else 0
+            if not (0 < face <= 10):
+                continue
+            by_cid.setdefault(cid, []).append((face, slot))
+        out = []
+        for cid, items in by_cid.items():
+            if len(items) > keep:
+                out.extend((face, cid, slot)
+                           for face, slot in items[:len(items) - keep])
+        return out
+
     def _reachable_free(self, ws):
-        """物理空位 + 可直卖的 ≤10 面杂卡 + 可无损挪进保险箱的 >10 面杂卡。"""
+        """物理空位 + 可直卖的 ≤10 面杂卡/冗余底卡 + 可无损挪进保险箱的高面值杂卡。"""
         junk = self._junk_in_change(ws)
         sellable = sum(1 for face, _c, _s in junk if 0 < face <= 10)
         movable = sum(1 for face, _c, _s in junk
                       if not (0 < face <= 10))
-        return ws.change_free + sellable + min(movable, max(0, ws.store_free))
+        return (ws.change_free + sellable
+                + len(self._redundant_base_in_change(ws))
+                + min(movable, max(0, ws.store_free)))
 
     def _pre_evict_junk(self, ws, actions, want):
-        """先卖 ≤10 面杂卡，再把 >10 面杂卡挪保险箱；返回腾出的换卡箱格数。"""
+        """先卖 ≤10 面杂卡，再卖本主题冗余 ≤10 面底卡，最后把 >10 面杂卡挪保险箱。"""
         junk = self._junk_in_change(ws)
         sell_q = sorted((x for x in junk if 0 < x[0] <= 10))   # 面额升序
         move_q = [x for x in junk if not (0 < x[0] <= 10)]     # 面额降序
@@ -746,6 +782,18 @@ class DPTickController:
             actions.append(Action(kind="sell", cid=cid, slot=slot,
                                   slottype=0,
                                   note=f"DP腾箱卖杂卡{cid}(面{face})"))
+            n += 1
+        if n >= want:
+            return n
+        # ★ 冗余底卡**一次清到 keep**，不受 want 限制：只腾到 6 格不够。
+        #   提套后还要过「跨轮峰值 < 2N」闸（箱内本套卡 12 张 + 下一套 9 张
+        #   = 21 ≥ 18 会被拦），只卖 2 张 → free=6 但 2N 仍拦 → 又一次零动作。
+        #   这些是上一轮提前买来囤着的 10 面底卡，卖掉 1:1 无损、买回同价，
+        #   且留够 keep=1（本套上交必需的那 1 张），一次清完不震荡。
+        for face, cid, slot in self._redundant_base_in_change(ws):
+            actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                  slottype=0,
+                                  note=f"DP腾箱卖冗余底卡{cid}(面{face})"))
             n += 1
         if n >= want:
             return n

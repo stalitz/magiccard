@@ -1737,21 +1737,24 @@ class AutoRefine:
                 continue
             if a.kind != "refine":
                 continue              # 其余未知动作不执行（保底）
-            # ★ 2026-11-15 真机实测（10708702 首轮）：买卡写请求返回 code=0 之后，
-            #   mainpage 仍可能读到旧快照（新卡没有 slot 记录、旧槽号已错位），
-            #   重读一次也拿不到 → 首 tick 4 次投炉全失败（「买后未落箱」
-            #   「喂料槽已不在箱内」），下个 tick 自愈但白丢 45s + errors=8。
-            #   本 tick 买过卡就一律不投炉，留到下 tick（间隔 45s 远超真机
-            #   同步时间）按真实槽位重解。腾箱/买卡动作照常执行，不受影响。
-            if bought_this_tick:
-                if not sync_noted:
-                    sync_noted = True
-                    self._log("DP调度", True,
-                              f"本 tick 预买 {bought_this_tick} 张，"
-                              f"等箱位同步后下个 tick 再投炉")
-                    steps.append({"action": "DP调度", "ok": True,
-                                  "detail": f"预买 {bought_this_tick} 张，等箱位同步"})
-                continue
+            # ★ 2026-11-15 真机实测（10708702 首轮）：买卡 code=0 之后 mainpage
+            #   仍可能读到旧快照，重读也拿不到新卡 slot → 首 tick 4 次投炉全失败。
+            #   旧补丁「本 tick 买过卡就一律不投炉」把买与投拆成两个 tick，
+            #   ★ 2026-11-15 二次实测证伪：11:45 预买 9 张喂料底卡 → 不投炉 →
+            #   9 张落箱把 change_free 13→4 → pipe_min_free=6 提套闸关闭 →
+            #   下个 tick need0={}、计划被清空 → 3 主炉 + 1 偷炉空 4 小时。
+            #   用户定调「卡没集齐时箱里一个 10 面都不该买」成立的前提正是
+            #   「买来的料同 tick 就被消耗，净占 0 格」，拆 tick 直接违反它。
+            #   现改回：买卡后按下面 slots_dirty 重读真实槽位即时投炉；
+            #   重读确实拿不到新料时**只跳过那一个 op**，记调度日志不计 errors
+            #   （昨夜失败日志/errors=8 的副作用由此消除），其余 op 照常投。
+            if bought_this_tick and not sync_noted:
+                sync_noted = True
+                self._log("DP调度", True,
+                          f"本 tick 预买 {bought_this_tick} 张，"
+                          f"按重读槽位即时投炉")
+                steps.append({"action": "DP调度", "ok": True,
+                              "detail": f"预买 {bought_this_tick} 张，即时投炉"})
             target = a.target
             tid_c = owner.get(target) or self.queue[0]
             plan = self.plans[tid_c]
@@ -1778,9 +1781,6 @@ class AutoRefine:
                             if (sl[0], sl[1]) not in _used]
                     if not cand:
                         ok_slots = False
-                        self._log("DP炼卡", False,
-                                  f"{plan.cname(target)}：喂料 {card_name(cid_f)} "
-                                  f"买后未落箱，跳过")
                         break
                     sl = cand[0]
                     _used.add((sl[0], sl[1]))
@@ -1797,8 +1797,16 @@ class AutoRefine:
                     payload[f"slottype{i}"] = stt
                     used_feeders.append((cid_f, sl, stt))
             if not ok_slots:
-                self._log("DP炼卡", False,
-                          f"{plan.cname(target)}：喂料槽已不在箱内（状态变了），跳过")
+                if sync_noted:
+                    # 本 tick 刚买过卡、真机快照尚未同步：这是**等待**不是失败，
+                    # 不计 errors、不写失败日志，下一 tick 按真实槽位重投。
+                    self._log("DP调度", True,
+                              f"{plan.cname(target)}：新买喂料未同步，下一 tick 再投")
+                    steps.append({"action": "DP调度", "ok": True,
+                                  "detail": f"{plan.cname(target)} 等箱位同步"})
+                else:
+                    self._log("DP炼卡", False,
+                              f"{plan.cname(target)}：喂料槽已不在箱内（状态变了），跳过")
                 continue
             steal = bool(a.steal)
             friend = None
