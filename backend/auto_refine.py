@@ -1651,7 +1651,10 @@ class AutoRefine:
                               "discrepancy": dpstats.get("discrepancy"),
                               "emergency_now": dpstats.get("emergency_now"),
                               "early_now": dpstats.get("early_now"),
-                              "box_relaxed": dpstats.get("box_relaxed")}
+                              "box_relaxed": dpstats.get("box_relaxed"),
+                              # 紧箱物理无解：把停手原因透传到 /api/auto/status
+                              "reason": dpstats.get("reason"),
+                              "deadlock": dpstats.get("deadlock")}
         # cid -> 所属套（买卡要带 theme_id；合成卡/底卡都可能被买）
         owner: dict[int, int] = {}
         for t in self.queue:

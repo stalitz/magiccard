@@ -234,6 +234,11 @@ class DPTickController:
         _ps = os.environ.get("MC_PIPE_SETS")
         self.pipe_sets = (self.buy_free if _ps is None else _ps == "1")
         self.pipe_min_free = int(os.environ.get("MC_PIPE_MIN_FREE") or 6)
+        # ★ 紧箱物理无解时停手报告（2026-11-15 全矩阵 A/B PASS 后上线）。
+        #   默认开；`MC_DP_DEADLOCK_REPORT=0` 可关闭复现旧行为（A/B 用）。
+        self.deadlock_report = os.environ.get("MC_DP_DEADLOCK_REPORT", "1") == "1"
+        self.deadlock_reports = 0
+        self._last_deadlock_log = -10 ** 9
         if self.buy_free:
             # ★ 口径联动（2026-10-27）：solver 里 buy 与 refine 同拍（instant），
             #   执行层若还按「本 tick 买的料不能当喂料」就会系统性晚 1 tick 投炉，
@@ -769,6 +774,28 @@ class DPTickController:
         return (ws.change_free + sellable
                 + len(self._redundant_base_in_change(ws))
                 + min(movable, max(0, ws.store_free)))
+
+    def _deadlock_info(self, ws):
+        """物理箱位诊断：**可达空位**是否低于提套门槛，以及还能不能动一张卡。
+
+        ★ 用户定调「紧箱是物理事实、正确行为是停手报告」：这里只判物理，
+          不判「DP 暂时排不出」——后者是调度问题，不该 pretend 成死锁。
+        """
+        junk = self._junk_in_change(ws)
+        sellable = sum(1 for face, _c, _s in junk if 0 < face <= 10)
+        movable = sum(1 for face, _c, _s in junk
+                      if not (0 < face <= 10))
+        redundant = len(self._redundant_base_in_change(ws))
+        can_move = min(movable, max(0, ws.store_free))
+        reachable = (ws.change_free + sellable + redundant + can_move)
+        info = {
+            "change_free": ws.change_free, "store_free": ws.store_free,
+            "sellable": sellable, "redundant_base": redundant,
+            "movable_high": movable, "can_move": can_move,
+            "reachable_free": reachable, "min_free": self.pipe_min_free,
+            "hard": (sellable + redundant + can_move == 0),
+        }
+        return reachable < self.pipe_min_free, info
 
     def _pre_evict_junk(self, ws, actions, want):
         """先卖 ≤10 面杂卡，再卖本主题冗余 ≤10 面底卡，最后把 >10 面杂卡挪保险箱。"""
@@ -2076,6 +2103,29 @@ class DPTickController:
                 # 下 tick 按真实空位重解（同「预买后等箱位同步」口径）。
                 return actions, {"skip_solve": True, "reason": "pre_evict_junk",
                                  "n_types": self._skel["n"]}
+
+        # ---- 0b) 物理死锁：可达空位 < 提套门槛 → 停手报告 ----
+        #   旧行为：_pre_evict_junk 只在 reachable >= min_free 时触发，
+        #   reachable 卡在 3~5 格且保险箱满时就静默空转、每 tick 空解。
+        #   这里先把还能无损动的卡清掉，仍不够就明确回报「需手动清箱」，
+        #   并作废过期计划；箱位签名一变（用户清箱/扩容）下一 tick 自动恢复。
+        # 短路：物理空位本就 ≥ 门槛时 reachable 必 ≥ 门槛，不必每 tick 扫箱。
+        if self.deadlock_report and ws.change_free < self.pipe_min_free:
+            dead, info = self._deadlock_info(ws)
+            if dead:
+                want = max(1, self.pipe_min_free - ws.change_free)
+                n = self._pre_evict_junk(ws, actions, want)
+                self.deadlock_reports += 1
+                self._plan = None
+                if ws.now - self._last_deadlock_log >= 900:
+                    self._last_deadlock_log = ws.now
+                    print(f"[DP停手] 箱位物理不足：{info} 需手动清卡箱/扩容",
+                          flush=True)
+                return actions, {
+                    "skip_solve": True,
+                    "reason": ("physical_deadlock_evicting" if n else
+                               "physical_deadlock"),
+                    "deadlock": info, "n_types": self._skel["n"]}
 
         # ---- 净需求（非底卡炼几次 / 底卡买几张）----
         need0_map, buy0_map = self._union_need0(box_stock, pending, active,
