@@ -668,6 +668,68 @@ class DPTickController:
                     protect[c] = max(protect.get(c, 0), gap)
         return due, protect
 
+    # ---- 预腾位（2026-11-15 真机 10708702 自锁修复）----
+    # 现象：change_free=5、pipe_min_free=6 → pipe_sets 不提套 → plan ops 空；
+    # 而 _box_compaction 只在 change_free<=2 / box_free<=4 才腾箱 → 换卡箱里
+    # 12 张「非本主题 10 面杂卡」永远不动 → 空位永远 5 → 2.5h 零动作。
+    # 修法：提套判定前先把「可达空位」算清楚；物理不足但可挪/可卖时，
+    # 本 tick 只发腾位动作（优先无损挪保险箱，其次卖非本主题 ≤10 面），
+    # 等箱位同步后下 tick 再按真实空位排程（同「买后等同步」的稳妥模式）。
+    def _junk_in_change(self, ws):
+        """换卡箱中不属于任何在炼套的卡：(face, cid, slot)，面额降序。"""
+        cards_map = (next(iter(self.models.values())).cards
+                     if self.models else {})
+        out = []
+        for cid, slot, slottype in ws.slots:
+            if cid <= 0 or slottype != 0:
+                continue
+            if self._owner.get(cid) is not None:
+                continue                    # 在炼套的卡：绝不挪、绝不卖
+            c = cards_map.get(cid)
+            face = int(c[3] or 0) if c else 0
+            out.append((face, cid, slot))
+        out.sort(reverse=True)
+        return out
+
+    def _reachable_free(self, ws):
+        """物理空位 + 可无损挪进保险箱的杂卡 + 挪不下时可卖的 ≤10 面杂卡。"""
+        junk = self._junk_in_change(ws)
+        movable = min(len(junk), max(0, ws.store_free))
+        sellable = sum(1 for face, _c, _s in junk[movable:]
+                       if 0 < face <= 10)
+        return ws.change_free + movable + sellable
+
+    def _pre_evict_junk(self, ws, actions, want):
+        """发 move / sell 动作腾换卡箱位；返回腾出的格数。"""
+        junk = self._junk_in_change(ws)
+        store_used = {s for (_c, s, st) in ws.slots if st == 1}
+        store_free = max(0, ws.store_free)
+        n = 0
+        for face, cid, slot in junk:
+            if n >= want:
+                break
+            if store_free > 0:
+                dest = next((s for s in range(1, ws.store_cur + 1)
+                             if s not in store_used), None)
+                if dest is None:
+                    store_free = 0          # 保险箱实际已满 → 转卖
+                else:
+                    actions.append(Action(kind="move", cid=cid, slot=slot,
+                                          slottype=0,
+                                          note=f"DP腾箱挪保险箱{cid}(面{face})"))
+                    store_used.add(dest)
+                    store_free -= 1
+                    n += 1
+                    continue
+            if 0 < face <= 10:            # 铁律：高面值卡永不自动卖
+                actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                      slottype=0,
+                                      note=f"DP腾箱卖杂卡{cid}(面{face})"))
+                n += 1
+        return n
+
+    # ------------------------------------------------------------------
+
     def _box_compaction(self, ws, plan, due, actions, avail_slots,
                         protect=None):
         """腾箱（BoxCompaction，同贪心 Step4 口径）：箱紧时卖多余 10 面底卡
@@ -1914,6 +1976,19 @@ class DPTickController:
             self._skel_box_cap = box_cap
             self._memo = {}
             self._plan = None
+
+        # ---- 0) 预腾位：解开「提套要 ≥6 格 / 腾箱只在 ≤2 格触发」的互锁 ----
+        #   只在「物理空位不足 pipe_min_free、但可达空位够」且箱内确有杂卡时
+        #   动作；紧箱且无可腾杂卡时保持原行为（停手报告，不硬排）。
+        if (self.pipe_sets and ws.change_free < self.pipe_min_free
+                and self._reachable_free(ws) >= self.pipe_min_free):
+            want = self.pipe_min_free - ws.change_free
+            n_evict = self._pre_evict_junk(ws, actions, want)
+            if n_evict:
+                # 本 tick 不排程：写请求返回后箱位快照可能仍是旧的，
+                # 下 tick 按真实空位重解（同「预买后等箱位同步」口径）。
+                return actions, {"skip_solve": True, "reason": "pre_evict_junk",
+                                 "n_types": self._skel["n"]}
 
         # ---- 净需求（非底卡炼几次 / 底卡买几张）----
         need0_map, buy0_map = self._union_need0(box_stock, pending, active,
