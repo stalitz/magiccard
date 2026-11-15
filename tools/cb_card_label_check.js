@@ -47,33 +47,39 @@ w.fetch = async (u) => ({ json: async () => ST });
 
   const c0 = box.querySelector('.cb-card[data-cid="23927"]');
   assert(!!c0, "找到「斗巧」（cid 23927）那张卡");
-  const line = c0.querySelector(".cbn");
-  const kids = line ? [...line.children].map((n) => n.className) : [];
-  console.log("  第一张标签行子元素：", kids.join(" | "),
-              "→", line ? line.textContent.trim() : "(缺)");
-  assert(kids[0] === "cbt", "套名节点排在卡名前面（顺序 " + kids.join(",") + "）");
-  assert(kids[1] === "cnm", "卡名节点紧随其后");
-  assert((c0.querySelector(".cbt") || {}).textContent === "七夕情人节", "套名文本 = 七夕情人节");
-  assert((c0.querySelector(".cnm") || {}).textContent === "斗巧", "卡名文本 = 斗巧");
+  const r1 = c0.querySelector(".cbtrow"), r2 = c0.querySelector(".cbnrow");
+  assert(!!r1 && !!r2, "渲染出两行：星级+套名 / 卡名+面值");
+  const k1 = r1 ? [...r1.children].map((n) => n.className) : [];
+  const k2 = r2 ? [...r2.children].map((n) => n.className) : [];
+  console.log("  第一行：", k1.join(" | "), "→", r1 ? r1.textContent.trim() : "");
+  console.log("  第二行：", k2.join(" | "), "→", r2 ? r2.textContent.trim() : "");
+  assert(k1.join(",") === "cbstar,cbt", "第一行 = 星级(小灰) + 套卡名");
+  assert((r1.querySelector(".cbt") || {}).textContent === "七夕情人节", "套名文本 = 七夕情人节");
+  assert((r1.querySelector(".cbstar") || {}).textContent === "1★", "星级文本 = 1★");
+  assert(k2.join(",") === "cnm,cbprice", "第二行 = 卡名 + 面值(小灰)");
+  assert((r2.querySelector(".cnm") || {}).textContent === "斗巧", "卡名文本 = 斗巧");
+  assert(/面值\s*40/.test((r2.querySelector(".cbprice") || {}).textContent || ""), "面值文本 = 面值 40");
 
-  // 下方小字行不应再重复套名
-  const meta = c0.querySelector(".cbm").textContent;
-  assert(!/七夕情人节/.test(meta), "面值/星级行不再重复套名：" + meta.replace(/\s+/g, " ").trim());
-
-  // 无主题的卡（百变卡）不应出现空的套名节点
+  // 无主题的卡：第一行只剩星级（若有），不渲染空套名
   const c1 = box.querySelector('.cb-card[data-cid="19522"]');
   assert(!c1.querySelector(".cbt"), "无主题卡不渲染空套名节点");
   assert((c1.querySelector(".cnm") || {}).textContent === "百变卡", "无主题卡仍显示卡名");
+  assert((c1.querySelector(".cbstar") || {}).textContent === "5★", "无主题卡仍显示星级");
 
-  // 字号一致（jsdom 能算就算，算不出退回查 CSS 文本）
+  // 字号：套名/卡名 12.5px 大字，星级/面值 11px 小灰
   const sz = (el) => (el ? w.getComputedStyle(el).fontSize : "");
-  const a = sz(c0.querySelector(".cbt")), b = sz(c0.querySelector(".cnm"));
-  if (a && b) {
-    assert(a === b, `套名与卡名同字号（${a} vs ${b}）`);
-    assert(parseFloat(a) >= 12.5, `标签字号不小于 12.5px（${a}）`);
+  const col = (el) => (el ? w.getComputedStyle(el).color : "");
+  const big = sz(r1.querySelector(".cbt")), big2 = sz(r2.querySelector(".cnm"));
+  const sm1 = sz(r1.querySelector(".cbstar")), sm2 = sz(r2.querySelector(".cbprice"));
+  console.log("  字号：套名", big, "卡名", big2, "星级", sm1, "面值", sm2);
+  if (big && sm1) {
+    assert(parseFloat(big) === 12.5 && parseFloat(big2) === 12.5, "套名与卡名 12.5px");
+    assert(parseFloat(sm1) === 11 && parseFloat(sm2) === 11, "星级与面值 11px 小字");
+    assert(col(r1.querySelector(".cbstar")) === col(r2.querySelector(".cbprice")),
+      "星级与面值同色（灰）");
   } else {
-    const cssOk = /\.cbn\{[^}]*font-size:12\.5px/.test(html);
-    assert(cssOk, "CSS 里标签行字号 12.5px（jsdom 未能计算，改查样式文本）");
+    assert(/\.cbt\{[^}]*font-size:12\.5px/.test(html) && /\.cbstar\{[^}]*font-size:11px/.test(html),
+      "CSS 文本里有 12.5px 套名 / 11px 星级（jsdom 未能计算）");
   }
 
   assert(!errors.length, "无脚本异常：" + errors.slice(0, 3).join(" / "));
