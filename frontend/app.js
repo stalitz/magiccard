@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261111b";
+const APP_VER = "20261115a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -3997,8 +3997,10 @@ function cbCardHtml(c, boxType) {
     acts = `<button class="btn sm ghost" data-act="tempmove" data-tmtype="1" data-slot="${c.slot}" data-id="${c.id}">移入保险箱</button>`;
   }
   return `<div class="cb-card" data-cid="${c.id}"${style}>
-    <div class="cbn" title="${esc(c.name || "")}">${esc(c.name || ("卡#" + c.id))}</div>
-    <div class="cbm"><span>面值 ${c.price ?? 0}</span>${theme ? `<span>${esc(theme)}</span>` : ""}${c.star ? `<span>${c.star}★</span>` : ""}</div>
+    <div class="cbn" title="${esc((theme ? theme + " · " : "") + (c.name || ""))}">${
+      theme ? `<span class="cbt" style="color:hsl(${themeHue(theme)},52%,38%)">${esc(theme)}</span>` : ""
+    }<span class="cnm">${esc(c.name || ("卡#" + c.id))}</span></div>
+    <div class="cbm"><span>面值 ${c.price ?? 0}</span>${c.star ? `<span>${c.star}★</span>` : ""}</div>
     <div class="cb-route">点击查看合成路径 ▸</div>
     <div class="cbacts">${acts}</div>
   </div>`;
@@ -4047,7 +4049,7 @@ async function onCbAction(e) {
   try {
     if (act === "sell") {
       const price = Number(b.dataset.price || 0);
-      if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cbn").textContent}」？可得 ${price} 金。`)) {
+      if (!confirm(`确定卖掉「${b.closest(".cb-card").querySelector(".cnm").textContent}」？可得 ${price} 金。`)) {
         restore(); return;
       }
       const bt = box === 0 ? 1 : 2;
