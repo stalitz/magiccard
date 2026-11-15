@@ -210,12 +210,34 @@ def _has_steal(mclass, n, run_norm):
     return any(c == 2 for _i, _f, c in run_norm)
 
 
-def _buy_demand(n, mclass, mats, stock, need, running_cnt):
+def _collect_ready(mclass, n, need, running_types):
+    """「整套非底卡全部产出」时刻 = 允许买收藏底卡的就绪条件。
+
+    ★ 2026-11-15 用户定调：上交前一张收藏底卡都不该囤；求不出是条件没给全，
+      不是该在执行层加闸。此函数是 **DP 状态的派生量**（need + 在炉），随
+      求解时间轴变化，与上一版证伪的 inst 静态布尔 collect_ready 完全不同：
+      顶层还在炉时 False，产出落箱、待炼需求归零后 True，need 自然能完成。
+    """
+    for i in range(n):
+        if (0 in _cls_of(mclass, i) or 2 in _cls_of(mclass, i)) \
+                and need[i] > 0:
+            return False
+    for i in running_types:
+        if 0 in _cls_of(mclass, i) or 2 in _cls_of(mclass, i):
+            return False
+    return True
+
+
+def _buy_demand(n, mclass, mats, stock, need, running_cnt,
+                collect_ready=True):
     """各买卡类型的 lazy 需求（现在就该买的量）。
 
     readyish 精炼（need>0、除底卡外喂料全在箱）或 almost-readyish（缺的复合喂料
     在炉、必将到货）→ 其底卡缺口就是现在的购买需求。已无精炼需求时（只剩集卡册
-    底卡）→ 需求 = need[b]（终局全买，防死锁）。
+    底卡）→ 需求 = need[b]（终局全买，防死锁），但**仅在 collect_ready 时**：
+    收藏底卡是上交瞬间才需要的，顶层仍在炉就买 = 白占箱位数小时。
+    collect_ready 缺省 True = 旧函数行为；整体开关在 inst["collect_gate"]
+    （缺省启用，False = 逐位复现改动前）。
     """
     dem = {}
     ref_need = False
@@ -247,7 +269,7 @@ def _buy_demand(n, mclass, mats, stock, need, running_cnt):
         if ok:
             for j, k in add.items():
                 dem[j] = dem.get(j, 0) + k
-    if not ref_need:
+    if not ref_need and collect_ready:
         for b in range(n):
             if 1 in _cls_of(mclass, b) and need[b] > 0:
                 dem[b] = need[b]
@@ -323,6 +345,9 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
   #   `_add_to_box` —— 没有任何物理延迟。打开后买卡**不占 shop 时间槽**、
   #   当场进 stock（同一 t 的精炼就能用），只受箱容约束。
   buy_free = bool(inst.get("buy_free"))
+  # ★ collect_gate 缺省开（生产 controller 无需改）：只影响「终局收藏底卡」
+  #   的购买时刻，喂料底卡仍按 readyish 口径即时备好。False = 旧行为（A/B 用）。
+  GATE = bool(inst.get("collect_gate", True))
   stock = list(init_stock) if init_stock is not None else [0] * n
   need = list(inst["need0"])
   run_norm = _norm_running(init_running, n)
@@ -378,7 +403,12 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
       running_cnt = {}
       for _f, i in running:
         running_cnt[i] = running_cnt.get(i, 0) + 1
-      dem = _buy_demand(n, mclass, mats, stock, need, running_cnt)
+      # 收藏底卡的就绪条件随列表调度状态变化：顶层/中间卡还在炉就一张不买，
+      # 等产出全部落箱、非底卡需求归零后再买齐（need 到那时自然完成）。
+      gate = (not GATE) or _collect_ready(
+          mclass, n, need, [i2 for _f2, i2 in running])
+      dem = _buy_demand(n, mclass, mats, stock, need, running_cnt,
+                        collect_ready=gate)
       box_used = sum(stock) + len(buy_run)
       # 每类型上限 = min(剩余总需求, readyish 需求) - 箱内（dem 封顶保 JIT）
       caps = {b: min(need[b], dem[b]) - stock[b]
@@ -777,6 +807,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #   ③ 执行层同 tick 买投（buy_sametick，由 controller 联动）。
     BASEFREE = bool(inst.get("buy_free"))
     BASESET = frozenset(i for i in range(n) if 1 in _cls_of(mclass, i))
+    GATE = bool(inst.get("collect_gate", True))
 
     # ★ 向上 cp 在此预计算并注入 inst["ucp"]：供 vec_prio（搜索指路）复用，
     # 外部也可直接传 inst["ucp"] 覆盖。注意 UB 的 ready 排序**不用**它
@@ -1002,7 +1033,14 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             running_cnt = {}
             for i2, _f, _c in running_rel:
                 running_cnt[i2] = running_cnt.get(i2, 0) + 1
-            dem = _buy_demand(n, mclass, mats, stock, need, running_cnt)
+            # 终局收藏底卡的就绪条件由本次 dfs 状态派生（need + 在炉产物）；
+            # 未就绪时 dem 不含收藏需求，dfs 会推进到下一个完工再重判，
+            # 不会因「少买」判死，也不需要执行层任何补偿闸。
+            gate = (not GATE) or _collect_ready(
+                mclass, n, need,
+                [i2 for i2, _f2, c2 in running_rel if c2 in (0, 2)])
+            dem = _buy_demand(n, mclass, mats, stock, need, running_cnt,
+                              collect_ready=gate)
             items = _ready_items(stock, need)
             idle = [0, 0, 0]
             for _i2, _f2, c2 in running_rel:
