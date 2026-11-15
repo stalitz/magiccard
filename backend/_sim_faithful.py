@@ -99,6 +99,10 @@ def secs_of(cid: int) -> int:
     return SECS.get(int(cid), scale_secs(3600))
 
 
+# 「用户自己炼了别的卡」用的外部卡池：任何能炼的卡都行（只占炉位，产出不属本主题）
+_OTHER_CIDS = sorted(COMPOSE.keys())
+
+
 def face_of(cid: int) -> int:
     return FACE.get(int(cid), 0)
 
@@ -111,10 +115,18 @@ def face_of(cid: int) -> int:
 #   buy_net_fail 买卡网络失败 / mainpage_fail 主页面读抖动 /
 #   early_collect 用户抢先手动收卡 / steal_taken 偷炉产物被好友收走 /
 #   box_lost 换卡箱里的卡被换走（好友换卡·系统回收）。
+# ★ 2026-11-14 新增「用户手点」类扰动（用户定调：tick 之间状态会被用户改，
+#   引擎不重解就没法做决定）。默认全 0：这些是**存在性**扰动，不是概率实测值，
+#   只在 `MC_E_NOISE`/`MC_SIM_CHAOS` 跑对照时打开。
 CHAOS_SAFE = {"change_fail": 0.5, "buy_net_fail": 0.0, "mainpage_fail": 0.0,
-              "early_collect": 0.0, "steal_taken": 0.0, "box_lost": 0.0}
+              "early_collect": 0.0, "steal_taken": 0.0, "box_lost": 0.0,
+              "user_cancel": 0.0, "user_accel": 0.0, "user_other_refine": 0.0,
+              "stove_expire": 0.0, "box_resize": 0.0}
 CHAOS_STRESS = {"change_fail": 0.5, "buy_net_fail": 0.03, "mainpage_fail": 0.01,
-                "early_collect": 0.02, "steal_taken": 0.01, "box_lost": 0.002}
+                "early_collect": 0.02, "steal_taken": 0.01, "box_lost": 0.002,
+                "user_cancel": 0.004, "user_accel": 0.006,
+                "user_other_refine": 0.004, "stove_expire": 0.001,
+                "box_resize": 0.002}
 
 
 # ---- 虚拟服务端 ----
@@ -142,6 +154,10 @@ class VirtualSession:
         self.friend_uin = "999000001"
         self.ar = None              # 运行期注入
         self.rng = random.Random(seed)
+        # 外部事件独立随机流（见 `_rand_evt`）：保证 A/B 两档遇到同一串扰动
+        self.rng_evt = random.Random(seed * 7919 + 13)
+        self._evt_seed = seed * 7919 + 13
+        self._evt_n = 0
         self.change_rng = False
         # 扰动档位：默认 SAFE（含真实的变卡 50% 失败）；MC_SIM_CHAOS=1 走压力档
         base = dict(CHAOS_STRESS if os.environ.get("MC_SIM_CHAOS") == "1"
@@ -152,6 +168,18 @@ class VirtualSession:
         self.collected: dict[int, set] = {}   # tid -> 已收集 qq秀 实例 id（模拟真实上交反馈）
         self.completions: list[tuple] = []    # (完工时刻endtime, cid, 是否偷炉)——精确完工记录
         self.perturb_log: list[tuple] = []    # (时刻, 类型, 细节) —— 外部扰动留痕
+        # 「用户炼了别的卡」要排除的 cid（= 本主题表内卡，由 harness 填）
+        self.other_exclude: set[int] = set()
+        self.stove_shrunk = 0                 # 炉过期只允许发生一次（真机不会连环缩）
+        # ★ 2026-11-14 扰动审计：把「扰动白送了多少产能」单独记账。
+        #   user_accel 直接把 endtime 归零 = **凭空产生炉时**；box_resize 扩容 =
+        #   **凭空产生箱位**。两者都不是「引擎在扰动下做对了什么」，不能算红利，
+        #   必须从产出里扣掉才能判断调度质量。旧版没有这两笔账，导致误以为
+        #   「扰动让产出 +60%」是用户行为红利。
+        self.accel_saved = 0.0                # 累加被加速消除的炉时（小时）
+        self.accel_n = 0
+        self.box_grow = 0                     # 累计扩容的换卡箱格数
+        self.stove_shrink = 0                 # 累计缩掉的炉台数
         # ---- 礼物箱（freegift_get_list，与卡箱无关）----
         # 真机实测 2026-10-28：count=46/50，其中 freegift_id=81 占 34 件。
         # 旧版没有这个模拟 → `gift_inbox()` 读到静默 code=0 的空响应 → count=0 →
@@ -179,20 +207,30 @@ class VirtualSession:
     def _free_main_stove(self):
         """返回 (卡位 slot, 炉号 stove)；每炉最多 SLOTS_PER_STOVE 张（1 炼 + 1 排）。
 
-        优先填「队列最短」的炉：先在完全没有卡的炉里找，再找只有 1 张（在炼）的炉
-        —— 这样排队位只在前一张已经在炼时才占用，与真机「slot 0 在炼 / slot 1 空位」
-        的形态一致。
+        ★★ 2026-11-14 修正（扰动有害的实现根因之一）：旧版**按炉号从小到大**
+        取第一个有空位的炉。空炉优先（`want` 0→1）时这没错，但所有炉都已有卡时
+        它会把新卡排进「炉号最小」那台的队列 —— 那台可能正好排着用户/外部的
+        一张长卡（几小时），而后一张的 `btime = max(now, 前一张 endtime)` 是
+        链式预计算的（真机实测 2370 结束 == 2372 开始）→ 引擎自己的卡被白等
+        几小时，表现为「炉里 7.2 张卡、平均剩余 5.68h、产出只有一半」。
+        正确：**取最早可用的那台**（min 队列末端），空炉天然最早可用。
         """
-        for want in (0, 1):
-            for stove in range(self.STOVES):
-                slots = [stove * self.SLOTS_PER_STOVE + i
-                         for i in range(self.SLOTS_PER_STOVE)]
-                used = [s for s in slots if s in self.stoves]
-                if len(used) == want:
-                    free = [s for s in slots if s not in self.stoves]
-                    if free:
-                        return free[0], stove
-        return None, None
+        best = None
+        for stove in range(self.STOVES):
+            slots = [stove * self.SLOTS_PER_STOVE + i
+                     for i in range(self.SLOTS_PER_STOVE)]
+            free = [s for s in slots if s not in self.stoves]
+            if not free:
+                continue
+            used = [s for s in slots if s in self.stoves]
+            # 空炉 = 立刻可用；有卡的炉 = 该炉队列末端（链式 btime）
+            ready = self.now if not used else max(self.now, self._queue_end(stove))
+            key = (ready, len(used), stove)   # 最早可用 → 占位最少 → 炉号
+            if best is None or key < best[0]:
+                best = (key, free[0], stove)
+        if best is None:
+            return None, None
+        return best[1], best[2]
 
     def _queue_end(self, stove: int) -> int:
         """该炉队列的最后一个 endtime（空炉 = 0）。"""
@@ -206,6 +244,7 @@ class VirtualSession:
         return None
 
     def _add_to_box(self, cid: int):
+        """买卡落箱：**只有买的底卡一定进换卡箱**，换卡箱满才溢到保险箱。"""
         s = self._free_change_slot()
         if s is not None:
             self.change[s] = cid
@@ -213,6 +252,27 @@ class VirtualSession:
         s = self._free_store_slot()
         if s is not None:
             self.store[s] = cid
+            return True
+        return False
+
+    def _add_refined_to_box(self, cid: int):
+        """取卡落箱：★**炼成卡优先进保险箱**，保险箱满才溢到换卡箱。
+
+        ★ 2026-11-14 保真度修正（此前一律走 `_add_to_box` = 换卡箱优先）：
+          真机规则已由多处独立确认（`auto_refine.py` 落箱注释、
+          `tools/sim_tight_box.py:add_any`「用户 2026-11-05 定调」）——
+          「炼成的卡优先进保险箱，满了才溢到换卡箱；只有买的底卡一定进换卡箱」。
+          旧口径把炼成卡塞进 18 格换卡箱 → 换卡箱 2~3 套就被炼成卡占满 →
+          「取卡需换卡箱空 2 格」门槛永久失效 → 假死锁（实测松箱 200 格保险箱
+          几乎全空，换卡箱却 18/18 满、取卡被拒）。
+        """
+        s = self._free_store_slot()
+        if s is not None:
+            self.store[s] = cid
+            return True
+        s = self._free_change_slot()
+        if s is not None:
+            self.change[s] = cid
             return True
         return False
 
@@ -359,6 +419,16 @@ class VirtualSession:
         p = self.chaos.get(key, 0.0)
         return bool(p) and self.rng.random() < p
 
+    def _rand_evt(self, key: str) -> bool:
+        """外部事件专用随机流（`rng_evt`，与动作流 `rng` 分开）。
+
+        ★ 2026-11-14：扰动序列必须**与引擎动作无关**。若共用一个 rng，两个档位
+        （每 tick 重解 vs 事件式）动作次数不同 → rng 消耗不同 → 扰动序列分叉，
+        A/B 就变成「两组不同的天气」，对照失效。独立流保证同 tick 数下扰动逐位相同。
+        """
+        p = self.chaos.get(key, 0.0)
+        return bool(p) and self.rng_evt.random() < p
+
     def external_tick(self) -> None:
         """人工/外部扰动：每个 tick 推进后由驱动器调用（仿真 = 生产的一部分）。
 
@@ -370,25 +440,135 @@ class VirtualSession:
           · box_lost：换卡箱里的卡被换走/回收 → 随机消失一张。
         默认全 0（无实测依据，见 CHAOS_STRESS 注释）；MC_SIM_CHAOS=1 走压力档。
         """
-        if self._rand("early_collect"):
+        # ★★ 2026-11-14 对照实验保真：扰动随机流**每 tick 重置为「种子 + tick 号」**。
+        #   旧版是一条连续流，而很多扰动分支带前置条件（`and self.change`、
+        #   有闲炉才抽卡），条件不满足时**不消费随机数** → 两条对照线的随机流
+        #   越走越偏，A/B 实际在比较「两种不同的天气」（实测两组扰动数 103 vs 124）。
+        #   按 tick 派生种子后，第 n 个 tick 的扰动决策只由 n 决定，与引擎动作无关。
+        self._evt_n = getattr(self, "_evt_n", 0) + 1
+        self.rng_evt = random.Random(
+            int(getattr(self, "_evt_seed", 0)) * 1000003 + self._evt_n)
+        if self._rand_evt("early_collect"):
             done = [s for s, v in self.stoves.items()
                     if self.now >= v["endtime"] and not v["steal"]]
             if done:
-                s = self.rng.choice(done)
+                s = self.rng_evt.choice(done)
                 v = self.stoves.pop(s)
-                self._add_to_box(v["cid"])
+                self._add_refined_to_box(v["cid"])
                 self.perturb_log.append((self.now, "提前收卡", v["cid"]))
-        if self._rand("steal_taken"):
+        if self._rand_evt("steal_taken"):
             done = [s for s, v in self.stoves.items()
                     if self.now >= v["endtime"] and v["steal"]]
             if done:
-                s = self.rng.choice(done)
+                s = self.rng_evt.choice(done)
                 v = self.stoves.pop(s)
                 self.perturb_log.append((self.now, "偷炉卡被好友收走", v["cid"]))
-        if self._rand("box_lost") and self.change:
-            s = self.rng.choice(list(self.change))
+        if self._rand_evt("box_lost") and self.change:
+            s = self.rng_evt.choice(list(self.change))
             cid = self.change.pop(s)
             self.perturb_log.append((self.now, "换卡箱卡被换走", cid))
+        # ---- 用户手点类（2026-11-14 新增，默认概率 0）----
+        #   user_cancel       用户取消一张在炼/排队的炉卡（卡没了，炉位释放）
+        #   user_accel        用户加速一张在炼卡（endtime 立刻到，可取）
+        #   user_other_refine 用户炼别的主题的卡（占掉一台空主炉）
+        #   stove_expire      炉过期（stovenum 减 1，超界卡位随之消失）
+        #   box_resize        卡箱容量变化（扩容/租期满），超容部分丢弃
+        if self._rand_evt("user_cancel") and self.stoves:
+            s = self.rng_evt.choice(list(self.stoves))
+            v = self.stoves.pop(s)
+            # ★★ 2026-11-14 保真度（关键）：真机「取消炼卡」是**把卡退回卡箱**，
+            #   不是把卡销毁。旧版直接 `pop` 丢掉 → 每取消一次白丢一张素材，
+            #   把「取消扰动一定有害」做成了物理损失（7 套 vs 11 套的差额里有
+            #   一部分是它贡献的），这与 DP 决策质量无关。
+            #   退回顺序与真机一致：换卡箱优先，满了再进保险箱；两箱都满才丢。
+            slot = self._free_change_slot()
+            if slot is not None:
+                self.change[slot] = v["cid"]
+            else:
+                slot = self._free_store_slot()
+                if slot is not None:
+                    self.store[slot] = v["cid"]
+            self.perturb_log.append(
+                (self.now, "用户取消炼卡" + ("" if slot is not None else "·箱满丢弃"),
+                 v["cid"]))
+        if self._rand_evt("user_accel"):
+            live = [s for s, v in self.stoves.items() if v["endtime"] > self.now]
+            if live:
+                s = self.rng_evt.choice(live)
+                # ★ 审计：记下这一下白送了多少炉时（= 剩余时长）
+                self.accel_saved += max(0.0, self.stoves[s]["endtime"] - self.now) / 3600.0
+                self.accel_n += 1
+                self.stoves[s]["endtime"] = self.now
+                self.perturb_log.append((self.now, "用户加速", self.stoves[s]["cid"]))
+        if self._rand_evt("user_other_refine") and self.STOVES >= 1:
+            # ★★★ 2026-11-14（保真度 bug）：旧版 `free = [最小空 slot]` + `btime = now`
+            #   → 若取到的 slot 与某炉**正在炼**的那张同炉，就会造出「一炉两张同时
+            #   在炼」——真机不可能（后一张 btime = 前一张 endtime，链式）。实测
+            #   被产能校验直接抓出来：松箱 200 tick 有 85 个 tick「同炉 >1 在炼」。
+            #   现在改走与引擎同一套排队语义（`_free_main_stove` + 队列末端）。
+            s, stove = self._free_main_stove()
+            if s is not None:
+                # 「别的卡」必须**不是本主题的卡**（否则等于用户白送一张本套卡，
+                #  进度虚增），由 harness 在开跑时填 other_exclude。
+                # ★★ 2026-11-14 保真度（关键）：旧版从**整个卡库**（11181 张）随机
+                #   抽，时长中位 3.74h、均值 7.94h、最长 192h，而事件率是每 37 分钟
+                #   一张 → 15~25 张 × 平均 8h ≈ 120~200 炉时，**超过总产能**
+                #   （4 主炉 × 22.5h = 90 炉时）。于是炉位被「用户的长卡」永久锁死，
+                #   引擎自己的卡排在其后干等（实测在炉卡平均剩余 0.72h → 5.5h、
+                #   产出 90 → 42），被误当成「DP 怕扰动」。
+                #   真实用户随手炼的卡与本主题同级，通常在 1~2h；限幅后才是有意义
+                #   的扰动强度。
+                _maxh = float(os.environ.get("MC_E_OTHER_MAXH", "2.0"))
+                pool = [c for c in _OTHER_CIDS if c not in self.other_exclude
+                        and secs_of(c) <= _maxh * 3600]
+                cid = self.rng_evt.choice(pool) if pool else 0
+                lock = secs_of(cid) if cid else 1800
+                btime = max(self.now, self._queue_end(stove))
+                self.stoves[s] = {"cid": cid, "opuin": str(self.uin),
+                                  "stove": stove, "btime": btime,
+                                  "locktime": lock, "endtime": btime + lock,
+                                  "steal": False, "external": True}
+                self.perturb_log.append((self.now, "用户炼了别的卡", cid))
+        # 用户自己炼的卡到期后他自己取走 —— 否则会永久占住炉位（仿真退化）
+        for s in [s for s, v in self.stoves.items()
+                  if v.get("external") and self.now >= v["endtime"]]:
+            v = self.stoves.pop(s)
+            self.perturb_log.append((self.now, "用户取走外主题卡", v["cid"]))
+        if self._rand_evt("stove_expire") and self.STOVES > 1 \
+                and self.stove_shrunk < 1:
+            # 炉过期（stovenum 5→4→3…）。★ 用**实例属性**改，不动类属性 ——
+            #   类属性是全局的，一个档位改小会让同进程后续档位全部变少炉。
+            self.STOVES -= 1
+            self.stove_shrunk += 1
+            self.MAIN_SLOTS = list(range(self.STOVES * self.SLOTS_PER_STOVE))
+            self.STEAL_SLOT = self.STOVES * self.SLOTS_PER_STOVE
+            drop = [s for s in self.stoves
+                    if not self.stoves[s]["steal"]
+                    and s >= self.STOVES * self.SLOTS_PER_STOVE]
+            for s in drop:
+                v = self.stoves.pop(s)
+                self.perturb_log.append((self.now, "炉过期·炉卡丢失", v["cid"]))
+        if self._rand_evt("box_resize"):
+            # ★ 2026-11-14 保真度：真机箱容是用户/系统**开通**的，不会自己变小
+            #   （容量只会「变够用」，缩小只出现在系统到期回收，本次不建模）。
+            #   旧版允许 −5/−8 → 腾箱把保险箱填满后再遇缩容就丢卡，
+            #   把「腾箱有害」这个结论做出来了（实测紧箱 6 套掉到 1 套）。
+            delta = self.rng_evt.choice((0, 5, 10))
+            # ★ 限幅：真机箱容不会一夜之间翻倍。超额放大（旧版 +10/+20 累积）
+            #   会把「紧箱 18/58」的场景悄悄变成 300+ 格 → 紧箱档失去意义。
+            _chg_before = int(self.change_cur)
+            self.change_cur = min(24, max(16, _chg_before + delta))
+            self.box_grow += max(0, int(self.change_cur) - _chg_before)
+            over = [s for s in self.change if s > self.change_cur]
+            for s in over:
+                self.perturb_log.append((self.now, "换卡箱缩容·丢卡",
+                                         self.change.pop(s)))
+            self.store_cur = min(200, max(40, int(self.store_cur)
+                                 + self.rng_evt.choice((0, 8, 16))))
+            over = [s for s in self.store if s > self.store_cur]
+            for s in over:
+                self.perturb_log.append((self.now, "保险箱缩容·丢卡",
+                                         self.store.pop(s)))
 
     def _do_refine(self, kw, steal: bool):
         target = int(kw.get("targetid") or 0)
@@ -431,6 +611,9 @@ class VirtualSession:
         self.stoves[slot] = {"cid": target, "opuin": opuin, "stove": stove,
                              "btime": btime, "locktime": lock,
                              "endtime": btime + lock, "steal": steal}
+        # ★ 2026-11-14 产能审计：累计「真正投进炉里的炉时」。利用率 =
+        #   ref_mh / (cap_mh + accel_mh)，> 100% 就说明记账有重复计算。
+        self.ref_mh = getattr(self, "ref_mh", 0.0) + lock / 3600.0
         return {"code": 0, "message": "ok"}
 
     async def qzone(self, method: str, endpoint: str, **kw):
@@ -518,7 +701,7 @@ class VirtualSession:
                     "message": "亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！"}
         self.stoves.pop(int(slot))
         self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
-        self._add_to_box(st["cid"])
+        self._add_refined_to_box(st["cid"])
         return {"ok": True, "message": "成功"}
 
     async def get_steal_card(self, slot, opuin):
@@ -533,7 +716,7 @@ class VirtualSession:
                     "message": "亲，可能会出现幸运事件，请空出两个卡箱的位置，再取卡！"}
         self.stoves.pop(int(slot))
         self.completions.append((st["endtime"], st["cid"], bool(st["steal"])))
-        self._add_to_box(st["cid"])
+        self._add_refined_to_box(st["cid"])
         return {"ok": True, "message": "成功"}
 
     async def open_pai(self):
