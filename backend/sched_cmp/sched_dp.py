@@ -197,8 +197,21 @@ def _norm_running(init_running, n):
     return tuple(sorted(out))
 
 
+_CLS_PRE = None   # solve() 入口预计算的「类型→机器类元组」表
+DIVE = False      # solve() 内的 dive 阶段标志：不剪枝、只沿首个向量单路径下潜
+DIVE_W = 1        # dive 时每层保留的候选向量数（1 = 纯单路径）
+DIVE_PICK = 0     # dive 起手偏移：multi-start 时换第 k 个候选向量开头
+
+
 def _cls_of(mclass, i):
-    """类型 i 的可用机器类（元组）。mclass[i] 可为 int（旧）或类表（新）。"""
+    """类型 i 的可用机器类（元组）。mclass[i] 可为 int（旧）或类表（新）。
+
+    ★ 2026-11-15：solve 是同步单线程、不可重入，机器类表在一次求解内恒定，
+      故入口预算成 `_CLS_PRE`。3 套实测该函数被调 165 万次（每次都重建
+      单元素元组）——纯开销。
+    """
+    if _CLS_PRE is not None:
+        return _CLS_PRE[i]
     v = mclass[i]
     return v if isinstance(v, (list, tuple)) else (v,)
 
@@ -579,15 +592,16 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
     cls_lists = [_cls_of(mclass, i) for i, _lim in items]
     _ck = [0]
 
-    def maximal(counts, used, st):
-        # 容量快路径：主炉/偷炉全占满 → 任何 item 都加不进（宽节点绝大多数
-        # 叶子走此路，省掉逐 item 素材检查——旧版 3.29M 次 × 17.4s 热点）。
-        if used[0] >= caps[0] and used[2] >= caps[2]:
-            return True
-        cnt = {}
-        for i, c, _ci in counts:
-            if c:
-                cnt[i] = cnt.get(i, 0) + c
+    def maximal(cnt, used, st):
+        # 容量快路径：三类机器全占满 → 任何 item（必属某一类）都加不进。
+        # ★ 2026-11-15：旧版只判 caps[0]/caps[2]，漏掉买卡类 caps[1]，宽节点
+        #   上等于关掉了这条快路径。补齐后多数满炉叶子不再逐 item 扫素材。
+        if ncls >= 3:
+            if used[0] >= caps[0] and used[1] >= caps[1] and used[2] >= caps[2]:
+                return True
+        else:
+            if all(used[c] >= caps[c] for c in range(ncls)):
+                return True
         for pos, (i, _lim) in enumerate(items):
             if cnt.get(i, 0) + 1 > need[i]:
                 continue
@@ -600,18 +614,33 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                         return False       # 还能加一张 → 非极大
         return True
 
-    def rec(p, used, cur, st):
+    def rec(p, used, cur, st, cnt):
         _ck[0] += 1
         if not (_ck[0] & 31):           # 每 32 步一次（perf_counter ~50ns）
             if deadline is not None and _t.perf_counter() > deadline:
                 raise _SearchAbort
             if rec_budget is not None and _ck[0] > rec_budget:
                 raise _CapAbort
-        if p == ni:
-            if any(c > 0 for _i, c, _ci in cur) and \
-                    (not maximal_only or maximal(cur, used, st)):
+        # ★ 2026-11-15 满槽快路径：槽位已全占满 → 剩余 item 一律只能放 0，
+        #   直接当作极大叶子记账，不必再逐层下探到 p==ni。
+        #   3 套（73 类型）实测：枚举深度从 73 降到「填满槽位的张数」，这是
+        #   纯 DP 能在 2s 内搜到叶子的关键（旧版 3s 只走 759 个 dfs 节点、
+        #   枚举函数被调 125 万次，时间全耗在深度优先穷举上）。
+        _full = True
+        for ci in range(ncls):
+            if used[ci] < caps[ci]:
+                _full = False
+                break
+        if _full:
+            if cur:
                 res.append(tuple(cur))
-                if max_vecs is not None and len(res) >= max_vecs * 4:
+                if max_vecs is not None and len(res) >= max_vecs * 2:
+                    raise _CapAbort
+            return
+        if p == ni:
+            if cur and (not maximal_only or maximal(cnt, used, st)):
+                res.append(tuple(cur))
+                if max_vecs is not None and len(res) >= max_vecs * 2:
                     raise _CapAbort
             return
         i, lim = items[p]
@@ -629,7 +658,15 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                     st[j] -= c * k
                 cur.append((i, c, ci))
                 used[ci] += c
-                rec(p + 1, used, cur, st)
+                if c:
+                    cnt[i] = cnt.get(i, 0) + c
+                rec(p + 1, used, cur, st, cnt)
+                if c:
+                    _v = cnt[i] - c
+                    if _v:
+                        cnt[i] = _v
+                    else:
+                        del cnt[i]
                 used[ci] -= c
                 cur.pop()
                 for j, k in mats[i]:
@@ -642,7 +679,7 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
 
     complete = True
     try:
-        rec(0, [0] * ncls, [], list(stock))
+        rec(0, [0] * ncls, [], list(stock), {})
     except _CapAbort:
         complete = False
     if res:
@@ -667,7 +704,7 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
     return res, complete
 
 
-def _chain_avail_rel(j, k, stock, running_rel, seen):
+def _chain_avail_rel(j, k, stock, running_rel, seen, fins_by=None):
     """k 张 j 卡可用的最早增量时刻（相对剩余时间，可采纳下界）。
 
     running_rel 为 (type, 剩余, 类) 三元组；买卡类型（dur=LAG）无素材 →
@@ -681,7 +718,10 @@ def _chain_avail_rel(j, k, stock, running_rel, seen):
         return 0.0
     if stock[j] >= k:
         return 0.0
-    fins = [f for (j2, f, _c) in running_rel if j2 == j]
+    # ★ fins_by：按类型分桶的在炉剩余（每节点建一次，O(在炉数)），避免在
+    #   73 类型 × 递归里反复线性扫 running_rel（3 套实测该函数累计 1.05s/3s）。
+    fins = (fins_by.get(j) if fins_by is not None
+            else [f for (j2, f, _c) in running_rel if j2 == j])
     if fins:
         if stock[j] + len(fins) >= k:
             return sorted(fins)[k - stock[j] - 1]
@@ -689,11 +729,12 @@ def _chain_avail_rel(j, k, stock, running_rel, seen):
     if j in seen:
         return 0.0
     seen.add(j)
-    return DUR[j] + max((_chain_avail_rel(m, kk, stock, running_rel, seen)
+    return DUR[j] + max((_chain_avail_rel(m, kk, stock, running_rel, seen,
+                                          fins_by)
                          for m, kk in MATS[j]), default=0.0)
 
 
-def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0):
+def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None):
     """累资源下界（相对额外耗时，可采纳，≥ 剩余总炉时/M）。
 
     各类型最早开工(发布)时刻 s_i 由链式可得；则最优 makespan ≥ max(
@@ -708,31 +749,56 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0):
     任何调度分别满足两个子集的产能约束（主炉工作量 ≤ M·T、偷炉可行工作量
     ≤ (M+steal_cap)·T），取 max 不丢可采纳性；竞争关系忽略 → 偏松但安全。
     steal_cap=0 或无 class-2 类型时退化为原版（全部精炼工作 / M）。
+
+    ★ 2026-11-15：`starts` 只依赖 (need, stock, running_rel)，与 sel/mach 无关
+      → 一次算好按 sel 过滤复用。旧版两组 energetic 各算一遍（每节点 2×73 次
+      递归链计算）；3 套实测 `_chain_avail_rel` 累计 1.05s / `energetic` 0.84s
+      占 3s 预算的 6 成。
     """
+    running_types = set(i for i, _f, _c in running_rel)
+    starts_all = []
+    for i in range(N):
+        if need[i] <= 0 or i in running_types:
+            continue
+        s = max((_chain_avail_rel(j, kk, stock, running_rel, set(), fins_by)
+                 for j, kk in MATS[i]), default=0.0)
+        starts_all.append((i, s, DUR[i], need[i]))
+
     def energetic(sel, mach, run_cls):
-        starts = []
-        running_types = set(i for i, _f, _c in running_rel)
-        for i in range(N):
-            if need[i] <= 0 or i in running_types or not sel(i):
-                continue
-            s = max((_chain_avail_rel(j, kk, stock, running_rel, set())
-                     for j, kk in MATS[i]), default=0.0)
-            starts.append((s, DUR[i], need[i]))
+        starts = [(s, d, nd) for i, s, d, nd in starts_all if sel(i)]
         rem_running = sum(f for _i, f, c in running_rel if c in run_cls)
-        Wtot = sum(d * nd for _, d, nd in starts) + rem_running
-        lb = Wtot / mach
-        for s, d, nd in starts:
+        if not starts:
+            return rem_running / mach
+        # ★ 2026-11-15：原实现对每个发布时刻 tt 重扫全部 starts（O(k²)，
+        #   73 类型 → 5300 次乘加/次调用，是 3 套 1ms/节点主因）。排序 +
+        #   前缀和 O(k log k)，判据逐项等价（A 含 s<=tt、B 为其补集）。
+        starts.sort()
+        tot = 0.0
+        for _s, d, nd in starts:
+            tot += d * nd
+        lb = (tot + rem_running) / mach
+        for s, d, _nd in starts:
             if s + d > lb:
                 lb = s + d
-        pts = sorted(set([0.0] + [s for s, _, _ in starts]))
-        for tt in pts:
-            A = sum(d * nd for s, d, nd in starts if s <= tt) + (
-                rem_running if tt >= 0 else 0)
-            B = sum(d * nd for s, d, nd in starts if s > tt)
+        A = rem_running
+        if A / mach > lb:
+            lb = A / mach
+        if tot / mach > lb:
+            lb = tot / mach
+        pref = 0.0
+        i = 0
+        ns = len(starts)
+        while i < ns:
+            s = starts[i][0]
+            while i < ns and starts[i][0] <= s:
+                pref += starts[i][1] * starts[i][2]
+                i += 1
+            A = pref + rem_running
+            B = tot - pref
             if A / mach > lb:
                 lb = A / mach
-            if tt + B / mach > lb:
-                lb = tt + B / mach
+            if s + B / mach > lb:
+                lb = s + B / mach
         return lb
 
     if steal_cap <= 0 or not any(2 in _cls_of(mclass, i) for i in range(N)):
@@ -778,11 +844,19 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
       · box_cap  number     卡箱容量上限（任何落箱后 sum(stock) ≤ 上限）
       · steal_cap int       偷炉容量（缺省：有 class-2 类型/在炉→1，否则 0=不可用）
     """
-    global DUR, MATS, MACHINES, N, BASEFREE, BASESET
+    global DUR, MATS, MACHINES, N, BASEFREE, BASESET, _CLS_PRE
+    global DIVE, DIVE_W, DIVE_PICK
+    # 候选实验：有界搜索（避免 dfs 复活后打满 2s 预算）
+    _nb = _os.environ.get("MC_DP_NODE_BUDGET")
+    if _nb:
+        node_budget = int(_nb)
     DUR = inst["dur"]
     MATS = inst["mats"]
     MACHINES = inst["machines"]
     N = inst["n"]
+    _mc0 = inst["mclass"]
+    _CLS_PRE = tuple(
+        (v if isinstance(v, (list, tuple)) else (v,)) for v in _mc0)
     dur = DUR
     mats = MATS
     M = MACHINES
@@ -827,9 +901,64 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                   for i, s in ub_sched), default=0.0)
     else:
         ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
-    best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
+    # ★★ 纯 DP（MC_DP_PURE=1）：交付解**只允许来自 dfs 自己搜出来的后缀链**，
+    #   UB 降级为纯剪枝上界（`BOUND_V`），永远不进交付。
+    #   旧行为的退化点（2026-11-15 实测 408 冷启 35/35 次交付=贪心表）：
+    #     ① `best` 初值就是 `_ub_schedule` 那张表；
+    #     ② 剪枝 `t + lb >= best["val"]` 把「与 UB 打平」的分支全剪掉；
+    #   于是 dfs 只有严格快于 UB 才能交付，打平就等于交贪心。
+    #   纯 DP 把两件事拆开：
+    #     · 剪枝仍用 UB 上界（含打平，用 `>` 而非 `>=`），搜索空间不膨胀；
+    #     · `best` 从 INF/None 起，叶子把 `<= BOUND` 的打平解也记下来，
+    #       交付 dfs 链 → `from` 恒为 "DP"。
+    PURE = _os.environ.get("MC_DP_PURE", "1") == "1"
+    # 主动等待分支：允许「有可开工的也不开，推进到下一完工」。见 dfs 内注释。
+    # ★ 2026-11-15 实测**默认关**：它能被选为最优（3 套 503 次），但最终
+    #   makespan 不变（105.34），而搜索面翻倍让仿真更差（3套 106.19→107.84、
+    #   紧箱 54.99→56.64）。保留开关 `MC_DP_WAIT=1` 供后续带前瞻的版本用。
+    WAIT_BRANCH = _os.environ.get("MC_DP_WAIT", "0") == "1"
+    PURE_TOL = float(_os.environ.get("MC_DP_PURE_TOL", "0") or 0)
+    # 宽度自适应（仅 PURE）：宽节点的向量枚举成本 ∝ 活跃类型数，固定 96 在
+    # 3 套（73 类型）上会把预算全花在枚举（30s 走 30 万节点却到不了叶子）；
+    # 固定小值在 1★（10 类型）上又浪费搜索面。按活跃类型数线性倒数取上限。
+    if PURE and _os.environ.get("MC_DP_VEC_AUTO", "1") == "1":
+        _kact = sum(1 for _x in inst["need0"] if _x > 0)
+        _mv_cap = max(8, min(96, int(1200 / max(1, _kact))))
+        if max_vecs > _mv_cap:
+            max_vecs = _mv_cap
+        _rb_cap = max(4000, min(50000, int(300000 / max(1, _kact))))
+        if rec_budget > _rb_cap:
+            rec_budget = _rb_cap
+    BOUND_V = [ub + PURE_TOL if PURE else ub]
+    if PURE:
+        best = {"val": INF, "sched": None, "from": None}
+    else:
+        best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
-             "memo_hits": 0, "opt": None, "capped": 0}
+             "memo_hits": 0, "opt": None, "capped": 0, "pure": PURE}
+    _occ0 = float(sum(init_stock) if init_stock is not None else 0) + len(run_norm)
+    stats["ub_peak0"] = sched_peak(inst, list(ub_sched), _occ0)
+    # ★ 候选（默认关 = 与生产逐位一致）：让 dfs 真正搜索「同 makespan」的
+    #   等价解空间，而不是被 `t+lb >= best` 一刀切回退到 UB 贪心初解。
+    #   有界：EQ_NODE_CAP 计「原本会被剪掉的节点」，耗尽后立刻恢复旧剪枝。
+    EQ_SEARCH = _os.environ.get("MC_LEX_EQ_SEARCH", "0") == "1"
+    # dfs 的 lazy 买卡逐张过三空位约束（与 UB 买卡同口径）。
+    # ★★ 2026-11-15 默认开启（用户定调「把条件给全」）：旧默认 0 时 dfs
+    #   只按合计 box_cap 买卡，而 dfs 入口又用 `_pool_ok` 判三空位 →
+    #   一次买爆换卡箱后每个分支都在入口被判 INF（5★/3套 冷启 6 节点全灭、
+    #   纯 DP 交付空计划 → 仿真 3000 tick 零动作）。买卡与开工/落箱必须
+    #   同一套条件，才谈得上「条件给全」。
+    #   `MC_DP_POOL_FIX=0` 可复现旧行为（A/B 用）。
+    POOL_FIX = _os.environ.get("MC_DP_POOL_FIX", "1") == "1"
+    # 等价 makespan/peak 时交付 dfs 自己搜出来的后缀，而不是 UB 贪心初解。
+    PREFER_DP = _os.environ.get("MC_DP_PREFER", "0") == "1"
+    # 允许 dfs 比 UB 慢的容差（秒）：两模型买卡 LAG 口径差 45s。
+    PREFER_TOL = float(_os.environ.get("MC_DP_EQ_TOL", "0") or 0)
+    EQ_LEFT = [int(_os.environ.get("MC_LEX_EQ_NODES", "300") or 300)]
+    DIAG = {"lb_prune": 0, "eq_allowed": 0, "eq_break": 0,
+            "vec": 0, "leaf": 0, "inf_pool": 0, "inf_box": 0,
+            "inf_dead": 0}
+    stats["eq_search"] = EQ_SEARCH
     t0 = _t.perf_counter()
     memo = memo if (use_memo and memo is not None) else {}
     # ★ buy_free 下 dfs 仍按「买卡要 45s」的口径搜索，与 UB 的新口径不一致 →
@@ -958,6 +1087,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             _ro = sum(1 for _i, _f, _c in running_rel if _c in (0, 2))
             if not _pool_ok(POOL_D, stock, _bi, _ro):
                 POOL_REJECT[0] += 1
+                DIAG["inf_pool"] += 1
                 return INF, None, INF
             POOL_MAX[0] = max(POOL_MAX[0],
                               _pool_chg(POOL_D, stock, _bi, _ro))
@@ -973,8 +1103,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         while True:
             # ---- 叶子：全部开工完 → 额外耗时 = 在炉最晚剩余 ----
             if not any(need):
+                DIAG["leaf"] += 1
                 fin = max([0.0] + [f for _i, f, _c in running_rel])
-                if t + fin < best["val"] - 1e-9:
+                if PURE:
+                    # 打平也算解：只要在剪枝上界内，就是 dfs 走出来的完整调度
+                    if t + fin <= BOUND_V[0] + 1e-9 \
+                            and t + fin < best["val"] - 1e-9:
+                        best["val"] = t + fin
+                        best["sched"] = path_to_sched(cur_path)
+                        best["from"] = "DP"
+                        DIAG["leaf"] += 1
+                elif t + fin < best["val"] - 1e-9:
                     best["val"] = t + fin
                     best["sched"] = path_to_sched(cur_path)
                     best["from"] = "DP"
@@ -1024,6 +1163,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     else:
                         nr.append((i2, f, c2))
                 if sum(ns) > box_cap + EPS:
+                    DIAG["inf_box"] += 1
                     return INF, None, INF    # 落箱超容 → 该分支不可行（DP 改走 JIT）
                 stock = tuple(ns)
                 running_rel = tuple(nr)
@@ -1052,36 +1192,60 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
 
             # ---- 可采纳下界（相对额外耗时）----
             lb = max([0.0] + [f for _i, f, _c in running_rel])
-            # 资源下界（偷炉可规划时）：总炉时 W 中最多 E 可上偷炉 →
-            #   主炉工作量 ≥ W-E（M 台）、总工作量 ≤ (M+偷炉容量) 台 → 两者取 max。
-            # 可采纳性：任何调度 W0≤M·T（主炉）、W2≤E（偷炉只接 eligible+在炉），
-            #   故 T ≥ (W-E)/M 且 T ≥ W/(M+sc_lb)。
-            W_fut = sum(need[i] * dur[i] for i in range(n)
-                        if 0 in _cls_of(mclass, i))
-            W_run0 = sum(f for _i, f, c in running_rel if c == 0)
-            W_run2 = sum(f for _i, f, c in running_rel if c == 2)
-            E_fut = (sum(need[i] * dur[i] for i in range(n)
-                         if 2 in _cls_of(mclass, i)) if sc > 0 else 0)
-            E = E_fut + W_run2
-            sc_lb = sc if sc > 0 else (1 if W_run2 > 0 else 0)
-            W = W_fut + W_run0 + W_run2
-            lb2 = max(W / (M + sc_lb), (W - E) / M)
-            if lb2 > lb:
-                lb = lb2
             running_types = set(i for i, _f, _c in running_rel)
-            for i in range(n):
-                if need[i] <= 0 or i in running_types:
-                    continue
-                ch = dur[i] + max((_chain_avail_rel(j, kk, stock, running_rel, set())
-                                   for j, kk in mats[i]), default=0.0)
-                if ch > lb:
-                    lb = ch
-            cum = _cum_lb(need, stock, running_rel, t, mclass, sc)
-            if cum > lb:
-                lb = cum
+            _fins_by = {}
+            for _i, _f, _c in running_rel:
+                _fins_by.setdefault(_i, []).append(_f)
+            # ★★ 2026-11-15 dive 阶段（`DIVE`）：不剪枝 → 下界一次都不用算。
+            #   3 套实测下界链 + `_cum_lb` 占单节点成本的 6~7 成；dive 只走
+            #   单路径（547 层），跳过它们后整个下潜在 0.1s 量级完成。
+            if not DIVE:
+                # 资源下界（偷炉可规划时）：总炉时 W 中最多 E 可上偷炉 →
+                #   主炉工作量 ≥ W-E（M 台）、总工作量 ≤ (M+偷炉容量) 台 → 两者取 max。
+                # 可采纳性：任何调度 W0≤M·T（主炉）、W2≤E（偷炉只接 eligible+在炉），
+                #   故 T ≥ (W-E)/M 且 T ≥ W/(M+sc_lb)。
+                W_fut = sum(need[i] * dur[i] for i in range(n)
+                            if 0 in _cls_of(mclass, i))
+                W_run0 = sum(f for _i, f, c in running_rel if c == 0)
+                W_run2 = sum(f for _i, f, c in running_rel if c == 2)
+                E_fut = (sum(need[i] * dur[i] for i in range(n)
+                             if 2 in _cls_of(mclass, i)) if sc > 0 else 0)
+                E = E_fut + W_run2
+                sc_lb = sc if sc > 0 else (1 if W_run2 > 0 else 0)
+                W = W_fut + W_run0 + W_run2
+                lb2 = max(W / (M + sc_lb), (W - E) / M)
+                if lb2 > lb:
+                    lb = lb2
+                for i in range(n):
+                    if need[i] <= 0 or i in running_types:
+                        continue
+                    ch = dur[i] + max(
+                        (_chain_avail_rel(j, kk, stock, running_rel, set(),
+                                          _fins_by)
+                         for j, kk in mats[i]), default=0.0)
+                    if ch > lb:
+                        lb = ch
+                cum = _cum_lb(need, stock, running_rel, t, mclass, sc, _fins_by)
+                if cum > lb:
+                    lb = cum
             # 绝对下界 = t + lb；超过已知最优则剪枝（仅当前节点放弃）
-            if t + lb >= best["val"] - 1e-9:
-                return INF, None, INF
+            # ★ 纯 DP（MC_DP_PURE）：上界取 `BOUND_V`（UB+容差）且用 `>` ——
+            #   允许「与 UB 打平」的分支继续走。否则最优恰好等于 UB 时会把
+            #   所有分支剪光（根返 INF → 只能退回交付贪心表）。
+            # ★ 候选 EQ_SEARCH：>= 把「恰好等于已知最优 makespan」的分支也全剪了 →
+            #   字典序第二级（peak）根本没机会被优化，交付解永远是 UB 初解。
+            #   放开这些分支，但用 EQ_LEFT 硬限额，耗尽即恢复旧剪枝。
+            if PURE:
+                if not DIVE and t + lb > BOUND_V[0] - 1e-9:
+                    DIAG["lb_prune"] += 1
+                    return INF, None, INF
+            elif t + lb >= best["val"] - 1e-9:
+                DIAG["lb_prune"] += 1
+                if EQ_SEARCH and EQ_LEFT[0] > 0:
+                    EQ_LEFT[0] -= 1
+                    DIAG["eq_allowed"] += 1
+                else:
+                    return INF, None, INF
 
             # ---- 买卡：lazy 规则确定性执行（状态内一等公民，但不分支）----
             # 买卡的 need/stock/箱容/LAG 全在建模里（完工进 running_rel class 1、
@@ -1135,6 +1299,18 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                         if (not BASEFREE and idle[1] <= 0) \
                                 or box_now + n_run + 1 > box_cap + EPS:
                             break
+                        # ★ 三空位一致性（让 dfs 真能搜的关键）：UB 的 lazy
+                        #   买卡逐张过 _pool_ok，dfs 旧版只看合计 box_cap →
+                        #   一次把换卡箱买爆，随后每个分支都在 dfs 入口被
+                        #   _pool_ok 判 INF（408 冷启实测 96/96 分支全灭）。
+                        #   这里按「再买 1 张」的投影状态逐张校验，两个模型
+                        #   的可行域才一致，dfs 才有可行后缀可搜。
+                        if POOL_FIX and POOL_D is not None:
+                            _bi = sum(1 for _x, _f2, c2 in running_rel if c2 == 1)
+                            _ro = sum(1 for _x, _f2, c2 in running_rel
+                                      if c2 in (0, 2))
+                            if not _pool_ok(POOL_D, stock, _bi + 1, _ro):
+                                break
                         need[b] -= 1
                         if BASEFREE:
                             # ★★ 2026-10-27 修正（多套实测）：买卡**不占 shop 槽**
@@ -1194,6 +1370,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # S>0：主炉满+有可开工精炼+无买卡需求时 idle[1]>0 条件不成立 → 进分支 →
                 # _vectors 返回空 → best_v=INF 假死路，父节点被迫回溯到「少开工」次优解。
                 if not running_rel:
+                    DIAG["inf_dead"] += 1
                     return INF, None, INF    # 死路：无机在炉也无卡可开
                 dt = min(f for _i, f, _c in running_rel)
                 running_rel = tuple((i, f - dt, c) for i, f, c in running_rel)
@@ -1211,11 +1388,24 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 扫描实测（8 档 A/B）：K=0 无收益；K=2 与 K=6 同为 890 峰值 −3、
             # 15.01→15.00h；K=16 峰值 −5 但求解打满预算、仿真 +1.87h。
             # 取 2 是保守值：收益相同、枚举量最小、对未测真机场景风险最低。
-            eq_left = int(_os.environ.get("MC_LEX_EQ_VEC", "2") or 0) \
-                if lex_peak else 0
+            if not lex_peak:
+                eq_left = 0
+            elif EQ_SEARCH:
+                # 达下界后不再只看 2 个向量；上限 = 该节点向量数上限，
+                # 真正让 dfs 在同一 makespan 的解集合里往下走。
+                eq_left = int(_os.environ.get("MC_LEX_EQ_VEC",
+                                             str(max_vecs)) or max_vecs)
+            else:
+                eq_left = int(_os.environ.get("MC_LEX_EQ_VEC", "2") or 0)
             lb_seen = False
+            # ★ dive：只沿排序后的前 DIVE_W 个向量一路到底（单路径下潜）。
+            if DIVE and len(vecs) > DIVE_W:
+                _pk = DIVE_PICK
+                vecs = vecs[_pk:_pk + DIVE_W] or vecs[:DIVE_W]
             for vec in vecs:
+                DIAG["vec"] += 1
                 if lb_seen and eq_left <= 0:
+                    DIAG["eq_break"] += 1
                     break
                 # 本向量开工事件的 occ 轨迹（逐张、同刻保序 → 与 sched_peak 同口径）
                 vec_occ = cur_occ
@@ -1284,6 +1474,38 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     eq_left -= 1
                 elif lb_seen:
                     eq_left -= 1
+            # ★★ 主动等待分支（2026-11-15，`MC_DP_WAIT`，默认开）：
+            #   `maximal_only` 的旧论证「能开却不开不会更优」只在**单机器容量**
+            #   下成立；本问题炉位数固定 + 素材依赖 → 开一张低价值卡会占住炉位，
+            #   让关键卡晚开工，等待更优。缺这个维度时 3 套（73 类型/547 op）
+            #   实测：UB 上界下 10s / 2.6 万节点 `leaf=0`，上界必须放宽 +8h 才
+            #   能走通 —— 即 dfs 的可行域根本不含 UB 的那条 100.75h 路径，
+            #   最好只能到 105.34h。加上「不开新炉、推进到下一完工」这一支后
+            #   dfs 才能表达「等料」。
+            if WAIT_BRANCH and running_rel and not DIVE:
+                _dw = min(f for _i, f, _c in running_rel)
+                _nr = tuple((i, f - _dw, c) for i, f, c in running_rel)
+                # 等待段的箱占用不变（无新产物入箱），occ 只随收卡增加
+                _wv, _wsfx, _wpk = dfs(need, stock, _nr, t + _dw, cur_path)
+                if _wv < INF:
+                    _cv = _dw + _wv
+                    _cpk = max(run_peak, _wpk)
+                    if (_cv < best_v - 1e-9
+                            or (lex_peak and abs(_cv - best_v) <= 1e-9
+                                and _cpk < best_peak - 1e-9)):
+                        best_v = _cv
+                        best_peak = _cpk
+                        own = own_ops
+                        head = chain_of(own)
+                        if _wsfx is not None:
+                            head = link(head, (_dw, None, _wsfx))
+                        best_suffix = head
+                        iter_own = [(0.0, vv) for _tr, vv in own_ops[iter_start:]]
+                        mhead = chain_of(iter_own)
+                        if _wsfx is not None:
+                            mhead = link(mhead, (_dw, None, _wsfx))
+                        best_memo_suffix = mhead
+                        DIAG["wait_best"] = DIAG.get("wait_best", 0) + 1
             # ★ INF 不落 memo：LB 剪枝产生的 INF 依赖当时 best["val"]（绝对
             # 时刻口径），不是状态的纯函数——存入会让后续以更紧 UB 访问同一
             # 状态时被幻影 INF 挡住而丢最优。结构性死路（无炉在炉/落箱超容）
@@ -1301,16 +1523,118 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     rg = run_norm
     st0 = tuple(init_stock) if init_stock is not None else tuple([0] * n)
     init_occ0 = float(sum(st0) + len(rg))
+    # ---- 纯 DP 阶段一：dive（无剪枝单路径下潜，取 dfs 自己的可行解）----
+    # ★★ 根因（2026-11-15 实证）：PURE 把 UB 当**硬**剪枝上界，而 3 套（73 类型/
+    #   547 op）任何走偏的路径在深层下界都会超过 UB → 每条路径都被剪断。
+    #   实测 30s / 30 万节点 `leaf=0`、`lb_prune=26221`、`from=None`：
+    #   没有 incumbent 时「一条全程满足上界的路径」并不能保证存在，
+    #   dfs 结构上就到不了叶子（这不是预算不足，是剪枝无解）。
+    #   修法 = 标准 B&B 的 initial incumbent：先无剪枝地沿 prio 首个向量
+    #   一路到底，得到 dfs 自己构造的完整调度；再拿它当上界做 B&B。
+    #   交付物仍是 dfs 链（不是 UB 贪心表），符合「纯 DP」定调。
+    if PURE:
+        _mv0, _rb0 = max_vecs, rec_budget
+        _memo0 = memo
+        _bv0 = BOUND_V[0]
+        _dw = max(1, int(_os.environ.get("MC_DP_PURE_DIVE_W", "1") or 1))
+        # multi-start：dive 极快（547 层实测 ~0.1s），换不同的起手向量重复
+        # 几次取最优，显著抬高 incumbent 质量（单次 dive 无回溯，起点决定一切）。
+        _starts = int(_os.environ.get("MC_DP_PURE_DIVE_STARTS", "4") or 1)
+        if time_budget < 0.5:
+            _starts = 1              # warm 重解（0.1s 级）只够一站
+        _dmv = max(2, int(_os.environ.get("MC_DP_PURE_DIVE_MV", "8") or 8))
+        _drb = max(500, int(_os.environ.get("MC_DP_PURE_DIVE_RB", "4000") or 4000))
+        try:
+            DIVE = True
+            DIVE_W = _dw
+            for _k in range(max(1, _starts)):
+                DIVE_PICK = _k
+                max_vecs, rec_budget = _dmv, _drb
+                memo = {}
+                BOUND_V[0] = INF      # dive 不剪枝
+                try:
+                    dfs(need0, st0, rg, 0.0, ())
+                except _SearchAbort:
+                    stats["bounded"] = True
+                    break
+                stats["dive_starts"] = _k + 1
+        finally:
+            memo = _memo0
+            max_vecs, rec_budget = _mv0, _rb0
+            DIVE = False
+            DIVE_W = 1
+            DIVE_PICK = 0
+        if best["val"] < INF:
+            stats["dive_v"] = best["val"]
+            stats["dive_from"] = best["from"]
+            # 上界换成 dive 的可行解：保证这条路径自身永不被剪（PURE 用 `>`，
+            # 允许打平），第二遍就一定走得到叶子，并在其内继续改进。
+            # `MC_DP_DIVE_BOUND=0` 保持 UB 上界（诊断 lb 是否高估用）。
+            if _os.environ.get("MC_DP_DIVE_BOUND", "1") == "1":
+                BOUND_V[0] = best["val"]
+            else:
+                BOUND_V[0] = min(_bv0, best["val"])
+        else:
+            BOUND_V[0] = _bv0
     try:
         v, suffix, root_peak = dfs(need0, st0, rg, 0.0, ())
     except _SearchAbort:
         v, suffix, root_peak = INF, None, INF
         stats["bounded"] = True
+    # ★ 纯 DP 兜底：UB 上界内一条完整路径都没走通（LB 偏紧 / UB 不可达）时，
+    #   放开上界重搜一遍 —— 宁可慢、宁可爆预算，也不交付贪心表。
+    #   `MC_DP_PURE_RETRY=0` 可关；第二遍节点预算 `MC_DP_PURE_RETRY_NODES`。
+    if PURE and v >= INF and _os.environ.get("MC_DP_PURE_RETRY", "1") == "1":
+        BOUND_V[0] = INF
+        stats["pure_retry"] = True
+        _nb0 = node_budget
+        # ★ 时间预算必须给 retry 独立一份：第一遍撞满 time_budget 后
+        #   `perf_counter() - t0 > time_budget` 恒真 → retry 一进 dfs 就 abort
+        #   （实测 2/41 次「无解」就是这么来的）。这里是放宽上限而非改 t0，
+        #   保证 stats["time"] 统计口径不变。
+        _prior = _t.perf_counter() - t0
+        time_budget = _prior + float(
+            _os.environ.get("MC_DP_PURE_RETRY_TIME", "8.0") or 8.0)
+        node_budget = max(
+            node_budget,
+            int(_os.environ.get("MC_DP_PURE_RETRY_NODES", "200000") or 0))
+        # ★★ 2026-11-15 retry 必须**收窄宽度**（用户定调「不要退化」的落地）：
+        #   默认 max_vecs=96 时宽节点向量枚举把预算全花在浅层 —— 3套(73 类型/
+        #   547 op) 实测 40s 走 13.7 万节点、`capped=1480`，**连一个叶子都没
+        #   到达**（`from=None` → 纯 DP 交付空计划 → 仿真 375h/0 轮报废）。
+        #   同一实例 max_vecs=2/8/32 在 10s 内全部到达叶子并交付完整解
+        #   （106.80/105.34/105.97h）。分级加宽在 2s 冷启预算内来不及（mv=2
+        #   也要 ~5s 才到叶子），所以只在「一遍全灭」时用窄宽度重搜 —— 交付的
+        #   仍是 dfs 自己的解，不引入贪心表。
+        _mv0, _rb0 = max_vecs, rec_budget
+        max_vecs = int(_os.environ.get("MC_DP_PURE_RETRY_MV", "8") or 8)
+        rec_budget = int(_os.environ.get("MC_DP_PURE_RETRY_RB", "20000") or 20000)
+        try:
+            # memo 里可能存了「上界紧时」的剪枝结果，换上界后必须重探
+            if isinstance(memo, dict):
+                memo.clear()
+        except Exception:
+            pass
+        try:
+            v, suffix, root_peak = dfs(need0, st0, rg, 0.0, ())
+            stats["retry_mv"] = max_vecs
+        except _SearchAbort:
+            v, suffix, root_peak = INF, None, INF
+            stats["bounded"] = True
+        finally:
+            max_vecs, rec_budget = _mv0, _rb0
+        node_budget = _nb0
     stats["time"] = _t.perf_counter() - t0
     # 根 t=0，v 即绝对 makespan；后缀链给出可达它的完整调度表
     # （root 值 ≤ 任何已访叶子 makespan——memo 命中跳过叶子访问，故已访
     #  叶子调度可能次优；后缀链重建保证「返回值 = 返回调度」一致）。
-    if v < INF:
+    if v < INF and PURE:
+        # 纯 DP：交付的必须是从这条后缀链重建的调度，`from` 恒为 "DP"
+        best["val"] = v
+        best["sched"] = cells_to_sched(suffix)
+        best["from"] = "DP"
+        stats["opt"] = v
+    elif v < INF:
         stats["opt"] = v
         if v < best["val"] - 1e-6:
             best["val"] = v
@@ -1325,10 +1649,44 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 stats["lex_peak_swap"] = True
         elif abs(v - best["val"]) > 1e-6:
             stats["note"] = f"root={v/3600:.2f}h best={best['val']/3600:.2f}h 不一致"
+        # ★ 候选：同 makespan、同峰值时，交付「dfs 真搜出来的解」而不是
+        #   `_ub_schedule` 的贪心初解（后者按类型序连排同卡，是 408
+        #   150 面晚开的形状来源）。只在 EQ_SEARCH 已放开等价空间时生效。
+        if PREFER_DP and best["from"] == "UB" \
+                and 0 <= v - best["val"] <= PREFER_TOL + 1e-6 \
+                and root_peak <= stats["ub_peak0"] + 1e-9:
+            best["sched"] = cells_to_sched(suffix)
+            best["from"] = "DP"
+            stats["prefer_dp"] = True
     else:
-        stats["opt"] = best["val"]
+        stats["opt"] = best["val"] if best["val"] < INF else None
         # 注意：根返 INF 只表示「搜不到优于 UB 的路径」（含被 LB 剪枝），
         # **不是**模型不可行；可行性由调用方模拟调度箱占用判定。
+        if PURE and best["sched"] is not None:
+            # 根链没走通（abort 时回卷），但途中已有叶子记下完整调度：
+            # 交付它，且明确标成 DP（旧代码会留 from=None，调用方无法区分）。
+            best["from"] = "DP_LEAF"
+            stats["pure_leaf"] = True
+        elif PURE and best["sched"] is None:
+            # 纯 DP 且两遍搜索都没走通任何完整路径：如实报无解，不交贪心表。
+            stats["no_solution"] = True
+            stats["peak"] = None
+            stats["lex_peak"] = lex_peak
+            stats["diag"] = dict(DIAG)
+            stats["eq_left"] = EQ_LEFT[0]
+            stats["from"] = None
+            stats["root_peak"] = None
+            stats["root_v"] = None
+            stats["best_v"] = None
+            stats["note"] = "pure_no_solution"
+            return INF, [], stats
     stats["peak"] = sched_peak(inst, best["sched"], init_occ0)
     stats["lex_peak"] = lex_peak
+    stats["diag"] = dict(DIAG)
+    stats["eq_left"] = EQ_LEFT[0]
+    stats["from"] = best["from"]
+    stats["root_peak"] = root_peak if v < INF else None
+    stats["root_v"] = v if v < INF else None
+    stats["best_v"] = best["val"]
+    stats["note"] = stats.get("note")
     return best["val"], best["sched"], stats
