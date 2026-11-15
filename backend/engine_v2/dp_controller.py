@@ -59,7 +59,7 @@ EPS = 1e-9
 
 class DPTickController:
     def __init__(self, models: Dict[int, ThemeModel], machines: int = 3,
-                 time_budget: float = 0.1, time_budget_cold: float = 2.0,
+                 time_budget: float = 0.3, time_budget_cold: float = 2.0,
                  warm_solves: int = 8, node_budget: int = 8_000_000,
                  lag_secs: float = TICK_SECS, shop_cap: int = 15,
                  streak_limit: int = 4, scan_window: int = 6,
