@@ -50,6 +50,61 @@ import time as _t
 EPS = 1e-9
 INF = float("inf")
 
+# ---- 三空位状态条件（2026-11-15 用户定调）----------------------------------
+# 「DP 按两箱合计没错，但状态要同时满足三个空位条件：总箱空位、换卡箱空位、
+#  保险箱空位」。两池占用做成 (stock, 在途买卡, 在炉产物) 的派生量，不新增
+#  状态维度；inst 不带 change_cap/store_cap 时 = 完全旧行为（只看合计）。
+# 落箱物理规则：买来的底卡一定进换卡箱；炼成卡优先保险箱、满则溢到换卡箱。
+# 所以「保险箱空位」不是独立硬闸，而是决定有多少炼成卡要溢到换卡箱 ——
+# 三个条件一起构成 DP 状态转移的可行性判据，不是执行层的静态闸门。
+
+
+def _pool_cfg(inst, n):
+    cc = inst.get("change_cap")
+    sc = inst.get("store_cap")
+    if cc is None or sc is None:
+        return None
+    is_base = tuple(1 in _cls_of(inst["mclass"], i) for i in range(n))
+    bs = tuple(int(x or 0) for x in (inst.get("base_store") or [0] * n))
+    return (float(cc), float(sc), is_base, bs, int(n))
+
+
+def _pool_chg(cfg, stock, buy_inflight=0, run_out=0):
+    """换卡箱被计划卡占用的格数（含保险箱溢出 + 在途买卡 + 在炉产物预留）。"""
+    if cfg is None:
+        return 0.0
+    _cc, sc, is_base, bs, n = cfg
+    b = sum(float(stock[i]) for i in range(n) if is_base[i])
+    r = sum(float(stock[i]) for i in range(n) if not is_base[i])
+    bst = float(sum(bs))
+    free_s = max(0.0, sc - bst)
+    r_eff = r + float(run_out)
+    overflow = max(0.0, r_eff - free_s)
+    return (b - bst) + float(buy_inflight) + overflow
+
+
+def _pool_sto(cfg, stock, run_out=0):
+    if cfg is None:
+        return 0.0
+    _cc, sc, is_base, bs, n = cfg
+    r = sum(float(stock[i]) for i in range(n) if not is_base[i])
+    bst = float(sum(bs))
+    return bst + min(r + float(run_out), max(0.0, sc - bst))
+
+
+def _pool_ok(cfg, stock, buy_inflight=0, run_out=0):
+    if cfg is None:
+        return True
+    POOL_EVAL[0] += 1
+    cc, sc, _ib, _bs, _n = cfg
+    return (_pool_chg(cfg, stock, buy_inflight, run_out) <= cc + EPS
+            and _pool_sto(cfg, stock, run_out) <= sc + EPS)
+
+
+POOL_REJECT = [0]        # 被三空位状态条件拒绝的分支数（证明约束真的生效）
+POOL_EVAL = [0]          # _pool_ok 被求值次数（UB / dfs 都算）
+POOL_MAX = [0.0, 0.0]    # 已接受状态里换卡箱 / 保险箱的最大占用
+
 
 def sched_peak(inst, sched, init_occ=0.0):
     """调度表的箱占用峰值，与 dfs 内 occ 完全同口径（2026-11-09 字典序目标）。
@@ -262,6 +317,7 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
   box_cap = inst.get("box_cap")
   if box_cap is None:
       box_cap = INF
+  POOL = _pool_cfg(inst, len(inst["dur"]))
   # ★★ 2026-10-27 用户定调：「10 面额底卡可以认为本身就存在，因为可以随时买、
   #   也不用花 tick」。真机 `card_buy` code=0 即落换卡箱、仿真 `EP_BUY` 即
   #   `_add_to_box` —— 没有任何物理延迟。打开后买卡**不占 shop 时间槽**、
@@ -334,12 +390,14 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
       # ② 不变量「箱内 + 在途 + 在炉产物 + 本 buy ≤ cap」——买前校验买后
       #    占用（旧版 proj=买前占用 ≤ cap 即放行 → 买后实占 cap+1，差一）。
       #    不变量被全部迁移保持 → UB 箱容可行（峰值 ≤ cap）。
-      while free_s and box_used + len(running) + 1 <= box_cap + EPS:
+      while (free_s and box_used + len(running) + 1 <= box_cap + EPS
+             and _pool_ok(POOL, stock, len(buy_run), len(running))):
         progressed = False
         for b in list(caps):
           if caps[b] <= 0:
             continue
-          if not free_s or box_used + len(running) + 1 > box_cap + EPS:
+          if (not free_s or box_used + len(running) + 1 > box_cap + EPS
+                  or not _pool_ok(POOL, stock, len(buy_run), len(running))):
             break
           m = free_s.pop(0)
           if buy_free:
@@ -704,6 +762,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     box_cap = inst.get("box_cap")
     if box_cap is None:
         box_cap = INF
+    POOL_D = _pool_cfg(inst, n)
     need0 = tuple(inst["need0"])
     run_norm = _norm_running(init_running, n)
     sc = inst.get("steal_cap")
@@ -860,6 +919,18 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           避免平移子树，内存 O(节点数)）。
         path 参数仍贯穿（绝对时间）：abort 时已访叶子的调度兜底。
         """
+        # ★ 三空位状态条件：在每次 dfs 入口统一判，覆盖买卡 / 收卡 / 精炼
+        #   开工后的所有状态转移；违反「总箱（原有 box_cap 不变量）+
+        #   换卡箱 + 保险箱」三条件之一的分支直接不可行，不再靠执行层兜底。
+        if POOL_D is not None:
+            _bi = sum(1 for _i, _f, _c in running_rel if _c == 1)
+            _ro = sum(1 for _i, _f, _c in running_rel if _c in (0, 2))
+            if not _pool_ok(POOL_D, stock, _bi, _ro):
+                POOL_REJECT[0] += 1
+                return INF, None, INF
+            POOL_MAX[0] = max(POOL_MAX[0],
+                              _pool_chg(POOL_D, stock, _bi, _ro))
+            POOL_MAX[1] = max(POOL_MAX[1], _pool_sto(POOL_D, stock, _ro))
         cur_path = path          # 本次调用累计的绝对时间 op 路径（含买卡）
         t_rel = 0.0              # 相对本次入口已过去的时间
         own_ops = []             # 本次调用产生的 op [(t_rel, vec)]（买卡 bundle）

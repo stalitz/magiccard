@@ -668,6 +668,37 @@ class DPTickController:
                     protect[c] = max(protect.get(c, 0), gap)
         return due, protect
 
+    # ---- 三空位状态条件（2026-11-15 用户定调：不是闸，是 DP 的状态条件）----
+    # DP 的 box_cap 继续按「两箱合计」，但杂卡占的格不是计划卡可用的空位：
+    #   · 总箱空位   = (change_cur - 换卡箱杂卡) + (store_cur - 保险箱杂卡)
+    #   · 换卡箱空位 = change_cur - 换卡箱杂卡（买的底卡一定落这里）
+    #   · 保险箱空位 = store_cur  - 保险箱杂卡（炼成卡优先落这里）
+    # 三者一起传给求解器，作为落箱状态转移的约束；求解器缺省不带这些字段时
+    # 行为与旧版逐位一致。
+    def _pool_caps(self, ws):
+        ch_junk = st_junk = 0
+        for cid, _slot, slottype in ws.slots:
+            if cid <= 0 or self._owner.get(cid) is not None:
+                continue
+            if slottype == 1:
+                st_junk += 1
+            elif slottype == 0:          # 简易箱/临时箱不算换卡箱占用
+                ch_junk += 1
+        return (max(0, (ws.change_cur or 0) - ch_junk),
+                max(0, (ws.store_cur or 0) - st_junk))
+
+    def _pool_base_store(self, ws, live):
+        """保险箱里「计划底卡」按 live 下标的张数（挪箱产物，求解器要区分）。"""
+        idx = {c: i for i, c in enumerate(live)}
+        out = [0] * len(live)
+        for cid, _slot, slottype in ws.slots:
+            if slottype != 1 or cid not in idx:
+                continue
+            m = self._owner.get(cid)
+            if m is not None and m.is_base(cid):
+                out[idx[cid]] += 1
+        return out
+
     # ---- 预腾位（2026-11-15 真机 10708702 自锁修复）----
     # 现象：change_free=5、pipe_min_free=6 → pipe_sets 不提套 → plan ops 空；
     # 而 _box_compaction 只在 change_free<=2 / box_free<=4 才腾箱 → 换卡箱里
@@ -993,6 +1024,12 @@ class DPTickController:
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
                 "cp": cpL, "init_stock": init_stockL,
                 "steal_cap": self._steal_cap}
+        # ★ 三空位状态条件：合计口径不变（box_cap 由 decide 按两箱可用格传入），
+        #   另把两个分箱空位与保险箱内计划底卡分布喂进 DP 状态。
+        ch_cap, st_cap = self._pool_caps(ws)
+        inst["change_cap"] = ch_cap
+        inst["store_cap"] = st_cap
+        inst["base_store"] = self._pool_base_store(ws, live)
         if self.buy_free:
             inst["buy_free"] = True
             if self.ub_only:
@@ -1967,7 +2004,11 @@ class DPTickController:
 
         # ---- 骨架缓存（active 套集合 / 箱容变化才重建 + memo 作废）----
         sig = tuple(sorted(active))
-        box_cap = (ws.change_cur or 0) + (ws.store_cur or 0)
+        # ★ 两箱合计口径不变，但只算「计划卡真正可用的空位」（扣掉杂卡占格）。
+        #   旧口径把杂卡占的格也算进 box_cap → 紧箱时 DP 高估箱位、排出落不了
+        #   地的计划（留炉 450~547 次 vs 取卡 9 次）。
+        ch_cap, st_cap = self._pool_caps(ws)
+        box_cap = ch_cap + st_cap
         if sig != self._skel_sig or box_cap != self._skel_box_cap:
             self._skel = self._skeleton(active)
             self._skel_sig = sig
