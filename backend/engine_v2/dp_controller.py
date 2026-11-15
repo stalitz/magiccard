@@ -672,9 +672,13 @@ class DPTickController:
     # 现象：change_free=5、pipe_min_free=6 → pipe_sets 不提套 → plan ops 空；
     # 而 _box_compaction 只在 change_free<=2 / box_free<=4 才腾箱 → 换卡箱里
     # 12 张「非本主题 10 面杂卡」永远不动 → 空位永远 5 → 2.5h 零动作。
-    # 修法：提套判定前先把「可达空位」算清楚；物理不足但可挪/可卖时，
-    # 本 tick 只发腾位动作（优先无损挪保险箱，其次卖非本主题 ≤10 面），
-    # 等箱位同步后下 tick 再按真实空位排程（同「买后等同步」的稳妥模式）。
+    # 修法：提套判定前先把「可达空位」算清楚；物理不足但可腾时，本 tick 只发
+    # 腾位动作，等箱位同步后下 tick 再按真实空位排程（同「买后等同步」口径）。
+    # ★ 2026-11-15 口径纠正（用户「10 面的为什么不卖」）：10 面杂卡卖出返还
+    #   面额等额金币、买回同价，1:1 无损；旧的「先挪后卖」把垃圾搬进保险箱，
+    #   占掉炼成卡落点（真机保险箱空位 15→3、10 面杂卡 3→17），且要等保险箱
+    #   满才轮到卖。改为：非本主题 ≤10 面杂卡**优先直接卖**；>10 面高面值卡
+    #   永不卖、只在保险箱有空位时挪；保险箱无空位且只剩高面值时停手报告。
     def _junk_in_change(self, ws):
         """换卡箱中不属于任何在炼套的卡：(face, cid, slot)，面额降序。"""
         cards_map = (next(iter(self.models.values())).cards
@@ -692,40 +696,43 @@ class DPTickController:
         return out
 
     def _reachable_free(self, ws):
-        """物理空位 + 可无损挪进保险箱的杂卡 + 挪不下时可卖的 ≤10 面杂卡。"""
+        """物理空位 + 可直卖的 ≤10 面杂卡 + 可无损挪进保险箱的 >10 面杂卡。"""
         junk = self._junk_in_change(ws)
-        movable = min(len(junk), max(0, ws.store_free))
-        sellable = sum(1 for face, _c, _s in junk[movable:]
-                       if 0 < face <= 10)
-        return ws.change_free + movable + sellable
+        sellable = sum(1 for face, _c, _s in junk if 0 < face <= 10)
+        movable = sum(1 for face, _c, _s in junk
+                      if not (0 < face <= 10))
+        return ws.change_free + sellable + min(movable, max(0, ws.store_free))
 
     def _pre_evict_junk(self, ws, actions, want):
-        """发 move / sell 动作腾换卡箱位；返回腾出的格数。"""
+        """先卖 ≤10 面杂卡，再把 >10 面杂卡挪保险箱；返回腾出的换卡箱格数。"""
         junk = self._junk_in_change(ws)
-        store_used = {s for (_c, s, st) in ws.slots if st == 1}
-        store_free = max(0, ws.store_free)
+        sell_q = sorted((x for x in junk if 0 < x[0] <= 10))   # 面额升序
+        move_q = [x for x in junk if not (0 < x[0] <= 10)]     # 面额降序
         n = 0
-        for face, cid, slot in junk:
+        for face, cid, slot in sell_q:
             if n >= want:
                 break
-            if store_free > 0:
-                dest = next((s for s in range(1, ws.store_cur + 1)
-                             if s not in store_used), None)
-                if dest is None:
-                    store_free = 0          # 保险箱实际已满 → 转卖
-                else:
-                    actions.append(Action(kind="move", cid=cid, slot=slot,
-                                          slottype=0,
-                                          note=f"DP腾箱挪保险箱{cid}(面{face})"))
-                    store_used.add(dest)
-                    store_free -= 1
-                    n += 1
-                    continue
-            if 0 < face <= 10:            # 铁律：高面值卡永不自动卖
-                actions.append(Action(kind="sell", cid=cid, slot=slot,
-                                      slottype=0,
-                                      note=f"DP腾箱卖杂卡{cid}(面{face})"))
-                n += 1
+            actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                  slottype=0,
+                                  note=f"DP腾箱卖杂卡{cid}(面{face})"))
+            n += 1
+        if n >= want:
+            return n
+        store_used = {s for (_c, s, st) in ws.slots if st == 1}
+        store_free = max(0, ws.store_free)
+        for face, cid, slot in move_q:
+            if n >= want or store_free <= 0:
+                break
+            dest = next((s for s in range(1, ws.store_cur + 1)
+                         if s not in store_used), None)
+            if dest is None:
+                break                     # 保险箱实际已满 → 停手，绝不卖高面值
+            actions.append(Action(kind="move", cid=cid, slot=slot,
+                                  slottype=0,
+                                  note=f"DP腾箱挪保险箱{cid}(面{face})"))
+            store_used.add(dest)
+            store_free -= 1
+            n += 1
         return n
 
     # ------------------------------------------------------------------
@@ -744,8 +751,8 @@ class DPTickController:
 
         触发：change_free <= 2 或 box_free <= 4（同贪心）。四段：
         1) 卖多余 10 面底卡（本主题，保留 due/protect）；2) 挪本主题多余合成卡进
-        保险箱；3) 挪非本主题杂卡进保险箱（无损，保险箱满则停）；4) 保险箱也满时
-        卖非本主题的 ≤10 面卡（**只在挪不动时才走**，见 3)/4) 注释）。安全边界：
+        保险箱；3) **优先直卖**非本主题 ≤10 面杂卡（2026-11-15 口径，见 3) 注释）；
+        4) 卖完还差时把 >10 面杂卡无损挪进保险箱，保险箱满则停手报告。安全边界：
         ① 只卖 is_base 且 price==10 的底卡（铁律：高面值卡永不自动卖；
           10 面卡 sell_card 只换回面值等额金币，卖+买无损，绝不动 40 面
           素材与合成卡—— tid=709 底卡 57 面也不卖，保守）；
@@ -846,74 +853,65 @@ class DPTickController:
                 change_of[cid] -= 1
                 n_moved += 1
                 n_free_change += 1       # 挪箱把卡从换卡箱搬走，腾出买卡位
-        # ---- 3) 挪「不属于任何在炼套」的杂卡进保险箱（2026-11-03）----
+        # ---- 3) 非在炼套杂卡：≤10 面优先直卖（2026-11-15 口径）----
         # 真机 4821992：换卡箱 18 格里 11 张是别的主题的 130~610 面历史卡，
         # `change_free` 长期 0~2 → 买卡预算恒 0 → `_run_plan` 卡在第一个 buy op，
         # 表面就是「引擎在跑但一分钟也不动」。这些卡不是任何在炼套的素材
         # （`_owner` 里没有），留着只占格里，买卡根本买不进来。
-        # 用户 2026-10-03 定调「优先移保险箱」、2026-10-21 定调「高面值卡永不自动卖」：
-        # 这里只挪（无损），按面额降序（大面额最不可能当素材）；保险箱满就如实停下。
-        if ws.store_free > 0 and ws.change_free <= 2:
-            cards_map = next(iter(self.models.values())).cards if self.models else {}
-            store_used3 = {s for (_c, s, _st) in ws.slots if _st == 1}
-            store_free3 = ws.store_free
-            junk: list[tuple[int, int, int]] = []
-            for cid, slot, slottype in list(ws.slots):
-                if cid <= 0 or slottype != 0:
-                    continue
-                if self._owner.get(cid) is not None:
-                    continue                  # 在炼套的卡：上一段处理，别动
-                c = cards_map.get(cid)
-                face = int(c[3] or 0) if c else 0
-                junk.append((face, cid, slot))
-            junk.sort(reverse=True)
-            # 目标：腾到够一次「买 3 张底卡立即投炉」即可，别把换卡箱清空
-            want = max(0, 4 - ws.change_free)
-            for face, cid, slot in junk:
-                if store_free3 <= 0 or want <= 0:
-                    break
-                dest = next((s for s in range(1, ws.store_cur + 1)
-                             if s not in store_used3), None)
-                if dest is None:
-                    break
-                actions.append(Action(kind="move", cid=cid, slot=slot,
-                                      slottype=0,
-                                      note=f"DP腾箱挪杂卡{cid}(面{face})"))
-                store_used3.add(dest)
-                store_free3 -= 1
-                want -= 1
-                n_moved += 1
-                n_free_change += 1
-        # ---- 4) 保险箱也装不下时：卖「非在炼套」的 ≤10 面底卡（2026-11-14）----
-        #   第 3 段只能挪；保险箱满时挪不动（真机 4821992：换卡箱 17/18、保险箱
-        #   164/168）→ 换卡箱永久空 1 格 → 取卡门槛（要空 2 格）与买卡预算同时
-        #   归零。用户原话「本来一键抽卡就会卖的，10 面的卖了也能买，之前不也是
-        #   直接卖的吗」→ 允许卖。铁律不变：只卖 `_owner` 里没有（非本主题）
-        #   且面额 ≤10 的卡；本主题卡（可能是素材）、≥40 面卡一律不动。
-        short = max(0, 4 - ws.change_free) - max(0, ws.store_free)
-        if short > 0:
-            cards_map4 = (next(iter(self.models.values())).cards
+        # ★ 2026-11-15 用户「10 面的为什么不卖」：旧的「先挪后卖」把 10 面垃圾
+        #   搬进保险箱占掉炼成卡落点（真机保险箱空位 15→3），且要等保险箱满才
+        #   轮到卖。10 面卡卖 = 面额等额金币、买回同价，1:1 无损 → 优先直卖。
+        #   铁律不变：只卖 `_owner` 里没有（非本主题）且 0<面额<=10 的卡；
+        #   本主题卡、≥40 面卡一律不动（用户 2026-10-21 定调）。
+        # 目标：腾到够一次「买 3 张底卡立即投炉」即可，别把换卡箱清空。
+        want = max(0, 4 - ws.change_free)
+        if want > 0:
+            cards_map3 = (next(iter(self.models.values())).cards
                           if self.models else {})
             sellable: list[tuple[int, int, int]] = []
+            big_junk: list[tuple[int, int, int]] = []
             for cid, slot, slottype in list(ws.slots):
                 if cid <= 0 or slottype != 0:
                     continue
                 if self._owner.get(cid) is not None:
-                    continue                  # 本主题的卡：绝不卖
-                c4 = cards_map4.get(cid)
-                face = int(c4[3] or 0) if c4 else 0
+                    continue                  # 本主题的卡：上一段处理，别动
+                c3 = cards_map3.get(cid)
+                face = int(c3[3] or 0) if c3 else 0
                 if 0 < face <= 10:
                     sellable.append((face, cid, slot))
+                else:
+                    big_junk.append((face, cid, slot))
             sellable.sort()                   # 面额升序：先卖最便宜的
+            big_junk.sort(reverse=True)       # 面额降序：大面额最不可能当素材
             for _face, cid, slot in sellable:
-                if short <= 0:
+                if want <= 0:
                     break
                 actions.append(Action(kind="sell", cid=cid, slot=slot,
                                       slottype=0,
                                       note=f"DP腾箱卖杂卡{cid}(面{_face})"))
                 n_sold += 1
                 n_free_change += 1
-                short -= 1
+                want -= 1
+            # ---- 4) 卖完还差：只剩高面值杂卡时无损挪保险箱；保险箱满则停手 ----
+            #   高面值卡永不自动卖。挪不动就保持停手报告，不硬排、不越界。
+            if want > 0 and ws.store_free > 0:
+                store_used3 = {s for (_c, s, _st) in ws.slots if _st == 1}
+                store_free3 = ws.store_free
+                for face, cid, slot in big_junk:
+                    if want <= 0 or store_free3 <= 0:
+                        break
+                    dest = next((s for s in range(1, ws.store_cur + 1)
+                                 if s not in store_used3), None)
+                    if dest is None:
+                        break
+                    actions.append(Action(kind="move", cid=cid, slot=slot,
+                                          slottype=0,
+                                          note=f"DP腾箱挪杂卡{cid}(面{face})"))
+                    store_used3.add(dest)
+                    store_free3 -= 1
+                    want -= 1
+                    n_moved += 1
+                    n_free_change += 1
         if n_sold or n_moved:
             self.compact_sold += n_sold
             self.compact_moved += n_moved
