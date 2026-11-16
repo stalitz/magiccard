@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261115b";
+const APP_VER = "20261116a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -5648,7 +5648,7 @@ async function loadHomeState() {
   const bought = ruby.bought ?? 0;
   $("home-gold-st").textContent = gi.length
     ? `红宝石 已兑 ${bought}/7 次（` +
-      (bought >= 7 ? "今日上限，跳过" : "一键时会自动兑") + "）· 其余 " +
+      (bought >= 7 ? "今日上限" : "一键不兑，勾选才兑") + "）· 其余 " +
       gi.filter((g) => g.id !== 2).map((g) => (g.bought ? `#${g.id}:${g.bought}次` : "未兑")).join(" ")
     : "读取失败";
   // 衣柜锻造：挑「还没锻过（forge=0）且要吃材料最少（chip 最小）」的一件，
@@ -5697,7 +5697,7 @@ function homeLogStep(stp) {
   else if (stp.act === "exchange") mlog(`[扭蛋机] ${m}`, "ok");
   else if (stp.act === "feed") mlog(`[玩耍] ${m}（竞技前自动）`, stp.ok ? "" : "warn");
   else if (stp.act === "gold") mlog(`[金币福利] ${m || "兑红宝石"}`,
-                                 stp.ok ? (stp.skipped ? "warn" : "ok") : "err");
+                                 stp.ok ? (stp.skipped ? "" : "ok") : "err");
   else if (stp.act === "arena:state") mlog(`[竞技] ${m}`, "ok");
   else if (stp.act === "arena:dress") mlog(`[竞技] 穿装：${m}`, stp.ok ? "" : "warn");
   else if (stp.act === "flush") mlog(`[竞技] ${m}`, stp.ok ? "" : "warn");
@@ -5721,6 +5721,10 @@ function homeLogStep(stp) {
 let homeAllRunning = false;
 async function homeRunAll(btn) {
   if (homeAllRunning) { mlog("[一键全部] 已有任务在进行中，忽略重复点击", "warn"); return; }
+  // 兑红宝石是一次 10000 金币的真支出：只认当下勾选，跑完立即取消勾选（一次性授权，
+  // 避免「勾过一次忘了、之后每次点一键都扣 1 万」）。
+  const goldChk = $("home-gold-buy");
+  const wantGold = !!(goldChk && goldChk.checked);
   const done = busyBtn(btn, "运行中…", "一键全部（自动跑完）");
   const note = $("home-all-st");
   if (note) note.textContent = "运行中，实时日志滚动中…";
@@ -5741,7 +5745,7 @@ async function homeRunAll(btn) {
   try {
     // SSE：后端每完成一步推一行，前端边收边显示（不再等整段跑完）
     const resp = await fetch("/api/home/all", { method: "POST",
-      headers: { "Content-Type": "application/json" }, body: "{}" });
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gold: wantGold }) });
     if (!resp.ok) { mlog(`[一键全部] HTTP ${resp.status}`, "err"); failed = true; return; }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -5771,6 +5775,7 @@ async function homeRunAll(btn) {
   } finally {
     clearInterval(watchdog);
     homeAllRunning = false;
+    if (goldChk && wantGold) goldChk.checked = false;   // 一次性授权：跑完复位
     if (note) note.textContent = failed ? "中断（看日志）" : (finished ? "" : "中断（看日志）");
     await loadHomeState();
     done();
@@ -5831,6 +5836,21 @@ function initHomeOnce() {
   homeInited = true;
   const b = $("home-all");
   if (b) b.onclick = () => homeRunAll(b);
+  // 「兑红宝石」从一键全部里摘出来后保留的**手动**入口：一次花 10000 金币，
+  // 到今日上限会自动跳过（后端 gold_buy_ruby 前后对比 gold_buy_id2，没生效就算未兑）。
+  const gm = $("home-gold-manual");
+  if (gm) gm.onclick = async () => {
+    const done = busyBtn(gm, "兑换中…", "手动兑红宝石");
+    try {
+      const r = await homePost("/api/home/gold-buy", {});
+      const txt = (r && (r.message || r.content)) || "无返回";
+      const skipped = !!(r && (r.skipped || /上限/.test(txt)));
+      mlog(`[金币福利] ${txt}`, r && r.ok ? (skipped ? "warn" : "ok") : "err");
+      await loadHomeState();
+    } finally {
+      done();
+    }
+  };
 }
 
 // 切换每日比赛页的子模块：只显示目标子模块，并立刻拉取它的数据（手动操作即时可见）

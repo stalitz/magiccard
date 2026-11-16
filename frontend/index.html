@@ -1554,7 +1554,7 @@
             </label>
             <button id="dig-collect" class="btn sm ok" title="收走所有已露出的礼物">一键收获</button>
             <button id="dig-push" class="btn sm" title="在最深一行的空格扔一字型炸药（横扫5格），把未探索行炸开、地层往下推进">往下推进</button>
-            <button id="dig-daily-tools" class="btn sm" title="领每日道具（锄头/炸药）">领每日道具</button>
+            <button id="dig-daily-tools" class="btn sm" title="花 3000 金币买一包道具：锄头×10、一字型炸药×5、九宫格炸药×1（每天限 1 次）">领每日道具（-3000 金币）</button>
             <button id="dig-daily-gift" class="btn sm" title="领每日礼包（可连领）">领每日礼包</button>
             <button id="dig-refresh" class="btn sm primary">刷新</button>
             <span class="sep"></span>
@@ -1670,9 +1670,12 @@
                 <div class="state-box"><span id="home-forge-st" style="grid-column:1/-1">读取中…</span></div>
               </div>
             </div>
-            <div class="lib-toolbar" style="padding:8px 12px">
+            <div class="lib-toolbar" style="padding:8px 12px;flex-wrap:wrap">
               <button id="home-all" class="btn sm ok">一键全部（自动跑完）</button>
               <button id="claim-all" class="btn sm">一键领奖（各玩法奖励，零消耗）</button>
+              <label class="check" title="兑一次红宝石×8 花 10000 金币。默认不勾 = 一键全部里不兑；需要时勾上或点右边「手动兑红宝石」">
+                <input type="checkbox" id="home-gold-buy"> 兑红宝石（-10000 金币）</label>
+              <button id="home-gold-manual" class="btn sm" title="单独兑一次红宝石×8，花 10000 金币（到今日上限会自动跳过）">手动兑红宝石</button>
               <span id="home-all-st" class="hint"></span>
             </div>
             <div class="lib-toolbar" style="gap:8px;padding:0 12px 8px;flex-wrap:wrap">
@@ -1682,7 +1685,7 @@
               <button class="btn sm danger" data-act="mm-fight-pvp" data-idle="挑战中">挑战对手（消耗）</button>
               <button class="btn sm" data-act="mm-arena-zan" data-idle="点赞中">点赞竞技榜（第一个可赞）</button>
             </div>
-            <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 → 兑红宝石 → 竞技自动</b>
+            <div class="hint" style="padding:0 12px 10px">顺序由程序保证：<b>点赞 → 扭蛋 → 喂猫到 80 →〔兑红宝石：默认跳过，勾上才兑〕→ 竞技自动</b>
               （玩耍严格排在竞技之前）；糖果不够会先用积分换大糖果再喂。
               今天的赞若已点过、免费扭蛋已抽过、红宝石已到上限，会自动跳过（不浪费次数）。<br>
               衣柜锻造的写接口已定位（会真消耗材料），不在一键里自动锻 —— 先确认代价再手动锻。
@@ -1913,7 +1916,7 @@
     <button class="mn-btn" data-pane="match"><span class="mn-ico">🏆</span><span class="mn-tx">比赛</span></button>
   </nav>
 
-<script src="/app.js?v=20261115b"></script>
+<script src="/app.js?v=20261116a"></script>
 
 <!-- 合成路径弹窗 -->
 <div id="synth-modal" class="modal hidden">

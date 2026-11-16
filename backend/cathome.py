@@ -645,10 +645,15 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
            "surplus_left": live, "claims": claims}
 
 
-async def run_all(session):
+async def run_all(session, gold: bool = False):
     """「一键全部」：按正确顺序自动跑完每日玩法 —— 用户要的主入口（2026-09-26）。
 
-    顺序：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 → 竞技自动。
+    顺序：点赞 → 扭蛋 → 换糖（不够时）→ 喂猫到 80 →〔兑红宝石：**默认跳过**〕→ 竞技自动。
+
+    ⚠️ `gold` 默认 False（2026-11-16 用户定调）：兑一次红宝石×8 要花 **10000 金币**，
+    而这是「一键」里最容易被无视的支出（历史上 13 天净降 7.6 万的主因）。
+    必须由前端勾选项显式传 True 才会兑；不勾就只是在日志里说明跳过，不产生任何扣费。
+    单独兑一次走 `POST /api/home/gold-buy`（前端「手动兑红宝石」按钮）。
     改为生成器：每完成一步就 yield，配合 /api/home/all 的 SSE 让前端实时显示。
     """
     steps = []
@@ -679,10 +684,14 @@ async def run_all(session):
     yield emit({"act": "feed", "ok": bool(f.get("ok")),
                 "msg": f.get("message") or f"喂猫到 80（共 {n_candy} 颗糖）"})
 
-    # 4) 金币福利 · 兑红宝石（到上限自动跳过，不会白白浪费次数）
-    g = await gold_buy_ruby(session)
-    yield emit({"act": "gold", "ok": bool(g.get("ok")), "skipped": bool(g.get("skipped")),
-                "msg": g.get("message") or f"兑红宝石　→ {_reward_text(g.get('content'))}"})
+    # 4) 金币福利 · 兑红宝石：**默认不兑**（一次 10000 金币），仅勾选时执行
+    if gold:
+        g = await gold_buy_ruby(session)
+        yield emit({"act": "gold", "ok": bool(g.get("ok")), "skipped": bool(g.get("skipped")),
+                    "msg": g.get("message") or f"兑红宝石　→ {_reward_text(g.get('content'))}"})
+    else:
+        yield emit({"act": "gold", "ok": True, "skipped": True,
+                    "msg": "未勾选「兑红宝石」，跳过（省 10000 金币）；要兑就点「手动兑红宝石」"})
 
     # 5) 竞技自动（玩耍已在第 3 步做完，这里不再重复喂）
     async for s in arena_auto(session, feed=False):

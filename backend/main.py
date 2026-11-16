@@ -3320,11 +3320,14 @@ async def home_forge(equip_id: int = 0):
 
 
 @app.post("/api/home/all")
-async def home_all():
-    """一键全部（SSE 流式）：点赞 → 扭蛋 → 换糖 → 喂猫到 80 → 兑红宝石 → 竞技自动。
-    每完成一步就推一行，前端实时显示，不再等整段跑完才出日志。"""
+async def home_all(body: dict = None):
+    """一键全部（SSE 流式）：点赞 → 扭蛋 → 换糖 → 喂猫到 80 →〔兑红宝石〕→ 竞技自动。
+    每完成一步就推一行，前端实时显示，不再等整段跑完才出日志。
+
+    `body.gold=true` 才兑红宝石（一次 **10000 金币**）；缺省或 false = 跳过不扣费。"""
     if err := _require_login():
         return err
+    do_gold = bool((body or {}).get("gold"))
 
     async def gen():
         tok = _cur_token()
@@ -3339,7 +3342,7 @@ async def home_all():
         _home_all_running[tok] = True
         try:
             try:
-                async for step in ch.run_all(_session):
+                async for step in ch.run_all(_session, gold=do_gold):
                     yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
             except Exception as e:  # noqa: BLE001
                 yield f"data: {json.dumps({'act': '__error__', 'ok': False, 'message': f'异常：{e}'}, ensure_ascii=False)}\n\n"
