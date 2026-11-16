@@ -446,11 +446,18 @@ class LoginSession:
             msg = "取卡成功"
         elif not msg:
             msg = f"未知错误 code={code}"
+        raw = r.get("raw") or ""
+        # ★ 取卡响应根标签带 `fp_cnt` = 当前可翻牌次数（客户端收卡后靠它决定弹不弹翻牌窗，
+        #   2026-11-16 实测：还有额度时 `fp_cnt="1"`、当日 20 次满额后 `fp_cnt="0"`）。
+        #   解析出来让上层「有额度才翻」，不必本地猜、也没有 busy 往返。
+        m = re.search(r'<QQHOME\b[^>]*?(?<![A-Za-z0-9_])fp_cnt="(\d+)"', raw)
+        pai_cnt = int(m.group(1)) if m else None
         return {
             "ok": code == 0,
             "code": code,
             "message": msg,
-            "raw": (r.get("raw") or "")[:300],
+            "pai_cnt": pai_cnt,
+            "raw": raw[:300],
         }
 
     async def draw_random_cards(self, fetch_type: int = 2) -> dict:
@@ -492,8 +499,9 @@ class LoginSession:
 
         - 端点 card_pai_open，参数 type=1 + ver=1 + code=''。
         - 翻牌奖励在 JSON 响应里：content / pack_str 字段（如 "48_1415_1"）。
-        - 没有待翻状态时返回 -1「system busy」。**主因是当天 20 次额度已用完**
-          （见下方文案注释），额度记账在 `auto_refine.PAI_DAILY_LIMIT`。
+        - 返回里还带 `fp_cnt`（翻完剩几次）、`day_get_fp`（每日上限）、`day_fp_cnt`（累计）。
+        - 没有机会时返回 -1「system busy」——**发请求前先看取卡响应的 `fp_cnt`**，
+          为 0 就别发（客户端就是靠它决定收卡后弹不弹翻牌窗）。
         """
         r = await self.post(EP_PAI_OPEN, type=1, ver=1, code="")
         code = r.get("code")
@@ -512,10 +520,10 @@ class LoginSession:
         elif code == -1 and "busy" in (r.get("message") or "").lower():
             # ★ 2026-11-16 真机实证：这个 busy 的**主因是当日翻牌次数用完了**
             #   （三个账号都停在成功 20 次之后，3822843 当天只成功 19 次 → 零 busy）。
-            #   主界面没有剩余次数字段，额度由 auto_refine 的 PAI_DAILY_LIMIT 本地记账。
-            msg = ("无牌可翻（服务端 system busy）：最常见原因是今日翻牌机会已用完"
-                   "（实测每日 20 次，用完后再取卡翻都返回这个），其次是这次取的不是"
-                   "自己炉位的卡。不是卡箱满。")
+            #   ★ 同日更正：剩余次数**服务端是下发的** —— 取卡响应 `<QQHOME fp_cnt="N">`
+            #     与主界面 `<new_data fp_cnt="N">`；调用方应先看 fp_cnt，不该等到 busy。
+            msg = ("无牌可翻（服务端 system busy）：今日翻牌机会已用完"
+                   "（每日上限 20 次），或这次取的不是自己炉位的卡。不是卡箱满。")
         else:
             msg = (r.get("message") or "").strip() or f"未知错误 code={code}"
         return {
