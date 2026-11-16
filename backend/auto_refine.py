@@ -82,6 +82,19 @@ CHANGE_FACE = 40
 
 _DERIV: tuple | None = None
 
+# ── 翻牌（card_pai_open）每日机会上限 ────────────────────────────────────────
+# ★ 2026-11-16 真机实证：取自己炉位的卡会派生 1 次翻牌机会，但**服务端每天只给 20 次**。
+#   三个账号同一天都是「累计成功 20 次 → 之后每次取卡再翻必返回 system busy」：
+#     4821992 03:43:38 第 20 次成功 → 04:16 起连续 4 次 busy
+#     10708702 14:18:46 第 20 次成功 → 14:19 起连续 3 次 busy
+#     3822843 当天只成功 19 次 → 一次 busy 都没有
+#   主界面里**没有**任何翻牌剩余次数字段（`<user>` 属性全表核对过，只有抽卡用的
+#   `randchance`），所以只能在本地记当日成功次数，到顶就不发请求。
+#   `MC_PAI_DAILY_LIMIT=0` 可关掉这道闸（回到「每次都发、等报错」的旧行为）。
+PAI_DAILY_LIMIT = int(os.environ.get("MC_PAI_DAILY_LIMIT", "20") or 0)
+# 本地计数没到上限、却连续收到这么多次 busy → 同样判定今日额度已用完（防上限变动）。
+PAI_BUSY_STOP = 2
+
 
 def _lib() -> dict:
     global _DERIV
@@ -680,6 +693,13 @@ class AutoRefine:
         self.last_collect: dict | None = None  # 最近一次上交的奖励解析
         self._prev_fields: dict = {}         # 上一 tick 的状态字段快照
         self._pai_happened = False           # 上一 tick 是否翻过牌（决定是否记差分）
+        # 翻牌额度本地账（见 PAI_DAILY_LIMIT 注释）：服务端不暴露剩余次数，
+        # 只能靠「当日成功计数 + busy 计数」自己判断，到顶就直接不发请求。
+        self.pai_day = ""                    # 计数所属日期（YYYY-MM-DD，本机/服务端同区）
+        self.pai_ok_n = 0                    # 当日翻牌成功次数
+        self.pai_busy_n = 0                  # 当日「无牌可翻」次数（连续 2 次即判满额）
+        self.pai_blocked = False             # 今日额度已判定用完 → 不再调 card_pai_open
+        self._pai_skip_logged = False        # 「已用完，跳过」日志只打一次（跨天复位）
         self._rr = 0                         # 轮转起点
         self._made: Counter = Counter()       # 每类卡本会话累计「开炉生产」次数（40 面防饿死用）
         self._task: asyncio.Task | None = None
@@ -1152,6 +1172,40 @@ class AutoRefine:
         except Exception:  # noqa: BLE001
             pass
 
+    def _pai_quota_ok(self) -> bool:
+        """今日是否还值得发 `card_pai_open`（本地估算）。
+
+        服务端不暴露翻牌剩余次数（`<user>` 里只有抽卡用的 `randchance`），所以只能
+        本地记账：跨天复位 → 当日成功数到 `PAI_DAILY_LIMIT` 就判满额、直接不发请求。
+        """
+        if PAI_DAILY_LIMIT <= 0:
+            return True                       # 闸关掉 = 旧行为（每次都发、等报错）
+        today = time.strftime("%Y-%m-%d")
+        if self.pai_day != today:
+            self.pai_day = today
+            self.pai_ok_n = 0
+            self.pai_busy_n = 0
+            self.pai_blocked = False
+            self._pai_skip_logged = False
+        if self.pai_blocked:
+            return False
+        if self.pai_ok_n >= PAI_DAILY_LIMIT:
+            self.pai_blocked = True
+            return False
+        return True
+
+    def _pai_note(self, ok: bool) -> None:
+        """翻牌结果记账：成功 +1 并清 busy 连击；连续 PAI_BUSY_STOP 次 busy → 判满额。"""
+        if PAI_DAILY_LIMIT <= 0:
+            return
+        if ok:
+            self.pai_ok_n += 1
+            self.pai_busy_n = 0
+            return
+        self.pai_busy_n += 1
+        if self.pai_busy_n >= PAI_BUSY_STOP or self.pai_ok_n >= PAI_DAILY_LIMIT:
+            self.pai_blocked = True
+
     def _log_state_delta(self) -> None:
         """翻牌/上交之后，把主界面数值字段的变化记一行——用来给「未知道具」对号。"""
         if not self._pai_happened or not self.state_delta:
@@ -1320,8 +1374,10 @@ class AutoRefine:
                 pending_now[int(c["id"])] = max(0, pending_now[int(c["id"])] - 1)
                 st["cap"]["change"]["used"] = st["cap"]["change"].get("used", 0) + 1
                 self.stats["refined"] += 1
-                # 取「自己炉子」的卡 → 获得 1 次翻牌机会，立即翻一次（5选1奖，不翻就浪费）
-                if is_self:
+                # 取「自己炉子」的卡 → 获得 1 次翻牌机会，立即翻一次（5选1奖，不翻就浪费）。
+                # ★ 2026-11-16：服务端每天只给 20 次（见 PAI_DAILY_LIMIT 注释），
+                #   额度用完后每次取卡再翻都只是白等一次 system busy —— 本地记到顶就不发请求。
+                if is_self and self._pai_quota_ok():
                     dr = await self.s.open_pai()
                     self._pai_happened = True
                     self.last_pai_raw = dr.get("raw") or ""
@@ -1332,6 +1388,15 @@ class AutoRefine:
                         detail += f"｜原始响应 {self.last_pai_raw[:220]}"
                     steps.append({"action": "翻牌", "ok": dr.get("ok"), "detail": detail})
                     self._log("翻牌", bool(dr.get("ok")), detail)
+                    self._pai_note(bool(dr.get("ok")))
+                elif is_self and not self._pai_skip_logged:
+                    # 只在「刚判定用满」时记一次，之后每次取卡都不再刷屏（同一天几百次取卡）
+                    self._pai_skip_logged = True
+                    why = ("今日翻牌次数已用完" if self.pai_ok_n >= PAI_DAILY_LIMIT
+                           else "服务端连续返回无牌可翻")
+                    self._log("翻牌", True,
+                              f"今日翻牌 {self.pai_ok_n}/{PAI_DAILY_LIMIT} 次，{why}"
+                              f" → 此后取卡不再发翻牌请求（省掉每次的 busy 往返）")
 
         # 1.4) 收卡刚把新的成品卡放进箱子 —— 变卡目标必须按**最新**缺口挑：用 tick
         #      开头那份库存会低估（挑中一张其实已经收到的卡，白烧一张源卡）。
@@ -3382,6 +3447,9 @@ class AutoRefine:
                 "sets_now": {self.plans[t].name: self._last_sets.get(t, 1)
                              for t in self.queue},
                 "randchance": self.randchance,
+        # 翻牌额度本地账（服务端不暴露剩余次数，这里给界面/排障看当日用了几次）
+        "pai": {"day": self.pai_day, "ok_n": self.pai_ok_n, "limit": PAI_DAILY_LIMIT,
+                "blocked": self.pai_blocked},
                 "state_delta": self.state_delta[:10],
                 "last_pai_raw": self.last_pai_raw[:400],
                 "last_collect": self.last_collect,

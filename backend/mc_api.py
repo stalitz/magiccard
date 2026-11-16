@@ -488,11 +488,12 @@ class LoginSession:
         }
 
     async def open_pai(self) -> dict:
-        """翻牌（取自己炉子卡后派生的临时机会，必须紧接着取卡后翻，否则服务端返回 system busy）。
+        """翻牌（取自己炉子卡后派生的临时机会，必须紧接着取卡后翻）。
 
         - 端点 card_pai_open，参数 type=1 + ver=1 + code=''。
         - 翻牌奖励在 JSON 响应里：content / pack_str 字段（如 "48_1415_1"）。
-        - 没有「刚取完卡」的待翻状态时返回 -1「system busy」（不是卡箱问题，是没牌可翻）。
+        - 没有待翻状态时返回 -1「system busy」。**主因是当天 20 次额度已用完**
+          （见下方文案注释），额度记账在 `auto_refine.PAI_DAILY_LIMIT`。
         """
         r = await self.post(EP_PAI_OPEN, type=1, ver=1, code="")
         code = r.get("code")
@@ -509,8 +510,12 @@ class LoginSession:
         if code == 0:
             msg = "翻牌成功" + (f"，奖励: {summary}" if summary else "")
         elif code == -1 and "busy" in (r.get("message") or "").lower():
-            msg = ("当前没有可翻的牌：翻牌机会来自「取自己炉位的卡」，取卡后须立即翻；"
-                   "没有待翻牌时返回此提示（不是卡箱满，是此刻没有可翻的牌）")
+            # ★ 2026-11-16 真机实证：这个 busy 的**主因是当日翻牌次数用完了**
+            #   （三个账号都停在成功 20 次之后，3822843 当天只成功 19 次 → 零 busy）。
+            #   主界面没有剩余次数字段，额度由 auto_refine 的 PAI_DAILY_LIMIT 本地记账。
+            msg = ("无牌可翻（服务端 system busy）：最常见原因是今日翻牌机会已用完"
+                   "（实测每日 20 次，用完后再取卡翻都返回这个），其次是这次取的不是"
+                   "自己炉位的卡。不是卡箱满。")
         else:
             msg = (r.get("message") or "").strip() or f"未知错误 code={code}"
         return {
