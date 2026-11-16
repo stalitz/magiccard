@@ -401,7 +401,8 @@ class ThemePlan:
         return card_name(cid)
 
     def net_plan(self, stock: Counter, pending: Counter,
-                 credit: Counter | None = None, sets: int = 1) -> tuple[dict, dict]:
+                 credit: Counter | None = None, sets: int = 1,
+                 mid_collect: bool = True) -> tuple[dict, dict]:
         """净需求：返回 (要炼的 {卡id: 次数}, 要买的 {底卡id: 张数})。
 
         库存（箱内 + 炉内在炼）从总需求里抵扣；只有**实际要新炼/新买**的数量
@@ -438,7 +439,10 @@ class ThemePlan:
         #   上层卡永远炼不出（2026-10-11 吴韵汉风 2 星实测：炉空转、4 空炉不投料）。
         #   旧「只顶层按 sets」会让中间层收藏需求=0，需求传导只算素材消耗，于是
         #   planned 不含它 → _spare 挡消费 → 死锁。
-        need: dict[int, int] = {cid: max(1, int(sets)) for cid in self.ids}
+        need: dict[int, int] = {
+            cid: (max(1, int(sets)) if mid_collect
+                  else (max(1, int(sets)) if cid in tops else 0))
+            for cid in self.ids}
         runs: dict[int, int] = {}
         buy: dict[int, int] = {}
         for cid in sorted(self.depth, key=lambda c: -self.depth[c]):
@@ -925,13 +929,34 @@ class AutoRefine:
           正是 11-04 死了 58 分钟的那个机制。故加 `_plan_base_only` 限定。
         """
         sets = self._calc_sets_raw(plan, stock, pending, free_slots)
+        # ★★ 2026-11-16 用户定调（真机 10708702 空窗 2h 后）：
+        #   「能同时炼几套这个不应该是一种限制，而是 DP 自己解出来的」。
+        #   所以 `sets` 在 DP 路径下不再是「并行度上限」，而是**需求窗口**：
+        #   给 DP 足够多套的料需求，同时开工几套由 DP 在炉位/箱位约束下自己排。
+        #   旧口径（`_calc_sets_raw` 1★ 按「手上囤的 40 面」）真机恒算出 1 套
+        #   → need0 只覆盖当前一套 → 等最后一张顶层卡出炉时其余炉位没料可投。
+        #   `MC_DP_SETS_WINDOW=0`（默认）= 按「空闲炉位 + 1」给窗口；>0 固定该值。
+        _dp_win = 0
+        # 默认 -1 = 旧口径（无窗口）。候选口径需显式 `MC_DP_SETS_WINDOW=0`
+        # （按空闲炉位给窗口）或 >0（固定窗口），验证通过后才改默认。
+        _dp_raw = int(os.environ.get("MC_DP_SETS_WINDOW") or -1)
+        if _dp_raw == -1:
+            # A/B 用：-1 = 逐位复现旧口径（无窗口、吃 max_sets 钳、吃箱位除法）
+            _dp_win = 0
+        elif getattr(self, "dp_mode", False) and plan.ids:
+            _dp_win = _dp_raw if _dp_raw > 0 else min(
+                5, max(1, int(free_slots or 0) + 1))
+            sets = max(sets, _dp_win)
         # ★★ 2026-11-09 用户验收线（禁单轮超炼）：
         #   自动推断的套数最多 2 套 —— 2 套 = 合法的「跨轮重叠」（相当于同时炼
         #   2 套同星卡，峰值 < 2N 可接受）。历史事故是 1★ 按 max(囤的 40 面)
         #   把 sets 抬到 5~6，只为凑 1 套却按 5~6 套重复炼料 = 单轮超炼，
         #   箱位被吃光、零上交。界面显式设的套数（surplus_sets>0）是用户主动
         #   要多套，不钳；MC_AUTO_MAX_SETS=0 可消融回旧口径（仅供 A/B）。
-        if not (getattr(self, "surplus_sets", 0) and self.surplus_sets > 0):
+        # ★ 2026-11-16：DP 路径不吃这个钳（`_dp_win` 已按炉位给出需求窗口，
+        #   且 DP 有箱位/炉位约束自己收敛），只有贪心路径保持 2 套上限。
+        if not (getattr(self, "surplus_sets", 0) and self.surplus_sets > 0) \
+                and not _dp_win:
             _cap_auto = int(os.environ.get("MC_AUTO_MAX_SETS", "2") or 0)
             if _cap_auto > 0:
                 sets = min(sets, _cap_auto)   # sets<=0 的缺口闸语义保持不变
@@ -960,7 +985,16 @@ class AutoRefine:
                 self._last_sets[plan.tid] = 0     # 界面「套数」如实显示 0（DP 路径不写这个字典）
                 return 0
             self._freeze_msg = ""      # 已解冻：下次再冻要重新记一行
-            sets = min(sets, max(1, free // max(1, len(plan.ids))))
+            if _dp_win:
+                # ★★ 2026-11-16：DP 路径**不再用箱位除整套张数**去钳套数。
+                #   `free // len(ids)` 把「同时占满一整套 9 张」当必要成本，实际
+                #   一套的卡是滚动的（顶层在炉、40 面在炉/在箱、底卡投炉即消耗），
+                #   真机 07 格空位被算成 0 套 → 窗口失效 → 3 主炉空转 2h。
+                #   箱位可行性交给 DP 自己的 box 建模（`_pool_ok` / `box_cap` /
+                #   死锁报告），并行度由 DP 解出来 —— 用户 2026-11-16 定调。
+                pass
+            else:
+                sets = min(sets, max(1, free // max(1, len(plan.ids))))
         self._last_sets[plan.tid] = sets
         return sets
 

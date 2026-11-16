@@ -70,9 +70,18 @@ class ThemeModel:
             return []
         return [int(m) for m in (c[3], c[4], c[5]) if m]
 
-    def net_plan(self, stock, pending, sets: int = 1):
-        """净需求 (runs, buy)，直接复用 ThemePlan。"""
-        return self.tp.net_plan(stock, pending, sets=sets)
+    def net_plan(self, stock, pending, sets: int = 1, mid_collect: bool = True):
+        """净需求 (runs, buy)，直接复用 ThemePlan。
+
+        `mid_collect`（2026-11-16，DP 专用口径）：False = 中间层（40 面卡）
+        不额外算一份「进集卡册」的收藏需求，只按顶层合成消耗传导 →
+        一套 150 面正好 3 张 40 面（各 1 张），底卡 9 张。
+        True = 旧口径（中间层也按 sets 收藏一份 → 一套 6 张 40 面、23 张底卡）。
+        贪心侧因 `_spare` 死保必须用旧口径；DP 无该机制，用精确口径后
+        紧箱（9 格）才能排出多套并行（实测 1652 三套 9 格 4.40h）。
+        """
+        return self.tp.net_plan(stock, pending, sets=sets,
+                                mid_collect=mid_collect)
 
     def cp_order(self) -> list:
         """关键路优先序（RCPSP 经典 CP 规则）：cp(c)=secs(c)+max(cp(父卡))，

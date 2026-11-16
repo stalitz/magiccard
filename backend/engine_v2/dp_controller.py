@@ -234,6 +234,22 @@ class DPTickController:
         _ps = os.environ.get("MC_PIPE_SETS")
         self.pipe_sets = (self.buy_free if _ps is None else _ps == "1")
         self.pipe_min_free = int(os.environ.get("MC_PIPE_MIN_FREE") or 6)
+        # ★★ 2026-11-16 用户定调（真机 10708702 实测空窗 2h 后提出）：
+        #   「1★ 这种短时卡，有可能同时炼 4 套哦，最多 5 个炉，可能都在炼；
+        #     编排的时候就应该把这种状态放进去，不然怎么成流水线」。
+        #   旧实现 pipe_sets 只把 sets 从 1 提到 **2**（原地 `sets = 2`），
+        #   于是「当前套只剩最后一张顶层在炉」时最多再叠一套 → 4 主炉里 3 个整闲。
+        #   `MC_PIPE_SETS_MAX` = 提套目标并行度（默认 2 = 逐位复现旧行为）。
+        #   实际目标取 `min(该值, 空闲主炉数 + 1)`，与 `_calc_sets_raw` 的炉位口径一致。
+        self.pipe_sets_max = max(2, int(os.environ.get("MC_PIPE_SETS_MAX") or 2))
+        # 跨轮重叠峰值的闸门倍数：旧验收线 `峰值 < 2N`；并行 N 套时上界须同步放宽，
+        # 否则提套永远被 `_two_n_ok` 拦下（默认 2 = 旧行为）。
+        self.pipe_2n_k = max(2, int(os.environ.get("MC_PIPE_2N_K") or 2))
+        # ★★ 2026-11-16 需求口径（**默认保持旧口径 1**）：曾以为中间层的收藏份是
+        #   冗余，实测砍掉后全档仿真崩溃（1★ 单轮 5.65h → 250h、done=0）——
+        #   因为上交要求「整套每张套内卡各 1 张同在箱」，40 面那份是**交付必需**，
+        #   不是多余收藏。`MC_DP_MID_COLLECT=0` 仅保留作消融开关。
+        self.mid_collect = os.environ.get("MC_DP_MID_COLLECT", "1") == "1"
         # ★ 紧箱物理无解时停手报告（2026-11-15 全矩阵 A/B PASS 后上线）。
         #   默认开；`MC_DP_DEADLOCK_REPORT=0` 可关闭复现旧行为（A/B 用）。
         self.deadlock_report = os.environ.get("MC_DP_DEADLOCK_REPORT", "1") == "1"
@@ -302,7 +318,8 @@ class DPTickController:
         # JIT 门 + 腾箱统计（2026-10-25 紧箱根治，见 _jit_due/_box_compaction）
         self.jit_blocked = 0            # JIT 门拦下的买卡 op 数（未到需求不买）
         self.buy_fallback = 0           # 「ops 空、只剩底卡要买」时按 buy0_map 兜底的次数
-        self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时把 sets 提到 2 的次数
+        self.pipe_sets_hits = 0         # 「本轮排满但还有轮次」时提套的次数
+        self.pipe_sets_last = 0         # 最近一次提套后实际排的套数（诊断用）
         self.pipe_sets_blocked = 0      # 提套会吃掉本套合成卡而被拦下的次数（见 _pipe_consumes_set）
         # ★ 2026-11-09 用户验收线：跨轮重叠峰 < 2N。pipe_sets 在 sets_fn 之后才提套，
         #   _calc_sets 的箱位闸钳不到它，故闸放在 _solve_plan 的最终 sets 处。
@@ -435,7 +452,8 @@ class DPTickController:
         if avail.get(top, 0) <= 0:
             return False           # 本套顶层还没到手 = 没到「快要集齐」的窗口
         try:
-            runs2, _ = m.net_plan(avail, dict(pending), sets=2)
+            runs2, _ = m.net_plan(avail, dict(pending), sets=2,
+                                  mid_collect=self.mid_collect)
         except Exception:          # noqa: BLE001  算不出来就保守拦下
             return True
         set_ids = set(m.ids)
@@ -509,39 +527,51 @@ class DPTickController:
             # 85×3 AD −1.23h，单轮侧全档逐位不变（见 __init__ 注释）。
             self._left_rounds = (left if self._left_rounds is None
                                  else min(self._left_rounds, left))
-            runs, buys = m.net_plan(avail, dict(pending), sets=sets)
-            # ★★ 2026-10-28 流水线一环（见 `__init__` 的 `pipe_sets` 注释）：
-            #   本轮的净需求（非底卡）已经归零 —— 顶层在炉/已炼完，但**还有剩余
-            #   轮次**且换卡箱不紧 → 现在就把下一环排进来。否则 ops 为空、执行层
-            #   整 tick 零动作，而箱里的 40 面恰好就是下一套的料（可立即开炉）。
-            #   只提一格（sets=2），不铺满：铺满会叠箱 → collect 不触发 → 死锁。
+            runs, buys = m.net_plan(avail, dict(pending), sets=sets,
+                                    mid_collect=self.mid_collect)
+            # ★★ 2026-11-16 用户定调（真机 10708702 实测「等最后一张顶层卡时 3 主炉
+            #   整闲 2h」后提出）：「1★ 短时卡有可能同时炼 4 套，最多 5 个炉，可能
+            #   都在炼；编排的时候就应该把这种状态放进去，不然怎么成流水线」。
+            #   旧实现只把 sets 从 1 提到 **2**（`sets = 2`），并行度被硬钉死 →
+            #   4 主炉里最多 2 套在制。这里改成提到 `pipe_sets_max`（默认 2 =
+            #   逐位复现旧行为），并同时受**空闲主炉数 + 1** 与箱位闸约束。
+            _ps_cap = self.pipe_sets_max
+            if free_main:
+                _ps_cap = min(_ps_cap, int(free_main) + 1)
+            _ps_cap = max(2, _ps_cap)
             if (self.pipe_sets and sets > 0 and left >= 2
-                    and box_free >= self.pipe_min_free and sets < 2):
+                    and box_free >= self.pipe_min_free and sets < _ps_cap):
                 _nd = sum(n for c, n in runs.items() if not m.is_base(c))
-                # ★★ 2026-11-09 用户验收线：跨轮重叠峰值必须 < 2N。
-                #   pipe_sets 是在 sets_fn 返回**之后**把 1 提到 2 的，_calc_sets
-                #   的箱位闸钳不到它 → 闸必须放在最终 sets 定下来的这里。
-                #   本套已在箱/在途张数 + 再排一套(N) 达到 2N 就不再提套。
-                _two_n_ok = True
-                if self.pipe_2n and _nd <= 0:
+                # ★★ 2026-11-09 用户验收线：跨轮重叠峰值必须 < 2N（并行度提高后
+                #   由 `MC_PIPE_2N_K` 同步放宽）。pipe_sets 是在 sets_fn 返回**之后**
+                #   提套的，`_calc_sets` 的箱位闸钳不到它 → 闸必须放在这里。
+                #   只数**箱内**占位：pending 是已投炉/在途（投炉时已从箱移除），
+                #   不算峰值库存。按本套卡 id 过滤，多套同炼时别把别套的卡算进来。
+                if _nd <= 0:
                     _own = set(m.ids)
-                    # 只数**箱内**占位：pending 是已投炉/在途（投炉时已从箱移除），
-                    # 不算峰值库存。按本套卡 id 过滤，多套同炼时别把别套的卡算进来。
                     _inflight = sum(int(n) for c, n in box_stock.items()
                                     if int(c) in _own and n)
-                    _two_n_ok = (_inflight + len(_own)) < 2 * len(_own)
-                    if not _two_n_ok:
-                        self.pipe_sets_blocked_2n += 1
-                if not _two_n_ok:
-                    pass                    # 保持 sets=1，本轮不再叠第二套
-                elif _nd <= 0 and self._pipe_consumes_set(m, avail, pending):
-                    # ★ 2026-11-05 用户定调：「流水线不能影响快要集齐的套」。
-                    #   提套会把本套的合成卡当下一套的素材吃掉 → 跳过本次提套。
-                    self.pipe_sets_blocked += 1
-                elif _nd <= 0:
-                    sets = 2
-                    runs, buys = m.net_plan(avail, dict(pending), sets=sets)
-                    self.pipe_sets_hits += 1
+                    _tgt = sets
+                    while _tgt < _ps_cap:
+                        # 每多叠一套 = 多吞 N 张箱位 → 按 k*N 判峰值
+                        if (self.pipe_2n
+                                and not ((_inflight + len(_own) * (_tgt + 1 - sets))
+                                         < self.pipe_2n_k * len(_own))):
+                            self.pipe_sets_blocked_2n += 1
+                            break
+                        if self._pipe_consumes_set(m, avail, pending):
+                            # ★ 2026-11-05 用户定调：「流水线不能影响快要集齐的套」。
+                            #   提套会把本套的合成卡当下一套的素材吃掉 → 停止提套。
+                            self.pipe_sets_blocked += 1
+                            break
+                        _tgt += 1
+                    if _tgt > sets:
+                        sets = _tgt
+                        runs, buys = m.net_plan(avail, dict(pending),
+                                                sets=sets,
+                                                mid_collect=self.mid_collect)
+                        self.pipe_sets_hits += 1
+                        self.pipe_sets_last = sets
             for c, nd in runs.items():
                 if not m.is_base(c):
                     need[c] += nd
