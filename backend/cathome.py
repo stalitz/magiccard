@@ -68,6 +68,7 @@ def _save_run(tag: str, payload: dict) -> None:
 
 CANDY_EFFECT = {1: 10, 2: 20, 3: 50}   # 当日实打：小+10 / 中+20；大+50 为用户口述
 MOOD_TARGET = 80                        # 用户要求：玩耍保证心情 80 以上
+CANDY_PER_CAT_MAX = 10                  # 单只猫单类糖果一次最多连喂几颗（够 80：小 8 / 中 4 / 大 2）
 GACHA_CANDY_IDX = 2                     # 积分兑换 idx=2 = 大糖果（6 积分）
 
 # 金币福利 · 兑红宝石（bisai3.har 实证）：
@@ -320,52 +321,75 @@ ALL_SKIPS = [
 ]
 
 
-def _candy_plan(mood: int, target: int = MOOD_TARGET) -> list:
-    """给心情 mood 的猫挑一套糖果组合（增量 CANDY_EFFECT）。
+def _candy_plan(mood: int, target: int = MOOD_TARGET, exclude=()) -> list:
+    """给心情 mood 的猫算出**候选方案列表**（按「浪费增量 → 颗数」升序），供逐级降级。
 
-    目标：达标且浪费最少 —— 枚举 ≤3 颗的组合，按（超出量, 颗数）排序取最优。
+    每个方案 = {"candy_type": ct, "n": 连喂颗数, "waste": 超出量}，只用单一糖果类型。
+
+    ★ 2026-11-16 修复：旧版只枚举「≤3 颗」的组合，猫心情 0（需 +80）时 3 颗内最大增量
+    只有 20×3 = 60，**永远无解** → 兜底硬返回 [3]（1 颗大糖果）。大糖果经常是 0 个，
+    而服务端对「没有的糖果类型」只回 system busy → 喂必失败；`feed_smart` 又一见失败就
+    整体 return，于是「小糖果 25 颗、中糖果 18 颗明明够，却一只猫都喂不到 80」。
+    现在按每种类型单独算够 need 所需颗数，全部留作候选，喂不动就换下一种。
     """
     need = target - mood
     if need <= 0:
         return []
-    best = None
-    for a in range(4):
-        for b in range(4 - a):
-            for c in range(4 - a - b):
-                if a + b + c == 0 or a + b + c > 3:
-                    continue
-                gain = a * CANDY_EFFECT[1] + b * CANDY_EFFECT[2] + c * CANDY_EFFECT[3]
-                if gain < need:
-                    continue
-                key = (gain - need, a + b + c)
-                if best is None or key < best[0]:
-                    best = (key, [1] * a + [2] * b + [3] * c)
-    return (best[1] if best else [3])   # 兜底：喂一颗大的
+    out = []
+    for ct, eff in CANDY_EFFECT.items():
+        if ct in exclude:
+            continue
+        n = -(-need // eff)                       # ceil(need / eff)
+        if n <= 0 or n > CANDY_PER_CAT_MAX:
+            continue
+        out.append({"candy_type": int(ct), "n": int(n), "waste": int(n * eff - need)})
+    out.sort(key=lambda x: (x["waste"], x["n"]))
+    return out
 
 
 async def feed_smart(session, threshold: int = MOOD_TARGET) -> dict:
-    """把所有猫的心情喂到阈值（act=11）。返回逐条记录；某只失败即停（防刷屏）。"""
+    """把所有猫的心情喂到阈值（act=11），返回逐条记录。
+
+    ★ 2026-11-16 修复两点（旧版「糖果够却喂不到 80」的根因之二）：
+    1) 某颗糖喂不动时，只把该糖果类型在**本次调用内**判死（dead），换下一种继续喂；
+       不再一失败就整体 return —— 否则第一只猫失败会让后面所有猫一颗都喂不上。
+    2) 单只猫喂不到阈值只记入 shortfalls，不阻断其它猫；全部试尽仍不够才 ok=False。
+    """
     uin = _plain_uin(session)
     st = await _act(session, EP_TRAVEL_MATCH, 1, opuin=uin)
     cats = (st.get("data") or {}).get("travel_elf_arr") or []
-    steps, fed_any = [], False
+    steps, fed_any, dead, shortfalls = [], False, set(), []
     for c in cats:
         elf, mood = c.get("elf_id"), c.get("cat_mood") or 0
-        plan = _candy_plan(mood, threshold)
-        if not plan:
-            steps.append({"elf_id": elf, "mood": mood, "msg": "无需喂"})
+        cur = int(mood or 0)
+        if cur >= threshold:
+            steps.append({"elf_id": elf, "mood": cur, "msg": "无需喂"})
             continue
-        for ct in plan:
+        for _ in range(20):                        # 死循环保护（每颗都要发请求）
+            plan = _candy_plan(cur, threshold, exclude=dead)
+            if not plan:
+                break
+            ct = plan[0]["candy_type"]
             r = await _act(session, EP_TRAVEL_MATCH, 11, elf_id=int(elf), candy_type=int(ct))
             d = r.get("data") or {}
             ok = r.get("ok") and d.get("code") in (0, None)
+            nm = d.get("cat_mood")
             steps.append({"elf_id": elf, "candy": ct, "ok": ok,
-                          "mood": d.get("cat_mood"),
+                          "mood": int(nm) if (ok and nm is not None) else cur,
                           "msg": d.get("desc") or r.get("message") or ""})
             if not ok:
-                return {"ok": False, "steps": steps,
-                        "message": f"猫{elf} 喂糖果{ct} 失败（{d.get('desc') or r.get('message') or '可能糖果不足'}）"}
+                dead.add(ct)                       # 该类型没货/不可用 → 本次不再试
+                continue
             fed_any = True
+            cur = int(nm) if nm is not None else cur + CANDY_EFFECT.get(ct, 0)
+            if cur >= threshold:
+                break
+        if cur < threshold:
+            shortfalls.append(f"猫{elf} 只到心情 {cur}/{threshold}")
+    if shortfalls:
+        tried = ("、".join(f"糖果{t}" for t in sorted(dead)) + " 喂不动；") if dead else ""
+        return {"ok": False, "steps": steps, "fed": fed_any,
+                "message": f"{tried}{'，'.join(shortfalls)}"}
     return {"ok": True, "steps": steps, "fed": fed_any}
 
 
@@ -443,11 +467,13 @@ async def arena_auto(session, max_flush: int = 4, feed: bool = True):
         f = await feed_smart(session)
         fed_n = len([s for s in f.get("steps") or [] if s.get("candy")])
         yield emit({"act": "feed", "ok": f.get("ok", False),
-                    "msg": f"先喂猫到 80（喂了 {fed_n} 颗）"})
+                    "msg": f"先喂猫到 80（喂了 {fed_n} 颗）"
+                           + ("" if f.get("ok") else f"：{f.get('message') or '有猫未达标'}")})
+        # ★ 2026-11-16：喂猫未达标不再中止竞技。两者互相独立，旧版一失败就 return，
+        #   会让「糖果不够/某类型没货」连带把当天比赛也停掉（用户实测 3822843 就是这情况）。
         if not f.get("ok"):
-            yield emit({"act": "arena:error", "ok": False,
-                        "msg": f.get("message") or "喂猫失败，已中止竞技"})
-            return
+            yield emit({"act": "feed:warn", "ok": True,
+                        "msg": "有猫没喂到 80，但继续跑竞技（喂猫与比赛互不影响）"})
 
     # 开门配额
     st0 = await _act(session, EP_TRAVEL_PVP, 1)
@@ -673,12 +699,13 @@ async def run_all(session, gold: bool = False):
                 "msg": (f"扭蛋：{r['content']}" if r.get("content") else "")
                        or r.get("message") or "扭蛋"})
 
-    # 3) 喂猫到 80；糖不够就先用积分换大糖果再喂
+    # 3) 喂猫到 80；有糖果类型喂不动（多半是用完了）就先用积分换 1 颗大糖果再喂
     f = await feed_smart(session)
-    if not f.get("ok") and "不足" in (f.get("message") or ""):
+    blocked = [s for s in (f.get("steps") or []) if s.get("candy") and not s.get("ok")]
+    if not f.get("ok") and blocked:
         c = await exchange_candy(session, 1)
         if c.get("ok"):
-            yield emit({"act": "exchange", "ok": True, "msg": "糖果不足，先用 6 积分换 1 颗大糖果"})
+            yield emit({"act": "exchange", "ok": True, "msg": "糖果喂不动，先用 6 积分换 1 颗大糖果"})
             f = await feed_smart(session)
     n_candy = len([s for s in f.get("steps") or [] if s.get("candy")])
     yield emit({"act": "feed", "ok": bool(f.get("ok")),

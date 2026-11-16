@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261116a";
+const APP_VER = "20261116b";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -5696,6 +5696,7 @@ function homeLogStep(stp) {
   else if (stp.act === "gacha") mlog(`[扭蛋机] ${m}`, stp.ok ? "ok" : "warn");
   else if (stp.act === "exchange") mlog(`[扭蛋机] ${m}`, "ok");
   else if (stp.act === "feed") mlog(`[玩耍] ${m}（竞技前自动）`, stp.ok ? "" : "warn");
+  else if (stp.act === "feed:warn") mlog(`[玩耍] ${m}`, "warn");
   else if (stp.act === "gold") mlog(`[金币福利] ${m || "兑红宝石"}`,
                                  stp.ok ? (stp.skipped ? "" : "ok") : "err");
   else if (stp.act === "arena:state") mlog(`[竞技] ${m}`, "ok");
