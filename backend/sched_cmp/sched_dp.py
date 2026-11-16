@@ -69,6 +69,17 @@ def _pool_cfg(inst, n):
     return (float(cc), float(sc), is_base, bs, int(n))
 
 
+# ★★ 2026-11-16 用户定调（真实物理）：「在炉/已炼好没取的卡**不占卡箱**」。
+#   真机炼成后卡停在炉台待取（`stovebox` 里挂着），不点「取卡」就不进箱；
+#   箱位不够时可以一直不取，等箱位腾出来再取。所以箱容约束只能算
+#   「箱内实卡 + 在途买卡」，**不能**把在炉产物提前预留下来。
+#   旧口径 `run_out`（在炉产物）计入换卡箱/保险箱占用 → 紧箱下必然误判超容，
+#   搜索把「箱满」当死路（inf_box/inf_pool 暴涨、leaf=0）。这也解释了为什么
+#   之前单改「落箱延后」零效果：真正的闸在这两处预留上。
+#   默认 0 = 新口径（在炉不占箱）；1 = 旧口径（A/B 消融用）。
+RUNOUT_OCC = int(_os.environ.get("MC_DP_RUNOUT_OCC", "0") or 0)
+
+
 def _pool_chg(cfg, stock, buy_inflight=0, run_out=0):
     """换卡箱被计划卡占用的格数（含保险箱溢出 + 在途买卡 + 在炉产物预留）。"""
     if cfg is None:
@@ -78,7 +89,7 @@ def _pool_chg(cfg, stock, buy_inflight=0, run_out=0):
     r = sum(float(stock[i]) for i in range(n) if not is_base[i])
     bst = float(sum(bs))
     free_s = max(0.0, sc - bst)
-    r_eff = r + float(run_out)
+    r_eff = r + RUNOUT_OCC * float(run_out)
     overflow = max(0.0, r_eff - free_s)
     return (b - bst) + float(buy_inflight) + overflow
 
@@ -89,7 +100,7 @@ def _pool_sto(cfg, stock, run_out=0):
     _cc, sc, is_base, bs, n = cfg
     r = sum(float(stock[i]) for i in range(n) if not is_base[i])
     bst = float(sum(bs))
-    return bst + min(r + float(run_out), max(0.0, sc - bst))
+    return bst + min(r + RUNOUT_OCC * float(run_out), max(0.0, sc - bst))
 
 
 def _pool_ok(cfg, stock, buy_inflight=0, run_out=0):
@@ -102,6 +113,8 @@ def _pool_ok(cfg, stock, buy_inflight=0, run_out=0):
 
 
 POOL_REJECT = [0]        # 被三空位状态条件拒绝的分支数（证明约束真的生效）
+DEAD_LOG = []            # 死路状态采样（MC_DP_DEAD_LOG=N 时记录前 N 个，排查用）
+DEAD_LOG_MAX = int(_os.environ.get("MC_DP_DEAD_LOG", "0") or 0)
 POOL_EVAL = [0]          # _pool_ok 被求值次数（UB / dfs 都算）
 POOL_MAX = [0.0, 0.0]    # 已接受状态里换卡箱 / 保险箱的最大占用
 
@@ -241,8 +254,22 @@ def _collect_ready(mclass, n, need, running_types):
     return True
 
 
+# ★★ 2026-11-16 用户定调（第二处漏掉的确定性预囤）：底卡需求不能按
+#   「剩余待炼次数」放大。真机上底卡是**炼一炉买一炉**的消耗品——买来就投炉，
+#   箱里永远只有「正在准备的这一轮」的底卡。旧口径 `k * need[i]` 把 3 套的
+#   底卡一次买齐（1652 一套正好 9 张底卡 → 3 套 27 张），9 格换卡箱当场无解，
+#   于是「9 格炼 3 套」在模型里被判死（inf_dead 数万、leaf=0）。
+#   JIT 口径只备一轮（k），后续轮次由后续决策点补买 —— 买卡量因此完全由
+#   开工向量派生，不再是搜索之外的第二套贪心。默认 1 = 新口径；0 = 旧口径。
+# ★★ 2026-11-16 实测结论：JIT（只备一轮料）**对紧箱可解毫无影响**——
+#   `BUY_JIT=0/1` 在 1652 的 ch=7/9/12 上逐位相同（紧箱能解靠的是
+#   「上交」「在炉不占箱」和两处扣减修复）。而 JIT 在仿真上让宽松箱多买
+#   几轮、常规档 +1.2h（1★ 4.42→5.64）→ 默认关闭，仅作消融开关。
+BUY_JIT = int(_os.environ.get("MC_DP_BUY_JIT", "0") or 0)
+
+
 def _buy_demand(n, mclass, mats, stock, need, running_cnt,
-                collect_ready=True):
+                collect_ready=True, unit_cap=None, jit=None):
     """各买卡类型的 lazy 需求（现在就该买的量）。
 
     readyish 精炼（need>0、除底卡外喂料全在箱）或 almost-readyish（缺的复合喂料
@@ -252,8 +279,10 @@ def _buy_demand(n, mclass, mats, stock, need, running_cnt,
     collect_ready 缺省 True = 旧函数行为；整体开关在 inst["collect_gate"]
     （缺省启用，False = 逐位复现改动前）。
     """
+    _jit = BUY_JIT if jit is None else bool(jit)
     dem = {}
     ref_need = False
+    units = 0
     # soon[j]：复合卡 j 即将到货（在炉，或其喂料已齐、本决策点即可开炼）
     soon = {}
     for j in range(n):
@@ -267,25 +296,33 @@ def _buy_demand(n, mclass, mats, stock, need, running_cnt,
         if need[i] <= 0 or 0 not in _cls_of(mclass, i):
             continue
         ref_need = True
+        if unit_cap is not None and units >= unit_cap:
+            continue          # 本轮备料份数已够：不再为这个精炼加底卡需求
         ok = True
         add = {}
         for j, k in mats[i]:
             if stock[j] >= k:
                 continue
             if 1 in _cls_of(mclass, j):
-                add[j] = add.get(j, 0) + k * need[i]   # × 待炼次数
+                # 一轮的量（k），不是 need[i] 轮的量 —— 见 BUY_JIT 注释
+                add[j] = add.get(j, 0) + k * (1 if _jit else need[i])
             elif soon.get(j):
                 continue          # 在炉/可立即开炼的复合喂料：不挡 readyish
             else:
                 ok = False        # 缺暂不能到货的复合喂料 → 现在买太早
                 break
         if ok:
+            units += 1
             for j, k in add.items():
                 dem[j] = dem.get(j, 0) + k
     if not ref_need and collect_ready:
         for b in range(n):
             if 1 in _cls_of(mclass, b) and need[b] > 0:
-                dem[b] = need[b]
+                # ★ 2026-11-16：JIT 口径下逐轮补 1 张（need 递减保证终止）。
+                #   旧版 `dem[b] = need[b]` 一次买齐 → 紧箱必炸（9 格实测：
+                #   need 只剩 1 张、stock 也已有 1 张时仍被 `dem > stock` 挡下，
+                #   永远补不上最后一张 → inf_dead 数万、leaf=0）。
+                dem[b] = 1 if BUY_JIT else need[b]
     return dem
 
 def _up_cp(dur, mats, n):
@@ -423,9 +460,10 @@ def _ub_schedule(inst, init_stock=None, init_running=None,
       dem = _buy_demand(n, mclass, mats, stock, need, running_cnt,
                         collect_ready=gate)
       box_used = sum(stock) + len(buy_run)
-      # 每类型上限 = min(剩余总需求, readyish 需求) - 箱内（dem 封顶保 JIT）
-      caps = {b: min(need[b], dem[b]) - stock[b]
-              for b in sorted(dem) if dem[b] > stock[b]}
+      # 每类型上限 = min(剩余总需求, readyish 需求)。dem 已扣库存（同 dfs 注释），
+      # 再减 stock 会二次扣减 → 最后一张底卡永远买不到（2026-11-16 修）。
+      caps = {b: min(need[b], dem[b])
+              for b in sorted(dem) if dem[b] > 0}
       # ★ 轮转买 + 落位保留（2026-10-25 紧箱根治，对齐 dfs 与贪心纪律）：
       # ① 每轮每种各买 1 张——旧版按类型序把一种买到上限 → 箱被单类型塞满
       #    → 3 合 1 trio 凑不齐 → 列表调度死锁 → 死锁保护强制买卡（无箱检）
@@ -957,7 +995,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     EQ_LEFT = [int(_os.environ.get("MC_LEX_EQ_NODES", "300") or 300)]
     DIAG = {"lb_prune": 0, "eq_allowed": 0, "eq_break": 0,
             "vec": 0, "leaf": 0, "inf_pool": 0, "inf_box": 0,
-            "inf_dead": 0}
+            "inf_dead": 0, "deliver": 0}
     stats["eq_search"] = EQ_SEARCH
     t0 = _t.perf_counter()
     memo = memo if (use_memo and memo is not None) else {}
@@ -995,6 +1033,18 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
 
     def key_of(need, stock, running_rel):
         return (need, stock, running_rel)
+
+    # ★★ 2026-11-16 用户定调（第三处漏掉的动作）：**上交**。
+    #   真机「集齐一套就上交」会把整套卡从箱里拿走 → 箱位立刻释放，下一套继续。
+    #   旧模型没有这个动作：所有套的成品必须同时在箱，2 套即撑爆换卡箱
+    #   （实测 1652 两套 9 格：stock 里已经躺着一整套 + 9 张底卡，却还差 1 张
+    #   底卡买不进 → inf_dead 1.3 万、leaf=0）。这是「9 格炼 3 套」缺的最后一环。
+    #   规则（确定性、零耗时、必优）：每种类型都 ≥1 张且顶层卡已产出 → 扣各 1 张。
+    #   只在顶层在箱时判，保证「交掉的 40 面/底卡是该套的交付份」，不会吃掉
+    #   下一张顶层还在等的素材。
+    deliver_on = _os.environ.get("MC_DP_DELIVER", "1") == "1"
+    _depths = inst.get("depth") or [0] * n
+    _top_i = max(range(n), key=lambda c: _depths[c]) if n and deliver_on else -1
 
     def path_to_sched(path):
         out = []
@@ -1098,13 +1148,50 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         # 字典序第二级：本次调用沿途（公共前缀）的箱占用轨迹。occ 由状态唯一
         # 决定（sum(stock)+在炉数），故 memo key 相同则入口 occ 相同，后缀峰值
         # 是状态的纯函数 → 字典序具备最优子结构。
-        cur_occ = float(sum(stock) + len(running_rel))
+        cur_occ = float(sum(stock) + sum(1 for _i, _f, _c in running_rel
+                                         if _c != 3))
         run_peak = cur_occ
         while True:
+            # ---- 取卡：held（class 3 = 已炼好但箱满没取）在箱位允许时立刻落箱 ----
+            # ★★ 2026-11-16 用户定调：「后面如果第 3 套 540 好了，但第 2 套还没好，
+            #   可以先不取」。真机上炼成卡停在炉台待取，**不取就不进箱**，箱位
+            #   腾出来再取（取卡不耗时间）。旧模型收卡强制落箱、超容即判死 →
+            #   9 格换卡箱下炼成卡一出来就把分支打死（inf_dead 数万、leaf=0）。
+            #   held 卡只能等箱位、不能直接投炉（真机必须先取出），故不进 _vectors。
+            if any(c2 == 3 for _i2, _f2, c2 in running_rel):
+                ns = list(stock)
+                nr = []
+                moved = False
+                for i2, f, c2 in running_rel:
+                    if c2 != 3:
+                        nr.append((i2, f, c2))
+                        continue
+                    ns[i2] += 1
+                    if POOL_D is not None and not _pool_ok(POOL_D,
+                                                           tuple(ns), 0, 0):
+                        ns[i2] -= 1
+                        nr.append((i2, f, c2))      # 还是没位置，继续挂着
+                    else:
+                        moved = True
+                if moved:
+                    stock = tuple(ns)
+                    running_rel = tuple(nr)
+                    continue
+            # ---- 上交：集齐一套就交掉，释放箱位（真机行为，零耗时）----
+            if _top_i >= 0 and stock[_top_i] >= 1 \
+                    and all(stock[_i3] >= 1 for _i3 in range(n)):
+                stock = tuple(s - 1 for s in stock)
+                DIAG["deliver"] += 1
+                continue
             # ---- 叶子：全部开工完 → 额外耗时 = 在炉最晚剩余 ----
             if not any(need):
                 DIAG["leaf"] += 1
-                fin = max([0.0] + [f for _i, f, _c in running_rel])
+                if any(_c2 == 3 for _i2, _f2, _c2 in running_rel):
+                    # 卡已全部炼完，但还有 held 卡取不出来（箱位永不够）→
+                    # 真机上交要求成品同在箱，这个分支实际不可行。
+                    DIAG["inf_dead"] += 1
+                    return INF, None, INF
+                fin = max([0.0] + [f for _i, f, _c in running_rel if _c != 3])
                 if PURE:
                     # 打平也算解：只要在剪枝上界内，就是 dfs 走出来的完整调度
                     if t + fin <= BOUND_V[0] + 1e-9 \
@@ -1154,15 +1241,24 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             stats["nodes"] += 1
 
             # ---- 收卡：剩余时间 <= 0 的入库存 + 箱容校验 ----
-            if any(f <= EPS for _i, f, _c in running_rel):
+            # 箱位不够就**先不取**（class 3 挂在炉台，不占箱），等后续腾位再取。
+            if any(f <= EPS and c2 != 3 for _i, f, c2 in running_rel):
                 ns = list(stock)
                 nr = []
                 for i2, f, c2 in running_rel:
-                    if f <= EPS:
-                        ns[i2] += 1
-                    else:
+                    if c2 == 3:
                         nr.append((i2, f, c2))
-                if sum(ns) > box_cap + EPS:
+                        continue
+                    if f > EPS:
+                        nr.append((i2, f, c2))
+                        continue
+                    ns[i2] += 1
+                    if POOL_D is not None and not _pool_ok(POOL_D,
+                                                           tuple(ns), 0, 0):
+                        ns[i2] -= 1
+                        nr.append((i2, 0.0, 3))     # 箱满：先不取
+                    # else：正常落箱
+                if RUNOUT_OCC and sum(ns) > box_cap + EPS:
                     DIAG["inf_box"] += 1
                     return INF, None, INF    # 落箱超容 → 该分支不可行（DP 改走 JIT）
                 stock = tuple(ns)
@@ -1179,8 +1275,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             gate = (not GATE) or _collect_ready(
                 mclass, n, need,
                 [i2 for i2, _f2, c2 in running_rel if c2 in (0, 2)])
-            dem = _buy_demand(n, mclass, mats, stock, need, running_cnt,
-                              collect_ready=gate)
+            # 买卡需求（宽/紧箱两段式，见下方 `_wide` 注释）
             items = _ready_items(stock, need)
             idle = [0, 0, 0]
             for _i2, _f2, c2 in running_rel:
@@ -1189,6 +1284,14 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             idle[0] = M - idle[0]
             idle[1] = S - idle[1]
             idle[2] = sc - idle[2]
+            # ★★ 2026-11-16 买卡量按箱位余量自适应（用户定调「并行度由 DP 解」）：
+            #   换卡箱**装得下全部 readyish 缺口** → 一次买齐（旧口径，买卡次数少，
+            #   常规档 1★ 4.42h 不退化）；装不下 → 只备「本轮能开的炉数」那一份，
+            #   后续炉次在后续决策点补买（真机底卡是炼一炉买一炉的消耗品）。
+            #   没有这个自适应，紧箱 9 格下 2 套即判 INF（实测 inf_dead 6 万、leaf=0）；
+            #   而无条件 JIT 又让宽松箱多买几轮、常规档 +1.2h（消融实测）。
+            dem = _buy_demand(n, mclass, mats, stock, need, running_cnt,
+                              collect_ready=gate)
 
             # ---- 可采纳下界（相对额外耗时）----
             lb = max([0.0] + [f for _i, f, _c in running_rel])
@@ -1281,15 +1384,32 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 #    塞满 → 3 合 1 trio 永远凑不齐 → 无精炼可开 → 死锁（正是
                 #    贪心侧 2026-10-23 修掉的「多套死锁另一根因」，DP 同款）。
                 #    平衡采购让 trio 尽快成型、被精炼及时消耗、箱位滚动释放。
-                n_run = sum(1 for _i2, _f2, c2 in running_rel
-                            if c2 in (0, 2))
-                # 每类型本轮买量上限 = min(剩余总需求, readyish 需求) - 箱内
-                # （dem 封顶保持 JIT：不囤超出「可炼前沿」的量）
+                n_run = RUNOUT_OCC * sum(1 for _i2, _f2, c2 in running_rel
+                                         if c2 in (0, 2))
+                # 每类型本轮买量上限 = min(剩余总需求, readyish 需求)。
+                # ★★ 2026-11-16 修双重扣减（紧箱死锁根因，实测 1652 两套 9 格：
+                #   need=(…,1) stock=(…,1) 卡在最后一张底卡上，inf_dead 6 万）。
+                #   `dem` 在 `_buy_demand` 里已经跳过 stock 充足的喂料
+                #   （`if stock[j] >= k: continue`）→ dem 是「扣过库存的缺口」，
+                #   再 `- stock[b]` 等于二次扣减，于是最后一张永远买不到：
+                #   买 1 张 → need 从 2 减到 1、stock 从 0 变 1 → 下一决策点
+                #   caps = min(1,1) - 1 = 0 → 永不补买 → 死路。
                 caps = {}
                 for b in range(n):
-                    if 1 in _cls_of(mclass, b) and dem.get(b, 0) > stock[b]:
-                        caps[b] = min(need[b], dem[b]) - stock[b]
+                    if 1 in _cls_of(mclass, b) and dem.get(b, 0) > 0:
+                        caps[b] = min(need[b], dem[b])
                 bv = []
+                # ★★ 2026-11-16：本次已买张数必须累加进 `_pool_ok` 的投影。
+                #   旧版固定 `_bi + 1`（只投影「再多 1 张」）→ 一个决策点可以
+                #   连买十几张把换卡箱买爆，状态直接越界；紧箱下随后每个分支
+                #   都在入口 `_pool_ok` 被判 INF（实测 1652 两套 9 格 leaf=0、
+                #   inf_dead 6 万，stock 囤到 17 张底卡）。
+                _bought = 0
+                _bi0 = sum(1 for _x, _f2, c2 in running_rel if c2 == 1) \
+                    if (POOL_FIX and POOL_D is not None) else 0
+                _ro0 = sum(1 for _x, _f2, c2 in running_rel
+                           if c2 in (0, 2)) \
+                    if (POOL_FIX and POOL_D is not None) else 0
                 while (BASEFREE or idle[1] > 0) \
                         and box_now + n_run + 1 <= box_cap + EPS:
                     progressed = False
@@ -1306,10 +1426,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                         #   这里按「再买 1 张」的投影状态逐张校验，两个模型
                         #   的可行域才一致，dfs 才有可行后缀可搜。
                         if POOL_FIX and POOL_D is not None:
-                            _bi = sum(1 for _x, _f2, c2 in running_rel if c2 == 1)
-                            _ro = sum(1 for _x, _f2, c2 in running_rel
-                                      if c2 in (0, 2))
-                            if not _pool_ok(POOL_D, stock, _bi + 1, _ro):
+                            if not _pool_ok(POOL_D, stock,
+                                            _bi0 + _bought + 1, _ro0):
                                 break
                         need[b] -= 1
                         if BASEFREE:
@@ -1333,6 +1451,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                         if cur_occ > run_peak:
                             run_peak = cur_occ
                         caps[b] = cap_left - 1
+                        _bought += 1
                         box_now += 1
                         progressed = True
                     if not progressed:
@@ -1369,11 +1488,21 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # ⚠️ 旧版用 (idle[0]<=0 and idle[1]<=0) or not items 判定，买卡入状态后
                 # S>0：主炉满+有可开工精炼+无买卡需求时 idle[1]>0 条件不成立 → 进分支 →
                 # _vectors 返回空 → best_v=INF 假死路，父节点被迫回溯到「少开工」次优解。
-                if not running_rel:
+                _act = [f for _i2, f, _c2 in running_rel if _c2 != 3]
+                if not _act:
                     DIAG["inf_dead"] += 1
+                    if len(DEAD_LOG) < DEAD_LOG_MAX:
+                        DEAD_LOG.append({"need": tuple(need),
+                                         "stock": tuple(stock),
+                                         "idle": tuple(idle), "t": t,
+                                         "cc": (POOL_D[0] if POOL_D else None),
+                                         "chg": (_pool_chg(POOL_D, stock, 0, 0)
+                                                 if POOL_D else None),
+                                         "run": tuple(running_rel)})
                     return INF, None, INF    # 死路：无机在炉也无卡可开
-                dt = min(f for _i, f, _c in running_rel)
-                running_rel = tuple((i, f - dt, c) for i, f, c in running_rel)
+                dt = min(_act)
+                running_rel = tuple((i, f - dt, c) if c != 3 else (i, f, c)
+                                    for i, f, c in running_rel)
                 t = t + dt
                 t_rel += dt
                 continue
