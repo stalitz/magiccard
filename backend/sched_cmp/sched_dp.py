@@ -969,9 +969,11 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             rec_budget = _rb_cap
     BOUND_V = [ub + PURE_TOL if PURE else ub]
     if PURE:
-        best = {"val": INF, "sched": None, "from": None}
+        best = {"val": INF, "sched": None, "from": None,
+                "deliv": None}
     else:
-        best = {"val": ub, "sched": list(ub_sched), "from": "UB"}
+        best = {"val": ub, "sched": list(ub_sched), "from": "UB",
+                "deliv": None}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None, "capped": 0, "pure": PURE}
     _occ0 = float(sum(init_stock) if init_stock is not None else 0) + len(run_norm)
@@ -1026,6 +1028,43 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #   搜索质量（890 仿真峰值 23→20、15.01→15.00h），不是字典序第二级
     #   本身生效。要让峰值目标真正生效，须把买卡量/时序纳入分支决策。
     lex_peak = _os.environ.get("MC_LEX_PEAK", "1") == "1"
+    # ★★ 2026-11-17 用户定调：「加任何限制都是干扰 DP 的编排，DP 应该自己得出
+    #   首套尽早」。查下来这就是**目标缺项**、不是缺约束：模型里集齐即上交
+    #   （见下方「上交」段），可交付时刻从来没进过目标/平手比较——`best.val`
+    #   只认最后一张卡的完工时刻，打平只比箱峰。于是在「N 套 makespan」这个
+    #   截断问题里，把前几套压到最后一起交**确实是 makespan 最优**，DP 不是算错，
+    #   是我们没告诉它「每套越早交越好」。
+    #   真实运行是**无限轮**（max_rounds=0）：每一套的交付时刻都有价值（释放箱位、
+    #   产金币），正确目标 = 交付时刻向量字典序最小（C1 ≺ C2 ≺ …），makespan
+    #   = C_N 是其分量，故这是 makespan 目标的**纯细化**，不改变可行域、不加闸。
+    #   `MC_LEX_DELIV=1` 开启（默认关，生产逐位不变）。
+    lex_deliv = _os.environ.get("MC_LEX_DELIV", "0") == "1"
+    lex_eq = lex_peak or lex_deliv
+
+    def _dv(row, shift, child):
+        """拼交付相对时刻向量：本调用沿途 row（相对入口）+ 子树 child（平移 shift）。"""
+        if not lex_deliv:
+            return None
+        if child is None:
+            return tuple(row) if row else None
+        if not row:
+            return tuple(shift + d for d in child)
+        return tuple(row) + tuple(shift + d for d in child)
+
+    def _better(cv, cdv, cpk, bv, bdv, bpk):
+        """字典序比较：makespan ≻ 交付时刻向量 ≻ 箱峰。"""
+        if cv < bv - 1e-9:
+            return True
+        if abs(cv - bv) > 1e-9:
+            return False
+        if lex_deliv and cdv is not None:
+            if bdv is None:
+                return True
+            if cdv != bdv:
+                return cdv < bdv
+        if lex_peak:
+            return cpk < bpk - 1e-9
+        return False
 
     def occ_delta(i):
         """单个开工 op 的箱占用净增量（见 sched_peak）。"""
@@ -1138,11 +1177,13 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             if not _pool_ok(POOL_D, stock, _bi, _ro):
                 POOL_REJECT[0] += 1
                 DIAG["inf_pool"] += 1
-                return INF, None, INF
+                return INF, None, INF, None
             POOL_MAX[0] = max(POOL_MAX[0],
                               _pool_chg(POOL_D, stock, _bi, _ro))
             POOL_MAX[1] = max(POOL_MAX[1], _pool_sto(POOL_D, stock, _ro))
         cur_path = path          # 本次调用累计的绝对时间 op 路径（含买卡）
+        t_in = t                 # 入口绝对时刻（交付时刻按「相对入口」入目标）
+        row_deliv = []           # 本次调用沿途的上交时刻（相对 t_in）
         t_rel = 0.0              # 相对本次入口已过去的时间
         own_ops = []             # 本次调用产生的 op [(t_rel, vec)]（买卡 bundle）
         # 字典序第二级：本次调用沿途（公共前缀）的箱占用轨迹。occ 由状态唯一
@@ -1182,6 +1223,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     and all(stock[_i3] >= 1 for _i3 in range(n)):
                 stock = tuple(s - 1 for s in stock)
                 DIAG["deliver"] += 1
+                if lex_deliv:
+                    row_deliv.append(t - t_in)
                 continue
             # ---- 叶子：全部开工完 → 额外耗时 = 在炉最晚剩余 ----
             if not any(need):
@@ -1190,18 +1233,26 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     # 卡已全部炼完，但还有 held 卡取不出来（箱位永不够）→
                     # 真机上交要求成品同在箱，这个分支实际不可行。
                     DIAG["inf_dead"] += 1
-                    return INF, None, INF
+                    return INF, None, INF, None
                 fin = max([0.0] + [f for _i, f, _c in running_rel if _c != 3])
+                _dl = _dv(row_deliv, 0.0, None)
+                _leaf_better = (t + fin < best["val"] - 1e-9
+                                or (lex_deliv
+                                    and abs(t + fin - best["val"]) <= 1e-9
+                                    and _dl is not None
+                                    and (best.get("deliv") is None
+                                         or _dl < best["deliv"])))
                 if PURE:
                     # 打平也算解：只要在剪枝上界内，就是 dfs 走出来的完整调度
-                    if t + fin <= BOUND_V[0] + 1e-9 \
-                            and t + fin < best["val"] - 1e-9:
+                    if t + fin <= BOUND_V[0] + 1e-9 and _leaf_better:
                         best["val"] = t + fin
+                        best["deliv"] = _dl
                         best["sched"] = path_to_sched(cur_path)
                         best["from"] = "DP"
                         DIAG["leaf"] += 1
-                elif t + fin < best["val"] - 1e-9:
+                elif _leaf_better:
                     best["val"] = t + fin
+                    best["deliv"] = _dl
                     best["sched"] = path_to_sched(cur_path)
                     best["from"] = "DP"
                 # ★ 后缀必须包含本次调用已产生的 op（典型：终局专辑底卡买卡
@@ -1212,7 +1263,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 #   偏小 → 幻影最优（1★ 实测 root=6.03h < 真实 7.03h，且违反
                 #   自身总炉时下界 6.5h）。绝对值 t+fin 不受影响（旧代码答案
                 #   正确纯属叶子赋值侥幸）。
-                return t_rel + fin, chain_of(own_ops), run_peak
+                return t_rel + fin, chain_of(own_ops), run_peak, _dl
 
             key = key_of(need, stock, running_rel)
             hit = memo.get(key) if use_memo else None
@@ -1228,12 +1279,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 own_head = chain_of(own_ops)
                 # 兼容外部传入的旧二元组 memo（跨 tick 热启动一般不跨版本）
                 _hp = max(run_peak, hit[2] if len(hit) > 2 else run_peak)
+                _hdv = _dv(row_deliv, t_rel,
+                           hit[3] if len(hit) > 3 else None)
                 if own_head is None:
-                    return t_rel + hit[0], hit[1], _hp
+                    return t_rel + hit[0], hit[1], _hp, _hdv
                 delay = t_rel - own_ops[-1][0]
                 if delay > EPS:
-                    return t_rel + hit[0], link(own_head, (delay, None, hit[1])), _hp
-                return t_rel + hit[0], link(own_head, hit[1]), _hp
+                    return (t_rel + hit[0], link(own_head, (delay, None, hit[1])),
+                            _hp, _hdv)
+                return t_rel + hit[0], link(own_head, hit[1]), _hp, _hdv
             if stats["nodes"] > node_budget or (_t.perf_counter() - t0) > time_budget:
                 stats["bounded"] = True
                 raise _SearchAbort      # 预算耗尽：整体回卷（旧版返 INF 让父循环
@@ -1260,7 +1314,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     # else：正常落箱
                 if RUNOUT_OCC and sum(ns) > box_cap + EPS:
                     DIAG["inf_box"] += 1
-                    return INF, None, INF    # 落箱超容 → 该分支不可行（DP 改走 JIT）
+                    return INF, None, INF, None    # 落箱超容 → 该分支不可行（DP 改走 JIT）
                 stock = tuple(ns)
                 running_rel = tuple(nr)
                 continue
@@ -1341,14 +1395,14 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             if PURE:
                 if not DIVE and t + lb > BOUND_V[0] - 1e-9:
                     DIAG["lb_prune"] += 1
-                    return INF, None, INF
+                    return INF, None, INF, None
             elif t + lb >= best["val"] - 1e-9:
                 DIAG["lb_prune"] += 1
                 if EQ_SEARCH and EQ_LEFT[0] > 0:
                     EQ_LEFT[0] -= 1
                     DIAG["eq_allowed"] += 1
                 else:
-                    return INF, None, INF
+                    return INF, None, INF, None
 
             # ---- 买卡：lazy 规则确定性执行（状态内一等公民，但不分支）----
             # 买卡的 need/stock/箱容/LAG 全在建模里（完工进 running_rel class 1、
@@ -1499,7 +1553,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                                          "chg": (_pool_chg(POOL_D, stock, 0, 0)
                                                  if POOL_D else None),
                                          "run": tuple(running_rel)})
-                    return INF, None, INF    # 死路：无机在炉也无卡可开
+                    return INF, None, INF, None    # 死路：无机在炉也无卡可开
                 dt = min(_act)
                 running_rel = tuple((i, f - dt, c) if c != 3 else (i, f, c)
                                     for i, f, c in running_rel)
@@ -1509,7 +1563,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             best_v = INF
             best_suffix = None        # 相对本次调用入口（含跨迭代全部 own_ops）
             best_memo_suffix = None   # 相对本次迭代顶状态（仅本迭代 op）
-            best_peak = INF           # 字典序第二级：所选后缀的箱占用峰值
+            best_peak = INF           # 字典序第三级：所选后缀的箱占用峰值
+            best_deliv = None         # 字典序第二级：交付时刻向量（相对本次入口）
             # 达到 makespan 下界后，旧版立刻 break；字典序需要再看几个等价
             # 向量找更省箱的排列。但**必须限量**：2026-11-09 实测全量枚举让
             # 890 的第 2 次求解 0.106s→2s（打满预算），骨架/重解轨迹全变，
@@ -1517,7 +1572,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 扫描实测（8 档 A/B）：K=0 无收益；K=2 与 K=6 同为 890 峰值 −3、
             # 15.01→15.00h；K=16 峰值 −5 但求解打满预算、仿真 +1.87h。
             # 取 2 是保守值：收益相同、枚举量最小、对未测真机场景风险最低。
-            if not lex_peak:
+            if not lex_eq:
                 eq_left = 0
             elif EQ_SEARCH:
                 # 达下界后不再只看 2 个向量；上限 = 该节点向量数上限，
@@ -1560,22 +1615,23 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 nr.sort()
                 dt = min(f for _i, f, _c in nr)
                 nrr = tuple((i, f - dt, c) for i, f, c in nr)
-                v, child_suffix, child_peak = dfs(tuple(nn), tuple(ns), nrr, t + dt,
-                                                  cur_path + ((t, vec),))
+                v, child_suffix, child_peak, child_dv = dfs(
+                    tuple(nn), tuple(ns), nrr, t + dt,
+                    cur_path + ((t, vec),))
                 cand_v = dt + v
                 # 已知 makespan 下界达成后，更差的候选不可能改进字典序 → 跳过
                 if lb_seen and cand_v > best_v + 1e-9:
                     eq_left -= 1
                     continue
                 cand_peak = max(run_peak, vec_peak, child_peak)
-                # 字典序：makespan 严格优先；打平时才比峰值库存。
-                # 关闭 lex（MC_LEX_PEAK=0）时退化为原来的纯 makespan 比较。
-                _better = (cand_v < best_v - 1e-9
-                           or (lex_peak and abs(cand_v - best_v) <= 1e-9
-                               and cand_peak < best_peak - 1e-9))
-                if _better:
+                cand_dv = _dv(row_deliv, t_rel + dt, child_dv)
+                # 字典序：makespan 严格优先；打平比交付时刻（每套尽量早交），
+                # 再打平才比箱峰。
+                if _better(cand_v, cand_dv, cand_peak, best_v, best_deliv,
+                           best_peak):
                     best_v = dt + v
                     best_peak = cand_peak
+                    best_deliv = cand_dv
                     # 返回链（相对调用入口）：本次调用累计 op（各自 t_rel 时刻）
                     # + 本向量（t_rel 时刻）+ 纯延时 dt + 子树后缀（子树入口
                     # = t_rel+dt，delta 天然对齐，无需平移子树）。
@@ -1598,7 +1654,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # eq_left 预算再看几个等价向量（同 makespan 里挑更省箱的）。
                 if cand_v <= lb + 1e-9:
                     lb_seen = True
-                    if not lex_peak:
+                    if not lex_eq:
                         break
                     eq_left -= 1
                 elif lb_seen:
@@ -1615,15 +1671,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 _dw = min(f for _i, f, _c in running_rel)
                 _nr = tuple((i, f - _dw, c) for i, f, c in running_rel)
                 # 等待段的箱占用不变（无新产物入箱），occ 只随收卡增加
-                _wv, _wsfx, _wpk = dfs(need, stock, _nr, t + _dw, cur_path)
+                _wv, _wsfx, _wpk, _wdv = dfs(need, stock, _nr, t + _dw, cur_path)
                 if _wv < INF:
                     _cv = _dw + _wv
                     _cpk = max(run_peak, _wpk)
-                    if (_cv < best_v - 1e-9
-                            or (lex_peak and abs(_cv - best_v) <= 1e-9
-                                and _cpk < best_peak - 1e-9)):
+                    _cdv = _dv(row_deliv, t_rel + _dw, _wdv)
+                    if _better(_cv, _cdv, _cpk, best_v, best_deliv, best_peak):
                         best_v = _cv
                         best_peak = _cpk
+                        best_deliv = _cdv
                         own = own_ops
                         head = chain_of(own)
                         if _wsfx is not None:
@@ -1640,13 +1696,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 状态时被幻影 INF 挡住而丢最优。结构性死路（无炉在炉/落箱超容）
             # 重探代价极小（立刻返回 INF），正确性优先。
             if best_v < INF:
-                memo[key] = (best_v, best_memo_suffix, best_peak)
+                # 交付向量按「相对 memo 态」存（memo 键是迭代顶状态，t_rel 即
+                # 该状态距本次入口的偏移），命中时再加回 t_rel。
+                _bd = (tuple(d - t_rel for d in best_deliv)
+                       if best_deliv is not None else None)
+                memo[key] = (best_v, best_memo_suffix, best_peak, _bd)
             # ★ 返回值必须加 t_rel：while 循环内「收卡/推进到下一完工」耗掉的
             # 时间旧版没算进返回值（best_v 只相对本迭代顶）→ memo 值系统性
             # 偏小 → 幻影最优（1★ 实测 root=6.03h < 真实 7.03h，且违反自身
             # 总炉时下界 6.5h）。绝对值 t+fin 不受影响（旧代码答案正确纯属
             # 叶子赋值 best["val"]=t+fin 侥幸）。
-            return t_rel + best_v, best_suffix, best_peak
+            return t_rel + best_v, best_suffix, best_peak, best_deliv
 
     # 初始状态：默认全空（从零开始）；传入 init_* 时从当前状态起算
     rg = run_norm
@@ -1706,9 +1766,9 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         else:
             BOUND_V[0] = _bv0
     try:
-        v, suffix, root_peak = dfs(need0, st0, rg, 0.0, ())
+        v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, ())
     except _SearchAbort:
-        v, suffix, root_peak = INF, None, INF
+        v, suffix, root_peak, root_dv = INF, None, INF, None
         stats["bounded"] = True
     # ★ 纯 DP 兜底：UB 上界内一条完整路径都没走通（LB 偏紧 / UB 不可达）时，
     #   放开上界重搜一遍 —— 宁可慢、宁可爆预算，也不交付贪心表。
@@ -1753,10 +1813,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         except Exception:
             pass
         try:
-            v, suffix, root_peak = dfs(need0, st0, rg, 0.0, ())
+            v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, ())
             stats["retry_mv"] = max_vecs
         except _SearchAbort:
-            v, suffix, root_peak = INF, None, INF
+            v, suffix, root_peak, root_dv = INF, None, INF, None
             stats["bounded"] = True
         finally:
             max_vecs, rec_budget = _mv0, _rb0
@@ -1777,11 +1837,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             best["val"] = v
             best["sched"] = cells_to_sched(suffix)
             best["from"] = "DP"
-        elif lex_peak and abs(v - best["val"]) <= 1e-6:
+        elif lex_eq and abs(v - best["val"]) <= 1e-6:
             # best["sched"] 可能来自 UB 或某个已访叶子；DP 后缀链是字典序
-            # 最优（同 makespan 里峰值最小），打平时用它换掉更费箱的解。
-            if root_peak < sched_peak(inst, best["sched"], init_occ0) - 1e-9:
+            # 最优（同 makespan 里交付更早 / 峰值最小），打平时用它换掉。
+            _swap = root_peak < sched_peak(inst, best["sched"], init_occ0) - 1e-9
+            if lex_deliv and root_dv is not None:
+                _bdv = best.get("deliv")
+                if _bdv is None or root_dv < _bdv:
+                    _swap = True
+            if _swap:
                 best["sched"] = cells_to_sched(suffix)
+                best["deliv"] = root_dv
                 best["from"] = "DP"
                 stats["lex_peak_swap"] = True
         elif abs(v - best["val"]) > 1e-6:
@@ -1819,6 +1885,9 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             return INF, [], stats
     stats["peak"] = sched_peak(inst, best["sched"], init_occ0)
     stats["lex_peak"] = lex_peak
+    stats["lex_deliv"] = lex_deliv
+    stats["deliv"] = (list(root_dv) if (lex_deliv and v < INF
+                                       and root_dv is not None) else None)
     stats["diag"] = dict(DIAG)
     stats["eq_left"] = EQ_LEFT[0]
     stats["from"] = best["from"]
