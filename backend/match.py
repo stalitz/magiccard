@@ -2216,8 +2216,12 @@ def pick_sg_levelid(state: dict, chapter) -> int | None:
     if now_ch is not None:
         if n > now_ch:
             return None
-        if n == now_ch and 1 <= (lv_now % 100) <= _SG_MAX_LAYER:
-            return lv_now
+        if n == now_ch:
+            # ★ 当前大关：**只认服务端 levelId，不做任何本地层号过滤**。原写法多加了
+            #   一个 `1 <= lv_now % 100 <= _SG_MAX_LAYER` 条件，一旦 levelId 的层号
+            #   越界（读脏/字段变化），就会漏到下面的 gap 兜底，返回「该大关最后一层」
+            #   —— 又回到打未解锁关的老路。这里直接返回，读不到就 None 交上层报错。
+            return lv_now or None
     for c in plan_sg_layers(state).get("chapters") or []:
         if c.get("chapter") == n:
             return c.get("levelid") or _sg_levelid(n, _SG_MAX_LAYER)
