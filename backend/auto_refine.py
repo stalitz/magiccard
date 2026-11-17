@@ -784,6 +784,7 @@ class AutoRefine:
         #   执行层仍走本引擎 API（买卡逐张过容量、偷炉挑好友+冷却+拉黑、库存同步全保留）。
         #   离线评测（16 场景）：低星/多套比贪心快 1~4h，高星单套与默认相当。
         self.dp_mode = False
+        self.dp_infinite = False              # 「0 = 无限」：本次净需求走无限口径
         self._dp_models: dict = {}            # tid -> engine_v2 ThemeModel（懒加载）
         self._dp_ctrl = None                  # DPTickController 单例（跨 tick memo 热启动）
         self._dp_sig: tuple = None            # 控制器对应的队列签名（追加套卡时重建）
@@ -981,9 +982,19 @@ class AutoRefine:
         if _dp_raw == -1:
             # A/B 用：-1 = 逐位复现旧口径（无窗口、吃 max_sets 钳、吃箱位除法）
             _dp_win = 0
+        elif _dp_raw == -2 and getattr(self, "dp_mode", False) and plan.ids:
+            # -2 = 旧「0」的行为：按空闲炉位给窗口（A/B 对照用，已被 0=无限取代）
+            _dp_win = min(5, max(1, int(free_slots or 0) + 1))
+            sets = max(sets, _dp_win)
+        elif _dp_raw == 0 and getattr(self, "dp_mode", False) and plan.ids:
+            # ★★ 2026-11-17 用户定调「0 = 无限」：不再按「空闲炉位 + 1」给窗口。
+            #   sets 是「要做几套」的总数（做完即停），无限炼不该由它表达。
+            #   这里不抬窗口，由 DPTickController 给资源上界并打开 `infinite`
+            #   目标（ΣCi 逐套尽早），做几套由 DP 按卡炉/卡箱自己解。
+            self.dp_infinite = True
+            _dp_win = 0
         elif getattr(self, "dp_mode", False) and plan.ids:
-            _dp_win = _dp_raw if _dp_raw > 0 else min(
-                5, max(1, int(free_slots or 0) + 1))
+            _dp_win = _dp_raw
             sets = max(sets, _dp_win)
         # ★★ 2026-11-09 用户验收线（禁单轮超炼）：
         #   自动推断的套数最多 2 套 —— 2 套 = 合法的「跨轮重叠」（相当于同时炼
@@ -994,7 +1005,7 @@ class AutoRefine:
         # ★ 2026-11-16：DP 路径不吃这个钳（`_dp_win` 已按炉位给出需求窗口，
         #   且 DP 有箱位/炉位约束自己收敛），只有贪心路径保持 2 套上限。
         if not (getattr(self, "surplus_sets", 0) and self.surplus_sets > 0) \
-                and not _dp_win:
+                and not _dp_win and not getattr(self, "dp_infinite", False):
             _cap_auto = int(os.environ.get("MC_AUTO_MAX_SETS", "2") or 0)
             if _cap_auto > 0:
                 sets = min(sets, _cap_auto)   # sets<=0 的缺口闸语义保持不变

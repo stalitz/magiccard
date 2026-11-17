@@ -950,6 +950,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #     · `best` 从 INF/None 起，叶子把 `<= BOUND` 的打平解也记下来，
     #       交付 dfs 链 → `from` 恒为 "DP"。
     PURE = _os.environ.get("MC_DP_PURE", "1") == "1"
+    # ★★ 2026-11-17 用户定调「0 = 无限」：`sets=0` 不是「做 0 套」，是
+    #   「一直炼、做几套由你（DP）自己按卡炉/卡箱决定」。
+    #   DP 表达「无限」的方式只能是换目标 —— 「做完 N 套的最短总时间」是
+    #   **终点导向**的：它只看最后一张卡，前几套什么时候交不进目标，于是
+    #   N 一旦大于流水线自然在制量，「把前几套压到末尾一起交」就是最优
+    #   （实测窗口 5 首套被推到 424min）。无限场景没有终点，唯一有意义的
+    #   指标是**每套都尽早交付** = 长期吞吐最大 → 目标改成 ΣCi（交付时刻
+    #   之和）最小，makespan 降为次级。这是纯换序，不加任何约束。
+    #   （必须定义在这里：下面的 `BOUND_V` 初始化就要用它。）
+    INF_SUM = bool(inst.get("infinite"))
+    _INF_RELAX = float(_os.environ.get("MC_INF_RELAX", "1.25") or 1.25)
     # 主动等待分支：允许「有可开工的也不开，推进到下一完工」。见 dfs 内注释。
     # ★ 2026-11-15 实测**默认关**：它能被选为最优（3 套 503 次），但最终
     #   makespan 不变（105.34），而搜索面翻倍让仿真更差（3套 106.19→107.84、
@@ -968,6 +979,11 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         if rec_budget > _rb_cap:
             rec_budget = _rb_cap
     BOUND_V = [ub + PURE_TOL if PURE else ub]
+    if INF_SUM:
+        # 无限模式的目标是 ΣCi，剪枝上界仍是 makespan 尺度：放宽 _INF_RELAX
+        # 倍，让「makespan 略长但每套都更早交」的解有机会进来。这不是兜底，
+        # 只是把可行域边界放宽（PURE 下本来就允许打平解），最终答案仍来自 dfs。
+        BOUND_V[0] *= _INF_RELAX
     if PURE:
         best = {"val": INF, "sched": None, "from": None,
                 "deliv": None}
@@ -1039,11 +1055,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #   = C_N 是其分量，故这是 makespan 目标的**纯细化**，不改变可行域、不加闸。
     #   `MC_LEX_DELIV=1` 开启（默认关，生产逐位不变）。
     lex_deliv = _os.environ.get("MC_LEX_DELIV", "0") == "1"
-    lex_eq = lex_peak or lex_deliv
+    # （`INF_SUM` / `_INF_RELAX` 在 `PURE` 定义处就绪 —— `BOUND_V` 初始化要用到。）
+    lex_eq = lex_peak or lex_deliv or INF_SUM
 
     def _dv(row, shift, child):
         """拼交付相对时刻向量：本调用沿途 row（相对入口）+ 子树 child（平移 shift）。"""
-        if not lex_deliv:
+        if not (lex_deliv or INF_SUM):
             return None
         if child is None:
             return tuple(row) if row else None
@@ -1052,16 +1069,33 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         return tuple(row) + tuple(shift + d for d in child)
 
     def _better(cv, cdv, cpk, bv, bdv, bpk):
-        """字典序比较：makespan ≻ 交付时刻向量 ≻ 箱峰。"""
-        if cv < bv - 1e-9:
-            return True
-        if abs(cv - bv) > 1e-9:
-            return False
-        if lex_deliv and cdv is not None:
-            if bdv is None:
+        """字典序比较。
+
+        普通：makespan ≻ 交付时刻向量 ≻ 箱峰。
+        无限（`inst["infinite"]`）：ΣCi ≻ makespan ≻ 箱峰 —— 没有终点，
+        攒批（把前几套推后一起交）会抬高 ΣCi 因而被自动排除。
+        """
+        if INF_SUM:
+            if cdv is not None:
+                if bdv is None:
+                    return True
+                _sa, _sb = sum(cdv), sum(bdv)
+                if abs(_sa - _sb) > 1e-9:
+                    return _sa < _sb
+            if cv < bv - 1e-9:
                 return True
-            if cdv != bdv:
-                return cdv < bdv
+            if abs(cv - bv) > 1e-9:
+                return False
+        else:
+            if cv < bv - 1e-9:
+                return True
+            if abs(cv - bv) > 1e-9:
+                return False
+            if lex_deliv and cdv is not None:
+                if bdv is None:
+                    return True
+                if cdv != bdv:
+                    return cdv < bdv
         if lex_peak:
             return cpk < bpk - 1e-9
         return False
@@ -1223,7 +1257,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     and all(stock[_i3] >= 1 for _i3 in range(n)):
                 stock = tuple(s - 1 for s in stock)
                 DIAG["deliver"] += 1
-                if lex_deliv:
+                if lex_deliv or INF_SUM:
                     row_deliv.append(t - t_in)
                 continue
             # ---- 叶子：全部开工完 → 额外耗时 = 在炉最晚剩余 ----
@@ -1236,12 +1270,25 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     return INF, None, INF, None
                 fin = max([0.0] + [f for _i, f, _c in running_rel if _c != 3])
                 _dl = _dv(row_deliv, 0.0, None)
-                _leaf_better = (t + fin < best["val"] - 1e-9
-                                or (lex_deliv
-                                    and abs(t + fin - best["val"]) <= 1e-9
-                                    and _dl is not None
-                                    and (best.get("deliv") is None
-                                         or _dl < best["deliv"])))
+                if INF_SUM:
+                    # 无限：先比 ΣCi（每套尽早上交），再比 makespan
+                    if best.get("deliv") is None:
+                        _leaf_better = True       # 首个完整解，必须先收下
+                    elif _dl is None:
+                        _leaf_better = False      # 没有交付记录的解不可比
+                    elif sum(_dl) < sum(best["deliv"]) - 1e-9:
+                        _leaf_better = True
+                    elif abs(sum(_dl) - sum(best["deliv"])) <= 1e-9:
+                        _leaf_better = t + fin < best["val"] - 1e-9
+                    else:
+                        _leaf_better = False
+                else:
+                    _leaf_better = (t + fin < best["val"] - 1e-9
+                                    or (lex_deliv
+                                        and abs(t + fin - best["val"]) <= 1e-9
+                                        and _dl is not None
+                                        and (best.get("deliv") is None
+                                             or _dl < best["deliv"])))
                 if PURE:
                     # 打平也算解：只要在剪枝上界内，就是 dfs 走出来的完整调度
                     if t + fin <= BOUND_V[0] + 1e-9 and _leaf_better:
@@ -1620,7 +1667,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     cur_path + ((t, vec),))
                 cand_v = dt + v
                 # 已知 makespan 下界达成后，更差的候选不可能改进字典序 → 跳过
-                if lb_seen and cand_v > best_v + 1e-9:
+                # （无限模式的字典序以 ΣCi 为先，makespan 差的候选仍可能更优）
+                if lb_seen and cand_v > best_v + 1e-9 and not INF_SUM:
                     eq_left -= 1
                     continue
                 cand_peak = max(run_peak, vec_peak, child_peak)
@@ -1657,6 +1705,11 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     if not lex_eq:
                         break
                     eq_left -= 1
+                    if eq_left < 0:
+                        # 等价枚举必须有界（MC_LEX_EQ_NODES）：无限模式 lex_eq
+                        # 恒真，若不显式 break 会全量枚举 → 打满预算。
+                        DIAG["eq_break"] = DIAG.get("eq_break", 0) + 1
+                        break
                 elif lb_seen:
                     eq_left -= 1
             # ★★ 主动等待分支（2026-11-15，`MC_DP_WAIT`，默认开）：
@@ -1760,7 +1813,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 允许打平），第二遍就一定走得到叶子，并在其内继续改进。
             # `MC_DP_DIVE_BOUND=0` 保持 UB 上界（诊断 lb 是否高估用）。
             if _os.environ.get("MC_DP_DIVE_BOUND", "1") == "1":
-                BOUND_V[0] = best["val"]
+                BOUND_V[0] = best["val"] * (_INF_RELAX if INF_SUM else 1.0)
             else:
                 BOUND_V[0] = min(_bv0, best["val"])
         else:
@@ -1886,7 +1939,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     stats["peak"] = sched_peak(inst, best["sched"], init_occ0)
     stats["lex_peak"] = lex_peak
     stats["lex_deliv"] = lex_deliv
-    stats["deliv"] = (list(root_dv) if (lex_deliv and v < INF
+    stats["infinite"] = INF_SUM
+    stats["deliv"] = (list(root_dv) if ((lex_deliv or INF_SUM) and v < INF
                                        and root_dv is not None) else None)
     stats["diag"] = dict(DIAG)
     stats["eq_left"] = EQ_LEFT[0]

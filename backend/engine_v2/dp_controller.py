@@ -308,6 +308,15 @@ class DPTickController:
         self.solve_count = 0
         self.solve_max_ms = 0.0
         self.solve_total_ms = 0.0
+        # ★★ 2026-11-17 用户定调「0 = 无限」：`MC_DP_SETS_WINDOW=0` 不再表示
+        #   「按空闲炉位给窗口」，而是「一直炼，做几套由 DP 自己按卡炉/卡箱决定」。
+        #   落地=需求窗口给到资源上界 + `inst["infinite"]` 让求解器把目标从
+        #   「做完 N 套的最短总时间」换成「ΣCi（每套尽早上交）」。旧目标是
+        #   终点导向的，N 一大就攒批（实测窗口 5 首套被推到 424min）。
+        self.infinite_sets = int(
+            os.environ.get("MC_DP_SETS_WINDOW") or -1) == 0
+        self.infinite_active = False    # 本次净需求是否走了无限口径
+        self.infinite_sets_used = 0
         self.bounded_count = 0
         self.buy_failed = 0
         self.resolves = 0               # 承诺点重解次数（骨架代数）
@@ -527,6 +536,21 @@ class DPTickController:
             # 85×3 AD −1.23h，单轮侧全档逐位不变（见 __init__ 注释）。
             self._left_rounds = (left if self._left_rounds is None
                                  else min(self._left_rounds, left))
+            # ★★ 2026-11-17 「0 = 无限」：sets 是「要做几套」的总数上限（做完即停），
+            #   不是并发上限。无限炼时不该由外部给这个数 —— 给到资源能撑起的
+            #   上界，让目标函数（ΣCi）去决定铺几条线。`sets<=0` 仍是箱位缺口闸
+            #   （本轮不排炉次），不被这里覆盖。
+            if self.infinite_sets and sets > 0 and left >= 2:
+                # 上界决定 DP 能「铺多开」。紧箱下铺太开会一套都凑不齐：
+                # 实测 cap=5 → 箱峰 19、15h 零交付；cap=4 → 7 套、峰 19；
+                # **cap=3 → 8 套、峰 14（与现役同）、空炉 152→3**。
+                # 故默认 3，`MC_INF_SETS_CAP` 可覆盖。
+                _cap_env = int(os.environ.get("MC_INF_SETS_CAP") or 0)
+                _inf_cap = _cap_env if _cap_env > 0 else 3
+                if sets < _inf_cap:
+                    sets = _inf_cap
+                self.infinite_active = True
+                self.infinite_sets_used = sets
             runs, buys = m.net_plan(avail, dict(pending), sets=sets,
                                     mid_collect=self.mid_collect)
             # ★★ 2026-11-16 用户定调（真机 10708702 实测「等最后一张顶层卡时 3 主炉
@@ -1135,6 +1159,9 @@ class DPTickController:
         inst["change_cap"] = ch_cap
         inst["store_cap"] = st_cap
         inst["base_store"] = self._pool_base_store(ws, live)
+        # 「0 = 无限」：目标改 ΣCi（逐套尽早上交），见 sched_dp 的 INF_SUM 段
+        if self.infinite_active:
+            inst["infinite"] = True
         if self.buy_free:
             inst["buy_free"] = True
             if self.ub_only:
