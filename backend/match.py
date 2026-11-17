@@ -2118,6 +2118,24 @@ def plan_sg_layers(state: dict) -> dict:
     rec_pool = [g for g in setgaps
                 if 1 <= g["layer"] <= _SG_MAX_LAYER
                 and (now_chapter is None or (g["chapter"] or 99) <= now_chapter)]
+    # ★ 2026-11-17：**当前大关只有 levelId 那一关能打**（其余层未解锁，act=11 直接被
+    #   拒且不扣次数）。所以把该大关其它层的候选换成当前关那一条，否则会推荐一个
+    #   界面看着合理、真打必失败的层（3822843 就是这样被推到 L104 的）。
+    _lv_now_i = int(levelid_now or 0)
+    _cur_layer = _lv_now_i % 100
+    if now_chapter is not None and 1 <= _cur_layer <= _SG_MAX_LAYER:
+        rec_pool = [g for g in rec_pool
+                    if not (g["chapter"] == now_chapter and g["layer"] != _cur_layer)]
+        _cur = [g for g in setgaps
+                if g["chapter"] == now_chapter and g["layer"] == _cur_layer]
+        if _cur:
+            rec_pool.append(_cur[0])
+        else:
+            # 该层卡已齐（gap=0 不进 setgaps），但关卡进度没满，照样得打它
+            rec_pool.append({"theme": _sg_chapter_theme(now_chapter),
+                             "chapter": now_chapter, "layer": _cur_layer,
+                             "g": _sg_g(_cur_layer), "levelid": _lv_now_i,
+                             "gap": 0, "theme_layer_cards": []})
     recommend = None
     if rec_pool:
         pick = min(rec_pool, key=lambda g: (g["gap"], g["chapter"] or 99, g["layer"]))
@@ -2127,9 +2145,13 @@ def plan_sg_layers(state: dict) -> dict:
             [c["name"] for c in pick["theme_layer_cards"]]
         names = "、".join(recommend["missing"]) or "这张"
         tname = _sg_theme_name(pick["theme"]) or ""
-        recommend["why"] = (f"第 {pick['chapter']} 大关{tname}的游戏第 {pick['g']} 层"
-                            f"还只差 {pick['gap']} 张（缺 {names}），打这一档的小关就能补齐")
-        recommend["from_now"] = pick["levelid"] == int(levelid_now or 0)
+        if pick["gap"]:
+            recommend["why"] = (f"第 {pick['chapter']} 大关{tname}的游戏第 {pick['g']} 层"
+                                f"还只差 {pick['gap']} 张（缺 {names}），打这一档的小关就能补齐")
+        else:
+            recommend["why"] = (f"第 {pick['chapter']} 大关{tname}这一层的卡已经齐了，"
+                                f"继续打它推进关卡进度（该大关只放行当前关）")
+        recommend["from_now"] = pick["levelid"] == _lv_now_i
         recommend["why"] += ("—— 正是服务端给的当前关（%s）。" % levelid_now
                              if recommend["from_now"] else "。")
     # 大关列表（界面「大关可选」用）：一关一套，缺口按卡 id 跨两箱去重。
@@ -2145,13 +2167,24 @@ def plan_sg_layers(state: dict) -> dict:
             have |= ids_of(ex, th, L) | ids_of(safe, th, L)
         chg = [g for g in setgaps if g["theme"] == th and 1 <= g["layer"] <= _SG_MAX_LAYER]
         pick2 = min(chg, key=lambda g: (g["gap"], g["layer"])) if chg else None
+        # ★ 2026-11-17：**当前大关**只能打服务端给的 levelId（别的层未解锁，打了必
+        #   失败且不扣次数），所以推荐关号必须与 pick_sg_levelid 同口径，否则界面
+        #   显示「推荐 L104」、真打却是 L101（或反之打 104 直接失败）。
+        lv_now_i = int(levelid_now or 0)
+        cur_layer = lv_now_i % 100
+        if (now_chapter is not None and n == now_chapter
+                and 1 <= cur_layer <= _SG_MAX_LAYER):
+            rec_lv, rec_layer = lv_now_i, cur_layer
+        else:
+            rec_lv = pick2["levelid"] if pick2 else _sg_levelid(n, _SG_MAX_LAYER)
+            rec_layer = pick2["layer"] if pick2 else None
         chapters.append({
             "chapter": n, "theme": th, "name": _sg_theme_name(th),
             "need": need, "have": len(have), "gap": max(0, need - len(have)),
             "done": need > 0 and len(have) >= need,
             "unlocked": now_chapter is None or n <= now_chapter,
-            "levelid": pick2["levelid"] if pick2 else _sg_levelid(n, _SG_MAX_LAYER),
-            "layer": pick2["layer"] if pick2 else None,
+            "levelid": rec_lv,
+            "layer": rec_layer,
         })
     return {"levels": levels, "open": open_gaps, "recommend": recommend,
             "chapters": chapters, "levelid_now": levelid_now}
@@ -2163,10 +2196,28 @@ def pick_sg_levelid(state: dict, chapter) -> int | None:
     界面上的「大关可选」走这里：用户选哪一大关就打哪一大关，是手动覆盖自动推荐的
     入口（例：当前关 204 在第 2 大关，但第一大关还缺「太平道」→ 选第 1 大关 → 102）。
     该大关全齐时回落到该大关的最后一层，不越界到别的大关，也不编不存在的关号。
+
+    ★★ 2026-11-17 真机事故（3822843，用户「3国失败了」）：选「第 1 大关」却挑了
+      **L104** —— 这是本地按「缺口最小」算的（层 4 只差 3 张），但游戏里第 4 层还
+      没解锁：act=11 直接返失败、**今日次数 0→0**（服务端在扣次数之前就拒了），
+      用户只看到「[三国] 第1场 失败」，连原因都没有（原因写在 text，前端读的是 msg）。
+      服务端 `levelId` 是**唯一可信的解锁信号** —— 它就是当前唯一可打的小关。
+      因此按大关分三种情况：
+        · 大关号 > 当前大关 → 未解锁，返回 None（让上层明确报错，绝不猜关号）；
+        · 大关号 == 当前大关 → 只打服务端给的那个当前关（别的层同样未解锁）；
+        · 大关号 < 当前大关（回头补老关）→ 该大关各层都已解锁，才轮到「缺口最小」。
+      只有读不到 levelId 时才退回纯 gap 推荐（此时无解锁信息可依）。
     """
     n = int(chapter or 0)
     if not n or not _sg_chapter_theme(n):
         return None          # 不在战役的 9 张地图里 → 不编关号
+    lv_now = int(state.get("levelId") or 0)
+    now_ch = (lv_now // 100) or None
+    if now_ch is not None:
+        if n > now_ch:
+            return None
+        if n == now_ch and 1 <= (lv_now % 100) <= _SG_MAX_LAYER:
+            return lv_now
     for c in plan_sg_layers(state).get("chapters") or []:
         if c.get("chapter") == n:
             return c.get("levelid") or _sg_levelid(n, _SG_MAX_LAYER)
@@ -2364,6 +2415,17 @@ async def run_sanguo_raid(session, levelid: int | None = None, chapter: int | No
         lv2 = pick_sg_levelid(st, picked_chapter)
         if lv2:
             levelid = lv2
+        elif levelid is None:
+            # 选了个没解锁的大关。以前会把 None 吞掉、继续用当前关去打，用户以为
+            # 打的是自己选的那一大关；现在明确报错（2026-11-17 真机事故后补）。
+            lv_now = int(st.get("levelId") or 0)
+            cur = lv_now // 100
+            yield {"act": "__error__", "ok": False,
+                   "message": (f"第 {picked_chapter} 大关还没解锁"
+                               + (f"（当前在第 {cur} 大关 · 关卡 L{lv_now}），"
+                                  f"先把当前大关打通" if cur else "（没读到当前关卡）")),
+                   "chapter": picked_chapter, "levelid": lv_now, "unlocked": False}
+            return
     if levelid is None or levelid == 0:
         levelid = cur_level
     if not levelid:

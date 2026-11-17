@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261116b";
+const APP_VER = "20261117a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -4941,7 +4941,10 @@ async function sanguoRaid() {
     body: { chapter: sgPickChapter || 0 },
     onStep: (s) => {
       if (!s || s.act === "__done__" || s.act === "__error__") return;
-      if (s.act === "round") mlog(`[三国] 第${s.no}场 ${s.ok ? (s.text || "成功") : (s.msg || "失败")}`, s.ok ? "ok" : "err");
+      // 失败原因后端写在 text（形态：desc / message / code=NNN），msg 只有阵容
+      // 异常那条分支才有 —— 以前只读 msg，导致所有失败都显示成光秃秃的「失败」，
+      // 2026-11-17 三国 L104 事故就因此查不到原因。
+      if (s.act === "round") mlog(`[三国] 第${s.no}场 ${s.ok ? (s.text || "成功") : (s.msg || s.text || "失败")}`, s.ok ? "ok" : "err");
       else mlog(`[三国] ${s.text || s.act || ""}`, s.ok ? "ok" : "warn");
     },
   });
