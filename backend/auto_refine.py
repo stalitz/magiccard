@@ -1823,6 +1823,10 @@ class AutoRefine:
                               "emergency_now": dpstats.get("emergency_now"),
                               "early_now": dpstats.get("early_now"),
                               "box_relaxed": dpstats.get("box_relaxed"),
+                              # 无限口径（MC_DP_SETS_WINDOW=0）：true = 本轮走了
+                              # 「需求窗口给资源上界 + 目标 ΣCi」，sets_used = 上的上界
+                              "infinite": bool(dpstats.get("infinite")),
+                              "sets_used": dpstats.get("sets_used"),
                               # 紧箱物理无解：把停手原因透传到 /api/auto/status
                               "reason": dpstats.get("reason"),
                               "deadlock": dpstats.get("deadlock")}

@@ -540,6 +540,9 @@ class DPTickController:
             #   不是并发上限。无限炼时不该由外部给这个数 —— 给到资源能撑起的
             #   上界，让目标函数（ΣCi）去决定铺几条线。`sets<=0` 仍是箱位缺口闸
             #   （本轮不排炉次），不被这里覆盖。
+            # 每 tick 重置：上一 tick 走过无限口径不代表这一 tick 还走
+            # （sets<=0 的箱位缺口闸 tick 不排炉次，也不该报 infinite=true）。
+            self.infinite_active = False
             if self.infinite_sets and sets > 0 and left >= 2:
                 # 上界决定 DP 能「铺多开」。紧箱下铺太开会一套都凑不齐：
                 # 实测 cap=5 → 箱峰 19、15h 零交付；cap=4 → 7 套、峰 19；
@@ -2292,5 +2295,9 @@ class DPTickController:
                       "compact_sold_total": self.compact_sold,
                       "compact_moved_total": self.compact_moved,
                       "collect_in_stock_n": collect_n,
-                      "box_relaxed": plan["box_relaxed"]})
+                      "box_relaxed": plan["box_relaxed"],
+                      # 无限口径可观测（2026-11-17）：true = 本次净需求走了
+                      # 「sets=0 → 需求窗口给资源上界 + 目标 ΣCi」。
+                      "infinite": bool(self.infinite_active),
+                      "sets_used": int(self.infinite_sets_used or 0)})
         return actions, stats
