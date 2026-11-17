@@ -21,7 +21,12 @@ MC_HOST="${MC_HOST:-0.0.0.0}"
 case "$1" in
   start)
     # 前置环境变量仅对本次 python 进程生效：PORT/MC_SESSION_FILE/MC_LOG 由 mc_api 与启动器读取
-    ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT" MC_HOST="$MC_HOST")
+    # ★ MC_DP_SETS_WINDOW=0 = 「无限炼」：需求窗口不再随空闲炉位缩，
+    #   且 DP 目标从「做完 N 套的 makespan」换成 ΣCi（每套尽早上交），
+    #   消除「前几套压到末尾一起交」的攒批最优解（2026-11-17，详见 b87164c）。
+    #   不再需要每次启动手动带这个变量；要回旧口径用 MC_DP_SETS_WINDOW=-1。
+    ENVARGS=(MC_SESSIONS_DIR="$ACCOUNTS" MC_LOG="$LOG" PORT="$PORT" MC_HOST="$MC_HOST"
+             MC_DP_SETS_WINDOW="${MC_DP_SETS_WINDOW:-0}")
     [ -n "$SESS" ] && ENVARGS+=(MC_SESSION_FILE="$SESS")
     # ★ 剥掉宿主代理环境变量（2026-11-05 真机事故）：从带 HTTP_PROXY/HTTPS_PROXY 的
     #   shell 启动时，后台常驻进程会继承那个临时端口；端口随会话失效后，任何
