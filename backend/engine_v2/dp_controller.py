@@ -660,6 +660,7 @@ class DPTickController:
                     need[c] += nd
             for c, nd in (buys or {}).items():
                 buy[c] += nd
+            self._dbg_sets = sets
         return need, buy
 
     def _album_prebuy(self, ws, active, box_stock, pending, actions, bought,
@@ -2478,4 +2479,18 @@ class DPTickController:
                       # 「sets=0 → 需求窗口给资源上界 + 目标 ΣCi」。
                       "infinite": bool(self.infinite_active),
                       "sets_used": int(self.infinite_sets_used or 0)})
+        # ★ 2026-11-18 观测：计划为空时把「为什么空」打出来（5min 一次节流）。
+        #   真机 4821992 反复重解却恒 0 条 ops，现场无法区分
+        #   「sets=0 箱位闸 / 无 refine 需求 / 求解超时」是哪一个。
+        if not plan["ops"] and ws.now - getattr(self, "_last_zero_log", 0) > 300:
+            self._last_zero_log = ws.now
+            try:
+                print(f"[DP空计划] sets={getattr(self, '_dbg_sets', None)} "
+                      f"need0={sum(need0_map.values())} "
+                      f"buy0={sum(buy0_map.values())} "
+                      f"free2={ws.change_free + ws.store_free} "
+                      f"note={stats.get('note')} ms={stats.get('solve_ms')} "
+                      f"sched={stats.get('n_sched')}", flush=True)
+            except Exception:      # noqa: BLE001  观测绝不拖死调度
+                pass
         return actions, stats
