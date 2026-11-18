@@ -571,16 +571,27 @@ class DPTickController:
                 #   基线（窗口 3、滚动流转）会被误钳到 2 套 → 20h 少交 1 套
                 #   （2026-11-18 A/B：`MC_DP_INF_BOX_WIN=0` 逐位回到 11 套）。
                 _own = set(m.ids)
-                _inflight = (sum(int(n) for c, n in box_stock.items()
-                                 if int(c) in _own and n)
-                             + sum(int(n) for c, n in pending.items()
-                                   if int(c) in _own and n))
+                # ⚠ 这里只能用 **pending（在炉在途）**，不能再用 `box_stock` 里的本套卡：
+                #   传进来的 `box_free/store_free` 是 `_pool_caps` 口径（cur − 杂卡），
+                #   **已经包含箱内本套卡所占的格**；再加一遍就双计 → 1652 真机
+                #   9+2+8=19 → 窗口判成 2 套（实际只有 13 格可用）→ DP 无解。
+                _inflight = sum(int(n) for c, n in pending.items()
+                                if int(c) in _own and n)
                 _box_ok = max(1, (int(box_free) + int(store_free) + _inflight)
                               // max(1, len(m.ids)))
                 if self.inf_box_win:
                     _inf_cap = min(_inf_cap, _box_ok)
                 if sets < _inf_cap:
                     sets = _inf_cap
+                # ★★ 2026-11-18 二次回归（真机 10708702 13:33 又零动作）：
+                #   上面只做「抬到 _inf_cap」，**从不往下压** —— 而 `_calc_sets` 只看
+                #   「这一套还缺几张能否塞进空位」，没算「N 套要 N×need 张同时在箱」。
+                #   真机两箱有效 11 格、need=9，`_calc_sets` 给 2 → 需求 18 张装不下
+                #   → DP 直接无解（`pure_no_solution`、inf_dead 48765、16s 空 ops）→
+                #   整 tick 零动作。同一状态把窗口压到 1：1.4ms 出解、2 条 ops、
+                #   还排出卖 1 张 10 面杂卡。箱位是物理闸，必须能双向夹。
+                if self.inf_box_win:
+                    sets = min(sets, _box_ok)
                 self.infinite_active = True
                 self.infinite_sets_used = sets
             runs, buys = m.net_plan(avail, dict(pending), sets=sets,
@@ -628,6 +639,22 @@ class DPTickController:
                                                 mid_collect=self.mid_collect)
                         self.pipe_sets_hits += 1
                         self.pipe_sets_last = sets
+            # ★★ 2026-11-18 物理闸兜底（放在 pipe_sets **之后**）：pipe_sets 的
+            #   `2N` 只数箱内占位、不算「N 套要 N×need 张同时在箱」，紧箱时会把
+            #   sets 再抬回去（1652 真机两箱 13 格、need=9：抬到 2 → 18 张装不下
+            #   → DP `pure_no_solution` → 整 tick 零动作）。箱位是硬约束，
+            #   任何提套路径都必须受它夹紧，压下来后按新 sets 重算净需求。
+            if self.inf_box_win and sets > 0:
+                _own2 = set(m.ids)
+                _ok2 = max(1, (int(box_free) + int(store_free)
+                               + sum(int(n) for c, n in pending.items()
+                                     if int(c) in _own2 and n))
+                           // max(1, len(m.ids)))
+                if sets > _ok2:
+                    sets = _ok2
+                    runs, buys = m.net_plan(avail, dict(pending), sets=sets,
+                                            mid_collect=self.mid_collect)
+                    self.infinite_sets_used = sets
             for c, nd in runs.items():
                 if not m.is_base(c):
                     need[c] += nd
