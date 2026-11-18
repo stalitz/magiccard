@@ -2602,13 +2602,27 @@ class DPTickController:
         if not plan["ops"] and ws.now - getattr(self, "_last_zero_log", 0) > 300:
             self._last_zero_log = ws.now
             try:
-                _log.info("[DP空计划] sets=%s need0=%s buy0=%s free2=%s "
-                          "note=%s ms=%s sched=%s",
+                # ★ 2026-11-18 补 diag：`note=pure_no_solution` 只说明「两遍搜索
+                #   都没走通完整路径」（sched_dp.py:2141 注释：根返 INF ≠ 模型不可
+                #   行）。到底是 LB 剪死、箱位剪死、还是深度闸卡住，只能看计数：
+                #     leaf=0 & lb_prune>0      → 下界过紧，最优路径被剪光
+                #     inf_box/inf_dead>0       → 箱位判定把分支判死（要复核 box_cap 口径）
+                #     depth_hit>0              → MC_DP_MAX_DEPTH 卡住，属搜索深度不够
+                _dg = stats.get("diag") or {}
+                _log.info("[DP空计划] sets=%s need0=%s buy0=%s "
+                          "free2=%s(ch=%s/st=%s) note=%s ms=%s sched=%s "
+                          "diag[leaf=%s lb_prune=%s inf_box=%s inf_dead=%s "
+                          "inf_pool=%s depth_hit=%s vec=%s]",
                           getattr(self, "_dbg_sets", None),
                           sum(need0_map.values()), sum(buy0_map.values()),
                           ws.change_free + ws.store_free,
+                          ws.change_free, ws.store_free,
                           stats.get("note"), stats.get("solve_ms"),
-                          stats.get("n_sched"))
+                          stats.get("n_sched"),
+                          _dg.get("leaf"), _dg.get("lb_prune"),
+                          _dg.get("inf_box"), _dg.get("inf_dead"),
+                          _dg.get("inf_pool"), _dg.get("depth_hit"),
+                          _dg.get("vec"))
             except Exception:      # noqa: BLE001  观测绝不拖死调度
                 pass
         return actions, stats
