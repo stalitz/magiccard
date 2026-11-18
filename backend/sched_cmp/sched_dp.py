@@ -45,6 +45,7 @@ UB = 内置关键路径列表调度（含 lazy 买卡 + 死锁强买保底）；
 """
 import json as _json
 import os as _os
+import sys as _sys
 import time as _t
 
 EPS = 1e-9
@@ -1013,7 +1014,19 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     EQ_LEFT = [int(_os.environ.get("MC_LEX_EQ_NODES", "300") or 300)]
     DIAG = {"lb_prune": 0, "eq_allowed": 0, "eq_break": 0,
             "vec": 0, "leaf": 0, "inf_pool": 0, "inf_box": 0,
-            "inf_dead": 0, "deliver": 0}
+            "inf_dead": 0, "deliver": 0, "depth_hit": 0}
+    # ★★ 2026-11-18：递归深度保护（真机 10708702 每 tick 抛 RecursionError）。
+    #   dfs 每层 = 一次 op 推进；无限口径（ΣCi）在「箱位不足」实例上会深挖到
+    #   Python 默认 1000 栈上限 → `RecursionError` 冒到 `decide` 被吞 → 整 tick
+    #   零动作（真机连续 15 次、4 炉全空、卖卡/买卡/投炉一条都没发）。
+    #   两道防线：① 把栈上限抬高（dfs 单层含内层循环，实际帧数 ≈ 2×path 长度）；
+    #   ② 给显式 `MC_DP_MAX_DEPTH`（默认 4000）上限，超限分支返回 INF 当死路，
+    #   搜索自然回退到别的分支或走 UB 兜底 —— 绝不把异常抛给调用方。
+    _max_depth = int(_os.environ.get("MC_DP_MAX_DEPTH") or 0) or 4000
+    try:
+        _sys.setrecursionlimit(max(10000, _sys.getrecursionlimit()))
+    except Exception:      # noqa: BLE001 — 嵌入环境可能禁止，忽略即可
+        pass
     stats["eq_search"] = EQ_SEARCH
     t0 = _t.perf_counter()
     memo = memo if (use_memo and memo is not None) else {}
@@ -1202,6 +1215,11 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           避免平移子树，内存 O(节点数)）。
         path 参数仍贯穿（绝对时间）：abort 时已访叶子的调度兜底。
         """
+        # ★ 深度硬闸（见 solve 的 `_max_depth` 注释）：超限视为死路，返回 INF
+        #   让上层回退，绝不抛出 RecursionError 冒到执行层。
+        if len(path) >= _max_depth:
+            DIAG["depth_hit"] += 1
+            return INF, None, INF, None
         # ★ 三空位状态条件：在每次 dfs 入口统一判，覆盖买卡 / 收卡 / 精炼
         #   开工后的所有状态转移；违反「总箱（原有 box_cap 不变量）+
         #   换卡箱 + 保险箱」三条件之一的分支直接不可行，不再靠执行层兜底。
