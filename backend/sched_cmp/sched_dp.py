@@ -597,7 +597,7 @@ class _CapAbort(Exception):
 
 def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
              deadline=None, max_vecs=None, rec_budget=None, prio=None,
-             prio2=None, prio2_first=False):
+             prio2=None, prio2_first=False, gift=None):
     """所有可行开工向量：每类型数 ≤ items 里的上限，且**按机器类**不超容量。
 
     items: [(type_idx, 单类型上限)]——上限已按 need/素材压过（买卡已改为
@@ -622,16 +622,25 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
 
     返回 (vectors, complete)——complete=False 表示被 max_vecs/rec_budget
     截断（调用方按上界语义使用，不可当作精确值）。
+
+    ★ gift：(礼物卡余额, 可被变卡产出的类型集合)。用户 2026-11-18 定调
+    「告诉 dp 有多少张礼物卡，那 dp 可以认为变卡成功率 100」——变卡在物理上
+    **零耗时、不占炉、箱位原地替换**，所以模型里它就是「这几张 40 面卡当场
+    拿到」，唯一代价是消耗一张礼物卡额度。于是素材不足的部分由 gift 池支付，
+    向量的第 4 项记下「这个 op 用礼物卡顶了哪些类型各几张」，dfs 据此扣额度和
+    生成变卡动作。缺省 gift=None → 与旧实现逐位一致。
     """
     if not items or not any(c > 0 for c in caps):
         return [], True
+    gl0 = int(gift[0]) if gift else 0
+    gset = gift[1] if gift else frozenset()
     res = []
     ni = len(items)
     ncls = len(caps)
     cls_lists = [_cls_of(mclass, i) for i, _lim in items]
     _ck = [0]
 
-    def maximal(cnt, used, st):
+    def maximal(cnt, used, st, gl):
         # 容量快路径：三类机器全占满 → 任何 item（必属某一类）都加不进。
         # ★ 2026-11-15：旧版只判 caps[0]/caps[2]，漏掉买卡类 caps[1]，宽节点
         #   上等于关掉了这条快路径。补齐后多数满炉叶子不再逐 item 扫素材。
@@ -645,7 +654,7 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
             if cnt.get(i, 0) + 1 > need[i]:
                 continue
             for j, k in mats[i]:
-                if st[j] < k:
+                if st[j] + (gl if (gset and j in gset) else 0) < k:
                     break
             else:
                 for ci in cls_lists[pos]:
@@ -653,7 +662,7 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                         return False       # 还能加一张 → 非极大
         return True
 
-    def rec(p, used, cur, st, cnt):
+    def rec(p, used, cur, st, cnt, gl):
         _ck[0] += 1
         if not (_ck[0] & 31):           # 每 32 步一次（perf_counter ~50ns）
             if deadline is not None and _t.perf_counter() > deadline:
@@ -677,15 +686,58 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                     raise _CapAbort
             return
         if p == ni:
-            if cur and (not maximal_only or maximal(cnt, used, st)):
+            if cur and (not maximal_only or maximal(cnt, used, st, gl)):
                 res.append(tuple(cur))
                 if max_vecs is not None and len(res) >= max_vecs * 2:
                     raise _CapAbort
             return
         i, lim = items[p]
+        _use_gift = bool(gset) and any(j in gset for j, _kk in mats[i])
         for ci in cls_lists[p]:
             top = min(lim, caps[ci] - used[ci])
             for c in range(top, -1, -1):
+                gjk = ()
+                glu = 0
+                if _use_gift:
+                    # 先判素材够不够（不够的部分由礼物卡顶），再决定扣多少
+                    _miss = []
+                    _ok = True
+                    for j, k in mats[i]:
+                        nd = c * k
+                        if st[j] >= nd:
+                            continue
+                        if j not in gset:
+                            _ok = False
+                            break
+                        glu += nd - st[j]
+                        if glu > gl:
+                            _ok = False
+                            break
+                        _miss.append((j, nd - st[j]))
+                    if not _ok:
+                        continue
+                    gjk = tuple(_miss)
+                    taken = []
+                    for j, k in mats[i]:
+                        t = min(st[j], c * k)
+                        st[j] -= t
+                        taken.append((j, t))
+                    cur.append((i, c, ci, gjk))
+                    used[ci] += c
+                    if c:
+                        cnt[i] = cnt.get(i, 0) + c
+                    rec(p + 1, used, cur, st, cnt, gl - glu)
+                    if c:
+                        _v = cnt[i] - c
+                        if _v:
+                            cnt[i] = _v
+                        else:
+                            del cnt[i]
+                    used[ci] -= c
+                    cur.pop()
+                    for j, t in taken:
+                        st[j] += t
+                    continue
                 ok = True
                 for j, k in mats[i]:
                     if st[j] < c * k:
@@ -695,11 +747,11 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                     continue
                 for j, k in mats[i]:
                     st[j] -= c * k
-                cur.append((i, c, ci))
+                cur.append((i, c, ci, gjk))
                 used[ci] += c
                 if c:
                     cnt[i] = cnt.get(i, 0) + c
-                rec(p + 1, used, cur, st, cnt)
+                rec(p + 1, used, cur, st, cnt, gl)
                 if c:
                     _v = cnt[i] - c
                     if _v:
@@ -718,7 +770,7 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
 
     complete = True
     try:
-        rec(0, [0] * ncls, [], list(stock), {})
+        rec(0, [0] * ncls, [], list(stock), {}, gl0)
     except _CapAbort:
         complete = False
     if res:
@@ -727,23 +779,24 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                 # CP 顺序作主序（2026-10-25 option 2）：先让「更该早上炉」的
                 # 卡型占位，同分再按 cp。仅改尝试顺序/截断保留，不改可行性。
                 res.sort(key=lambda v: (
-                    sum(c * prio2[i] for i, c, _ci in v),
-                    -sum(c * prio[i] for i, c, _ci in v)))
+                    sum(ev[1] * prio2[ev[0]] for ev in v),
+                    -sum(ev[1] * prio[ev[0]] for ev in v)))
             elif prio2 is not None:
                 res.sort(key=lambda v: (
-                    -sum(c * prio[i] for i, c, _ci in v),
-                    sum(c * prio2[i] for i, c, _ci in v)))
+                    -sum(ev[1] * prio[ev[0]] for ev in v),
+                    sum(ev[1] * prio2[ev[0]] for ev in v)))
             else:
-                res.sort(key=lambda v: -sum(c * prio[i] for i, c, _ci in v))
+                res.sort(key=lambda v: -sum(ev[1] * prio[ev[0]] for ev in v))
         else:
-            res.sort(key=lambda v: -sum(c for _i, c, _ci in v))
+            res.sort(key=lambda v: -sum(ev[1] for ev in v))
         if max_vecs is not None and len(res) > max_vecs:
             res = res[:max_vecs]
             complete = False
     return res, complete
 
 
-def _chain_avail_rel(j, k, stock, running_rel, seen, fins_by=None):
+def _chain_avail_rel(j, k, stock, running_rel, seen, fins_by=None,
+                     gset=None, gl=0):
     """k 张 j 卡可用的最早增量时刻（相对剩余时间，可采纳下界）。
 
     running_rel 为 (type, 剩余, 类) 三元组；买卡类型（dur=LAG）无素材 →
@@ -752,10 +805,16 @@ def _chain_avail_rel(j, k, stock, running_rel, seen, fins_by=None):
     ★ buy_free（`BASEFREE`）：底卡随时可买且即时落箱 → 最早可得时刻 = 0，
       不是 LAG。旧版把这个 LAG 带进了 LB 链（买卡 45s 被当成真实等待）→
       下界在本口径下**高估**，会剪掉真正的最优分支。
+
+    ★ gift（变卡）：j 属于可被变卡产出的 40 面类型且礼物卡还有余额 → 最早
+      可得 = 0（零耗时）。这里对「池共享」做乐观处理（每个 j 都当可得），
+      只会让下界更小、剪枝更弱，不会剪掉最优。
     """
     if BASEFREE and j in BASESET:
         return 0.0
     if stock[j] >= k:
+        return 0.0
+    if gl > 0 and gset and j in gset:
         return 0.0
     # ★ fins_by：按类型分桶的在炉剩余（每节点建一次，O(在炉数)），避免在
     #   73 类型 × 递归里反复线性扫 running_rel（3 套实测该函数累计 1.05s/3s）。
@@ -769,11 +828,12 @@ def _chain_avail_rel(j, k, stock, running_rel, seen, fins_by=None):
         return 0.0
     seen.add(j)
     return DUR[j] + max((_chain_avail_rel(m, kk, stock, running_rel, seen,
-                                          fins_by)
+                                          fins_by, gset, gl)
                          for m, kk in MATS[j]), default=0.0)
 
 
-def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None):
+def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None,
+            gset=None, gl=0):
     """累资源下界（相对额外耗时，可采纳，≥ 剩余总炉时/M）。
 
     各类型最早开工(发布)时刻 s_i 由链式可得；则最优 makespan ≥ max(
@@ -799,7 +859,8 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None):
     for i in range(N):
         if need[i] <= 0 or i in running_types:
             continue
-        s = max((_chain_avail_rel(j, kk, stock, running_rel, set(), fins_by)
+        s = max((_chain_avail_rel(j, kk, stock, running_rel, set(), fins_by,
+                                  gset, gl)
                  for j, kk in MATS[i]), default=0.0)
         starts_all.append((i, s, DUR[i], need[i]))
 
@@ -921,6 +982,19 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     BASEFREE = bool(inst.get("buy_free"))
     BASESET = frozenset(i for i in range(n) if 1 in _cls_of(mclass, i))
     GATE = bool(inst.get("collect_gate", True))
+    # ★★ 2026-11-18 用户定调：**变卡交给 DP 安排**。
+    #   输入 = 「手里有多少张礼物卡」（成功率按 100% 算，执行层实际会烧掉一部分，
+    #   那属于「这一步没做成」，不该让计划本身变）；可变目标 = 本套的 40 面卡
+    #   （`inst["gift"]["types"]`，求解器只认 live 下标）。
+    #   模型口径：变卡**零耗时、不占炉、箱格原地替换**（源卡那格 → 目标卡那格），
+    #   所以它对 DP 而言就是「这几张 40 面卡当场拿到」，唯一代价是消耗一张礼物卡
+    #   额度。于是 DP 会自己决定：哪个 tick 变、变哪几张（正好凑成能开炉的 150）、
+    #   变完直接投炉；没空炉的 tick 它不会变（变了也没有收益，只白烧礼物卡）。
+    #   缺省 `gift` 不存在 → GIFT_ON=False，全部走旧路径，逐位一致。
+    _gcfg = inst.get("gift") or {}
+    GN0 = int(_gcfg.get("n") or 0)
+    GSET = frozenset(int(x) for x in (_gcfg.get("types") or []))
+    GIFT_ON = bool(GN0 > 0 and GSET)
 
     # ★ 向上 cp 在此预计算并注入 inst["ucp"]：供 vec_prio（搜索指路）复用，
     # 外部也可直接传 inst["ucp"] 覆盖。注意 UB 的 ready 排序**不用**它
@@ -987,10 +1061,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         BOUND_V[0] *= _INF_RELAX
     if PURE:
         best = {"val": INF, "sched": None, "from": None,
-                "deliv": None}
+                "deliv": None, "gift": None}
     else:
         best = {"val": ub, "sched": list(ub_sched), "from": "UB",
-                "deliv": None}
+                "deliv": None, "gift": None}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None, "capped": 0, "pure": PURE}
     _occ0 = float(sum(init_stock) if init_stock is not None else 0) + len(run_norm)
@@ -1117,7 +1191,11 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         """单个开工 op 的箱占用净增量（见 sched_peak）。"""
         return 1 - sum(k for _j, k in mats[int(i)])
 
-    def key_of(need, stock, running_rel):
+    def key_of(need, stock, running_rel, gl=0):
+        # gift 余额必须进 key：同一 (need, stock, running) 下余额不同，后续能
+        # 变出几张 40 面就不同 → 不是同一子问题。GIFT_ON=False 时与旧 key 一致。
+        if GIFT_ON:
+            return (need, stock, running_rel, gl)
         return (need, stock, running_rel)
 
     # ★★ 2026-11-16 用户定调（第三处漏掉的动作）：**上交**。
@@ -1133,26 +1211,51 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     _top_i = max(range(n), key=lambda c: _depths[c]) if n and deliver_on else -1
 
     def path_to_sched(path):
+        """路径 → 调度表；同时把「gift 支付的 40 面卡」抽成变卡动作。
+
+        变卡的时刻 = 消费它的那个 op 的开工时刻（同 tick 先变后投，用户口径：
+        「这一个 tick 的动作就应该是变 6 张卡加投 2 炉」）。
+        """
         out = []
+        gops = []
         for t, vec in path:
-            for i, c, _ci in vec:
+            for ev in vec:
+                if ev[2] == -1:            # 变卡动作：(类型, 张数, -1)
+                    for _ in range(ev[1]):
+                        gops.append((ev[0], t))
+                    continue
+                i, c = ev[0], ev[1]
+                gjk = ev[3] if len(ev) > 3 else ()
                 for _ in range(c):
                     out.append((i, t))
-        return out
+                for j, k in gjk:
+                    for _ in range(k):
+                        gops.append((j, t))
+        return out, gops
 
     def cells_to_sched(head):
         """后缀链（delta 编码）→ 绝对时间调度表。root 入口 t=0 → delta 即绝对。"""
         out = []
+        gops = []
         tr = 0.0
         while head is not None:
             delta, vec, tail = head
             tr += delta
             if vec is not None:
-                for i, c, _ci in vec:
+                for ev in vec:
+                    if ev[2] == -1:        # 变卡动作：(类型, 张数, -1)
+                        for _ in range(ev[1]):
+                            gops.append((ev[0], tr))
+                        continue
+                    i, c = ev[0], ev[1]
+                    gjk = ev[3] if len(ev) > 3 else ()
                     for _ in range(c):
                         out.append((i, tr))
+                    for j, k in gjk:
+                        for _ in range(k):
+                            gops.append((j, tr))
             head = tail
-        return out
+        return out, gops
 
     def chain_of(ops):
         """[(t_rel, vec)] 时间正序 → delta 编码 cons 链（头=最早 op）。"""
@@ -1185,28 +1288,87 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             head = (cc[0], cc[1], head)
         return head
 
-    def _ready_items(stock_v, need_v):
+    def _ready_items(stock_v, need_v, gl=0):
         """素材齐的可开工精炼 [(type, 可开数上限)]。
 
         ★ buy_free 下买卡当场入箱 → 必须在买卡之后**重新算一次**，否则
           「买完当拍就能开工」的炉会白等下一迭代（= 又变成买卡占一拍）。
+        ★ gift（变卡）：素材缺口可由礼物卡即时补（零耗时）→ 判定与上限都按
+          `stock + 礼物卡额度` 乐观算；真正的张数份额由 `_vectors` 逐张精确扣。
         """
         out_i = []
         for i3 in range(n):
             if need_v[i3] <= 0:
                 continue
             if 0 in _cls_of(mclass, i3):
-                if all(stock_v[j] >= kk for j, kk in mats[i3]):
+                if not (GIFT_ON and gl > 0):
+                    # 快路径（礼物卡未启用 / 已用完）—— 与旧实现逐位一致
+                    if all(stock_v[j] >= kk for j, kk in mats[i3]):
+                        lim = need_v[i3]
+                        for j, kk in mats[i3]:
+                            lim = min(lim, stock_v[j] // kk)
+                        if lim > 0:
+                            out_i.append((i3, lim))
+                    continue
+                _av = [(stock_v[j] + (gl if j in GSET else 0), kk)
+                       for j, kk in mats[i3]]
+                if all(a >= kk for a, kk in _av):
                     lim = need_v[i3]
-                    for j, kk in mats[i3]:
-                        lim = min(lim, stock_v[j] // kk)
+                    for a, kk in _av:
+                        lim = min(lim, a // kk)
                     if lim > 0:
                         out_i.append((i3, lim))
         return out_i
 
-    def dfs(need, stock, running_rel, t, path):
+    # 兑换优先级：关键路径长的 40 面卡先变（凑最先要开的那炉）
+    _gift_order = (sorted(GSET, key=lambda i: (-float(_up[i] if i < len(_up) else 0.0), i))
+                   if GIFT_ON else ())
+    # 上层 op 的尝试顺序（cp 降序 = 关键路径优先）
+    _op_order = (sorted(range(n), key=lambda i: (-float(_up[i] if i < len(_up) else 0.0), i))
+                 if GIFT_ON else ())
+
+    def _gift_exchange(need, stock, gl, gl_idle):
+        """礼物卡兑换：把「某条上层 op 正好缺的那几张 40 面卡」当场变出来。
+
+        ★★ 2026-11-18 用户定调（口径修正）：**变卡不是补素材额度，是直接把
+        计划里那张 40 面卡做出来**——变卡零耗时、不占炉、箱格原地替换（源卡
+        那格换成目标卡那格），所以它在 DP 里等价于「这张卡的炼制已完成」。
+
+        唯一该变的时候 = **变了就能立刻开炉**：某个上层 op 的缺口全是 40 面卡
+        （缺底卡的话变了也开不了），且这些 40 面卡的产出本来就是计划里的
+        （`need[j]` 够），且**主炉确有空的**（没空炉变了只是占箱位）。
+        这三条都不是外部限制，而是「没有可兑换目标」——DP 自己在计划层面就
+        不会安排这次变卡。
+
+        返回 (miss, gl_used)：miss = [(类型, 张数)]，由调用方扣 need/加 stock。
+        """
+        if gl_idle <= 0:
+            return None
+        for i3 in _op_order:
+            if need[i3] <= 0:
+                continue
+            if 1 in _cls_of(mclass, i3):
+                continue                  # 买卡类型不是「炼出来的」
+            miss = []
+            ok = True
+            for j, k in mats[i3]:
+                if stock[j] >= k:
+                    continue
+                d = k - stock[j]
+                if j not in GSET or need[j] < d:
+                    ok = False            # 缺口里有非 40 面素材，或计划没要这张卡
+                    break
+                miss.append((j, d))
+            if not ok or not miss:
+                continue
+            if sum(d for _j, d in miss) <= gl:
+                return miss
+        return None
+
+    def dfs(need, stock, running_rel, t, path, gl):
         """返回 (从该状态的相对额外耗时, 最优后缀链)。
 
+        gl = 当前还剩几张礼物卡（可变出 40 面卡，零耗时、不占炉）。
         后缀链：cons 单元 (delta, vec|None, tail)——delta = 距上一 op 的相对
         时间，vec=None 为纯延时单元。memo 存（值, 后缀）而非只存值：
         ★ 旧版只存值 → memo 命中跳过叶子访问 → 最优调度的叶子永不被记录 →
@@ -1312,13 +1474,13 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     if t + fin <= BOUND_V[0] + 1e-9 and _leaf_better:
                         best["val"] = t + fin
                         best["deliv"] = _dl
-                        best["sched"] = path_to_sched(cur_path)
+                        best["sched"], best["gift"] = path_to_sched(cur_path)
                         best["from"] = "DP"
                         DIAG["leaf"] += 1
                 elif _leaf_better:
                     best["val"] = t + fin
                     best["deliv"] = _dl
-                    best["sched"] = path_to_sched(cur_path)
+                    best["sched"], best["gift"] = path_to_sched(cur_path)
                     best["from"] = "DP"
                 # ★ 后缀必须包含本次调用已产生的 op（典型：终局专辑底卡买卡
                 #   发生在叶子前一迭代）——旧版返 None 把它们全丢（1★ 实测
@@ -1330,7 +1492,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 #   正确纯属叶子赋值侥幸）。
                 return t_rel + fin, chain_of(own_ops), run_peak, _dl
 
-            key = key_of(need, stock, running_rel)
+            key = key_of(need, stock, running_rel, gl)
             hit = memo.get(key) if use_memo else None
             if hit is not None:
                 stats["memo_hits"] += 1
@@ -1383,6 +1545,31 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 stock = tuple(ns)
                 running_rel = tuple(nr)
                 continue
+
+            # ---- 变卡（礼物卡）：把「某条上层 op 正好缺的 40 面卡」当场变出来 ----
+            # 用户 2026-11-18 定调：变卡零耗时、不占炉、箱格原地替换，所以 DP 眼里
+            # 它就是「计划里那张 40 面卡已经做出来了」。它只在该变的时候发生：
+            # 有**空主炉** + 某个 op 的缺口**全是** 40 面卡（缺底卡变了也开不了）
+            # + 那几张卡本来就是计划要产的（need 够）。没有可兑换目标就不动。
+            # 变卡结果直接记进 op 流（ci=-1），时刻 = 消费它的那条 op 的开工时刻，
+            # 于是计划天然是「本 tick 变 N 张 + 投 M 炉」一个整体，不需要事后重解。
+            if GIFT_ON and gl > 0:
+                _busy0 = sum(1 for _x, _f, _c in running_rel if _c == 0)
+                _gl_idle = M - _busy0
+                _ex = _gift_exchange(need, stock, gl, _gl_idle)
+                if _ex is not None:
+                    ns = list(stock)
+                    nn = list(need)
+                    for j, k in _ex:
+                        nn[j] -= k
+                        ns[j] += k
+                    stock, need = tuple(ns), tuple(nn)
+                    gl -= sum(k for _j, k in _ex)
+                    _gv = tuple((j, k, -1) for j, k in _ex)
+                    own_ops.append((t_rel, _gv))
+                    cur_path = cur_path + ((t, _gv),)
+                    DIAG["gift_ex"] = DIAG.get("gift_ex", 0) + 1
+                    continue
 
             # ---- 可启动：精炼（素材齐）；买卡走下方 lazy 确定性规则 ----
             running_cnt = {}
@@ -1443,11 +1630,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                         continue
                     ch = dur[i] + max(
                         (_chain_avail_rel(j, kk, stock, running_rel, set(),
-                                          _fins_by)
+                                          _fins_by, GSET, gl)
                          for j, kk in mats[i]), default=0.0)
                     if ch > lb:
                         lb = ch
-                cum = _cum_lb(need, stock, running_rel, t, mclass, sc, _fins_by)
+                cum = _cum_lb(need, stock, running_rel, t, mclass, sc, _fins_by,
+                              GSET, gl)
                 if cum > lb:
                     lb = cum
             # 绝对下界 = t + lb；超过已知最优则剪枝（仅当前节点放弃）
@@ -1598,7 +1786,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                                       max_vecs=max_vecs, rec_budget=rec_budget,
                                       prio=vec_prio,
                                       prio2=inst.get("tb"),
-                                      prio2_first=bool(inst.get("tb_first")))
+                                      prio2_first=bool(inst.get("tb_first")),
+                                      gift=None)
             if not complete:
                 stats["capped"] += 1
             if not vecs:
@@ -1659,8 +1848,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # 本向量开工事件的 occ 轨迹（逐张、同刻保序 → 与 sched_peak 同口径）
                 vec_occ = cur_occ
                 vec_peak = cur_occ
-                for i, c, _ci in vec:
-                    d = occ_delta(i)
+                for ev in vec:
+                    if ev[2] == -1:
+                        continue           # 变卡：箱格原地替换，占用不变
+                    i, c = ev[0], ev[1]
+                    gk = sum(k for _j, k in (ev[3] if len(ev) > 3 else ()))
+                    d = ((1 - sum(kk for _j, kk in mats[i]) + gk) / c) if c else 0.0
                     for _ in range(c):
                         vec_occ += d
                         if vec_occ > vec_peak:
@@ -1671,18 +1864,29 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # 曾误写为 nr = []（只装新开工），旧作业完工永不到账 → makespan 被
                 # 系统性低估、骨架 start 过早 → 执行层喂料未到 → 空转+重解。
                 nr = [(i, f, c) for i, f, c in running_rel]
-                for i, c, ci in vec:
+                gl2 = gl
+                for ev in vec:
+                    i, c, ci = ev[0], ev[1], ev[2]
+                    if ci == -1:
+                        continue           # 变卡动作：已在兑换时结清，不占机器
+                    gjk = ev[3] if len(ev) > 3 else ()
+                    if gjk:
+                        # 礼物卡顶掉的几张不进 stock 扣减（它本来是箱里的杂卡，
+                        # 变卡后原格换成 40 面卡 → 只从额度里扣）
+                        gl2 -= sum(k for _j, k in gjk)
                     for _ in range(c):
                         for j, kk in mats[i]:
                             ns[j] -= kk
                         nn[i] -= 1
                         nr.append((i, dur[i], ci))
+                    for j, k in gjk:
+                        ns[j] += k
                 nr.sort()
                 dt = min(f for _i, f, _c in nr)
                 nrr = tuple((i, f - dt, c) for i, f, c in nr)
                 v, child_suffix, child_peak, child_dv = dfs(
                     tuple(nn), tuple(ns), nrr, t + dt,
-                    cur_path + ((t, vec),))
+                    cur_path + ((t, vec),), gl2)
                 cand_v = dt + v
                 # 已知 makespan 下界达成后，更差的候选不可能改进字典序 → 跳过
                 # （无限模式的字典序以 ΣCi 为先，makespan 差的候选仍可能更优）
@@ -1742,7 +1946,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 _dw = min(f for _i, f, _c in running_rel)
                 _nr = tuple((i, f - _dw, c) for i, f, c in running_rel)
                 # 等待段的箱占用不变（无新产物入箱），occ 只随收卡增加
-                _wv, _wsfx, _wpk, _wdv = dfs(need, stock, _nr, t + _dw, cur_path)
+                _wv, _wsfx, _wpk, _wdv = dfs(need, stock, _nr, t + _dw, cur_path, gl)
                 if _wv < INF:
                     _cv = _dw + _wv
                     _cpk = max(run_peak, _wpk)
@@ -1813,7 +2017,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 memo = {}
                 BOUND_V[0] = INF      # dive 不剪枝
                 try:
-                    dfs(need0, st0, rg, 0.0, ())
+                    dfs(need0, st0, rg, 0.0, (), GN0)
                 except _SearchAbort:
                     stats["bounded"] = True
                     break
@@ -1837,7 +2041,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         else:
             BOUND_V[0] = _bv0
     try:
-        v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, ())
+        v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, (), GN0)
     except _SearchAbort:
         v, suffix, root_peak, root_dv = INF, None, INF, None
         stats["bounded"] = True
@@ -1884,7 +2088,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         except Exception:
             pass
         try:
-            v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, ())
+            v, suffix, root_peak, root_dv = dfs(need0, st0, rg, 0.0, (), GN0)
             stats["retry_mv"] = max_vecs
         except _SearchAbort:
             v, suffix, root_peak, root_dv = INF, None, INF, None
@@ -1899,14 +2103,14 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     if v < INF and PURE:
         # 纯 DP：交付的必须是从这条后缀链重建的调度，`from` 恒为 "DP"
         best["val"] = v
-        best["sched"] = cells_to_sched(suffix)
+        best["sched"], best["gift"] = cells_to_sched(suffix)
         best["from"] = "DP"
         stats["opt"] = v
     elif v < INF:
         stats["opt"] = v
         if v < best["val"] - 1e-6:
             best["val"] = v
-            best["sched"] = cells_to_sched(suffix)
+            best["sched"], best["gift"] = cells_to_sched(suffix)
             best["from"] = "DP"
         elif lex_eq and abs(v - best["val"]) <= 1e-6:
             # best["sched"] 可能来自 UB 或某个已访叶子；DP 后缀链是字典序
@@ -1917,7 +2121,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 if _bdv is None or root_dv < _bdv:
                     _swap = True
             if _swap:
-                best["sched"] = cells_to_sched(suffix)
+                best["sched"], best["gift"] = cells_to_sched(suffix)
                 best["deliv"] = root_dv
                 best["from"] = "DP"
                 stats["lex_peak_swap"] = True
@@ -1929,7 +2133,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         if PREFER_DP and best["from"] == "UB" \
                 and 0 <= v - best["val"] <= PREFER_TOL + 1e-6 \
                 and root_peak <= stats["ub_peak0"] + 1e-9:
-            best["sched"] = cells_to_sched(suffix)
+            best["sched"], best["gift"] = cells_to_sched(suffix)
             best["from"] = "DP"
             stats["prefer_dp"] = True
     else:
@@ -1967,4 +2171,9 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     stats["root_v"] = v if v < INF else None
     stats["best_v"] = best["val"]
     stats["note"] = stats.get("note")
+    # ★ 变卡计划：交付调度里「由礼物卡顶出来的 40 面卡」= [(type_idx, 绝对秒)]。
+    #   执行层按此发变卡（同 tick 先变后投），不再由执行层自己按缺口猜目标。
+    stats["gift_ops"] = list(best.get("gift") or [])
+    stats["gift_used"] = len(stats["gift_ops"])
+    stats["gift_n"] = GN0
     return best["val"], best["sched"], stats
