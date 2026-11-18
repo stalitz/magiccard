@@ -1461,6 +1461,55 @@ class DPTickController:
             return ws.main_free
         return max(0, min(ws.main_free, self.machines - self._busy_stoves(ws)))
 
+    def gift_change_targets(self, max_n: int = 0) -> List[Tuple[int, int]]:
+        """DP 计划里「本来要自己从底卡炼」的 40 面卡 → 变卡目标清单。
+
+        用户 2026-11-18 定调：「把变卡也交给 dp 来安排，这样变出来的卡 dp 也能
+        直接安排投炉」。
+
+        变卡物理上是**零耗时、不占炉、箱位原地替换**（源卡消失、目标卡落同一格，
+        `boxes` 前后格数不变），所以在 DP 眼里它等价于「计划里那张 40 面卡直接
+        做出来」。因此目标不该再由执行层按「整套 35 张缺口」自己挑（那会一直盯
+        缺口最大的老冰棍/翻花绳，且口径是 `mid_collect=True`，比 DP 真实需要的
+        18 张多一倍），而应当**就是 DP 计划里 kind=refine 且面额 40 的那几条 op**：
+
+          · 变出来 = DP 计划的这一步已就绪，下一 tick 重解就能直接拿它开 150 的炉；
+          · 按计划时刻升序取（先补最近要用的，不囤在后面占格）；
+          · 只取未 issued 的 op（已经投进炉的不必再变）；
+          · 同一张卡多次 refine → 合并成 (cid, n)；
+          · `max_n` > 0 截断（箱里礼物卡张数是硬上限，失败还烧源卡）。
+
+        返回 `[(cid, n), ...]`；无计划/无 40 面 refine 时返回空（执行层就不动礼物卡）。
+        """
+        plan = self._plan
+        if not plan or not plan.get("ops"):
+            return []
+        issued = plan.get("issued") or []
+        agg: Dict[int, int] = {}
+        order: List[int] = []
+        for i, op in enumerate(plan["ops"]):
+            if op.get("kind") != "refine":
+                continue
+            if i < len(issued) and issued[i]:
+                continue
+            cid = int(op.get("cid") or 0)
+            m = self._owner.get(cid)
+            if m is None or not m.is_40(cid):
+                continue                      # 礼物卡只能变 40 面，其余面额无解
+            if cid not in agg:
+                order.append(cid)
+                agg[cid] = 0
+            agg[cid] += 1
+        out: List[Tuple[int, int]] = []
+        left = int(max_n) if int(max_n or 0) > 0 else 10 ** 9
+        for cid in order:
+            if left <= 0:
+                break
+            take = min(agg[cid], left)
+            out.append((cid, take))
+            left -= take
+        return out
+
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
                   box_stock, pending, active=None, buy0_map=None):
