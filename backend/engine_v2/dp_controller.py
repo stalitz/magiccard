@@ -43,6 +43,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import time as _t
 from collections import Counter
@@ -253,6 +254,15 @@ class DPTickController:
         # ★ 紧箱物理无解时停手报告（2026-11-15 全矩阵 A/B PASS 后上线）。
         #   默认开；`MC_DP_DEADLOCK_REPORT=0` 可关闭复现旧行为（A/B 用）。
         self.deadlock_report = os.environ.get("MC_DP_DEADLOCK_REPORT", "1") == "1"
+        # ★★ 2026-11-18 用户定调：「把非本套的 10 面卡喂给 dp，dp 应该能自己排出
+        #   卖卡的动作」。开 = 可直卖的非本套 ≤10 面卡计入 DP 箱容（`_pool_caps`），
+        #   并由 DP 按计划箱压峰值产出 sell 动作（`_solve_plan` 的 need_sell）。
+        #   `MC_DP_SELL_PLAN=0` 逐位复现旧行为（只有执行层 `_box_compaction`
+        #   常量阈值腾箱，A/B 用）。
+        self.sell_plan = os.environ.get("MC_DP_SELL_PLAN", "1") == "1"
+        # 无限口径（0=无限）的需求窗口是否再吃「两箱可用格数 // 每套张数」这道
+        # 物理闸。开 = 紧箱时窗口自动收窄（否则 DP 装不下 → 空 ops → 零动作）。
+        self.inf_box_win = os.environ.get("MC_DP_INF_BOX_WIN", "1") == "1"
         self.deadlock_reports = 0
         self._last_deadlock_log = -10 ** 9
         if self.buy_free:
@@ -477,7 +487,7 @@ class DPTickController:
 
     def _union_need0(self, box_stock, pending, active, completed_rounds,
                      max_rounds, credits=None, sets_fn=None, free_main=0,
-                     box_free=0):
+                     box_free=0, store_free=0):
         """净需求：(非底卡炼几次, 底卡买几张)。
 
         直接复用 net_plan(box, pending, sets)（与贪心 Planner 完全同口径）：
@@ -550,6 +560,25 @@ class DPTickController:
                 # 故默认 3，`MC_INF_SETS_CAP` 可覆盖。
                 _cap_env = int(os.environ.get("MC_INF_SETS_CAP") or 0)
                 _inf_cap = _cap_env if _cap_env > 0 else 3
+                # ★★ 2026-11-18 真机 10708702（两箱只有 8 格可用、N=9）：
+                #   窗口无条件抬到 3 套 → 需求 = 3 套的料 → 物理装不下 →
+                #   **DP 搜不到叶子（leaf=0、inf_dead 上万）→ 返回空 ops → 零动作**，
+                #   真机表现就是「炉全空、不买不投不卖」，与爆栈叠加。
+                #   窗口必须先过箱位这道物理闸：一套要 N 张同时在箱流转。
+                #   可用量 = 两箱空位（含可直卖 ≤10 面杂卡额度）+ **已在箱/在炉的
+                #   本套卡**（它们已占格、不在 box_free 里，但可继续往下流转）。
+                #   ⚠ 少了「在箱在炉」那一项就退化成纯 `free // N`：仿真 11 套的
+                #   基线（窗口 3、滚动流转）会被误钳到 2 套 → 20h 少交 1 套
+                #   （2026-11-18 A/B：`MC_DP_INF_BOX_WIN=0` 逐位回到 11 套）。
+                _own = set(m.ids)
+                _inflight = (sum(int(n) for c, n in box_stock.items()
+                                 if int(c) in _own and n)
+                             + sum(int(n) for c, n in pending.items()
+                                   if int(c) in _own and n))
+                _box_ok = max(1, (int(box_free) + int(store_free) + _inflight)
+                              // max(1, len(m.ids)))
+                if self.inf_box_win:
+                    _inf_cap = min(_inf_cap, _box_ok)
                 if sets < _inf_cap:
                     sets = _inf_cap
                 self.infinite_active = True
@@ -737,6 +766,35 @@ class DPTickController:
     #   · 保险箱空位 = store_cur  - 保险箱杂卡（炼成卡优先落这里）
     # 三者一起传给求解器，作为落箱状态转移的约束；求解器缺省不带这些字段时
     # 行为与旧版逐位一致。
+    def _sellable_in_change(self, ws):
+        """换卡箱里**可直卖**的非本套 ≤10 面卡：(face, cid, slot)，面额升序。
+
+        ★★ 2026-11-18 用户定调：「把非本套的 10 面卡喂给 dp，dp 应该能自己排出
+          卖卡的动作」。10 面卡卖出返还面额等额金币、买回同价（1:1 无损），
+          因此「卖掉它换来的 1 格」对 DP 是**合法可用容量**——前提是容量与
+          卖卡动作成对出现（`_pool_caps` 加额度、`_run_plan` 发 sell action），
+          不是只加容量不发货（那才是虚增，会让买卡预算高于物理空位）。
+
+        只收三类同时成立的：换卡箱（slottype=0）+ 非本套（`_owner` 没有）
+        + 0<面额<=10。本套底卡由 `_box_compaction` 第 1 段按其自己的 keep 处理；
+        >10 面高面值卡**永不自动卖**（铁律），不进这个列表。
+        """
+        if not self.models:
+            return []
+        cards_map = next(iter(self.models.values())).cards
+        out = []
+        for cid, slot, slottype in ws.slots:
+            if cid <= 0 or slottype != 0:
+                continue
+            if self._owner.get(cid) is not None:
+                continue                  # 本套的卡：绝不在这里卖
+            c = cards_map.get(cid)
+            face = int(c[3] or 0) if c else 0
+            if 0 < face <= 10:
+                out.append((face, cid, slot))
+        out.sort()                        # 面额升序：先卖最便宜的
+        return out
+
     def _pool_caps(self, ws):
         ch_junk = st_junk = 0
         for cid, _slot, slottype in ws.slots:
@@ -746,7 +804,13 @@ class DPTickController:
                 st_junk += 1
             elif slottype == 0:          # 简易箱/临时箱不算换卡箱占用
                 ch_junk += 1
-        return (max(0, (ws.change_cur or 0) - ch_junk),
+        # ★ 2026-11-18：可直卖的非本套 ≤10 面卡算进换卡箱可用容量（卖卡动作
+        #   由 DP 自己按计划箱压峰值排，见 `_solve_plan` 的 need_sell）。这就是
+        #   「把 10 面卡喂给 DP」——喂的是「卖它 → 多得 1 格」这个有代价的额度，
+        #   不是白送的空位。
+        sellable = (len(self._sellable_in_change(ws))
+                    if self.sell_plan else 0)
+        return (max(0, (ws.change_cur or 0) - ch_junk + sellable),
                 max(0, (ws.store_cur or 0) - st_junk))
 
     def _pool_base_store(self, ws, live):
@@ -901,7 +965,7 @@ class DPTickController:
     # ------------------------------------------------------------------
 
     def _box_compaction(self, ws, plan, due, actions, avail_slots,
-                        protect=None):
+                        protect=None, dp_sold: int = 0):
         """腾箱（BoxCompaction，同贪心 Step4 口径）：箱紧时卖多余 10 面底卡
         + 挪多余合成卡进保险箱，给 JIT 买卡 / 落箱腾位。
 
@@ -934,7 +998,7 @@ class DPTickController:
           即可，不涉及同类假设。
         每次腾箱记 1 点 discrepancy（计划与现实偏差信号 → disc_over 重解）。
         """
-        if not (ws.change_free <= 2 or ws.box_free <= 4):
+        if not dp_sold and not (ws.change_free <= 2 or ws.box_free <= 4):
             return 0
         # ★★ 2026-11-03 真机 4821992：腾位的**唯一目的**是让「买料的卡」或
         #   「出炉落箱的卡」进得来。两者都没有时腾位纯属白折腾 —— 真机实测
@@ -1026,6 +1090,15 @@ class DPTickController:
         #   轮到卖。10 面卡卖 = 面额等额金币、买回同价，1:1 无损 → 优先直卖。
         #   铁律不变：只卖 `_owner` 里没有（非本主题）且 0<面额<=10 的卡；
         #   本主题卡、≥40 面卡一律不动（用户 2026-10-21 定调）。
+        # ★ 2026-11-18：DP 已按计划箱压峰值排出 `dp_sold` 张卖卡（见 `_run_plan`），
+        #   第 3/4 段不再重复挑卡 —— 同一 slot 二次卖出必然失败，且会多卖
+        #   （`_pool_caps` 只按 sellable 总张数给额度，卖超了就是白丢卡）。
+        if dp_sold:
+            if n_sold or n_moved:
+                self.compact_sold += n_sold
+                self.compact_moved += n_moved
+                plan["discrepancy"] += 1
+            return n_free_change
         # 目标：腾到够一次「买 3 张底卡立即投炉」即可，别把换卡箱清空。
         want = max(0, 4 - ws.change_free)
         if want > 0:
@@ -1232,6 +1305,20 @@ class DPTickController:
                                      init_stock=init_stockL, init_running=running,
                                      memo=None, max_vecs=self.max_vecs)
             stats["box_relaxed"] = True
+        # ---- DP 排出的「卖杂卡」张数（2026-11-18）----
+        #   `box_cap` 已含可直卖的 ≤10 面非本套卡额度（见 `_pool_caps`）。这里用
+        #   **计划箱压峰值**反推「必须真卖几张」：峰值超出物理空位的部分，只能靠
+        #   卖卡兑现。口径由计划自己定，不是常量阈值 —— 旧的 `_box_compaction`
+        #   用 change_free<=2 / box_free<=4 / want=4-free 三个常量，在
+        #   change_free=6（真机 2026-11-18）时三条路径同时判「箱位够」，一张不卖。
+        phys_cap = max(0, ws.change_free) + max(0, ws.store_free)
+        sell_q = self._sellable_in_change(ws)
+        need_sell = 0
+        if sell_q and sched and self.sell_plan:
+            _peak = self._box_peak(inst, sched, sum(init_stockL))
+            if _peak > phys_cap + EPS:
+                need_sell = min(len(sell_q),
+                                int(math.ceil(_peak - phys_cap - EPS)))
         dt_ms = (_t.perf_counter() - t0) * 1000.0
         self.solve_count += 1
         self.solve_total_ms += dt_ms
@@ -1273,7 +1360,9 @@ class DPTickController:
                 "planned_buy": planned_buy, "bought": Counter(),
                 "streak": 0, "discrepancy": 0, "makespan": mk,
                 "n_types": nL, "box_relaxed": bool(stats.get("box_relaxed")),
-                "cp_thr": _cp_thr}
+                "cp_thr": _cp_thr,
+                # DP 自己排出的卖卡张数（执行层按此发 sell，排在买卡之前）
+                "need_sell": need_sell}
         return plan, stats
 
     def _busy_stoves(self, ws) -> int:
@@ -1373,8 +1462,32 @@ class DPTickController:
         due_window = min(base_window, cap_window)
         due, protect = self._jit_due(ws, plan, box_stock, pending,
                                      due_window, active)
+        # ★★ 2026-11-18：把 `plan["need_sell"]` 兑现成**真实卖卡动作**。
+        #   箱容（`_pool_caps`）是按「这些卡卖掉之后」的格数算给 DP 的，因此
+        #   必须真卖 —— 且要排在买卡/投炉之前（executor 按 actions 顺序执行）。
+        #   只卖「非本套 + ≤10 面 + 换卡箱」，面额升序（先卖最便宜的）。
+        dp_sold = 0
+        _need_sell = int(plan.get("need_sell") or 0)
+        if _need_sell > 0:
+            for face, cid, slot in self._sellable_in_change(ws):
+                if dp_sold >= _need_sell:
+                    break
+                actions.append(Action(kind="sell", cid=cid, slot=slot,
+                                      slottype=0,
+                                      note=f"DP排程卖杂卡{cid}(面{face})"))
+                lst = avail_slots.get(cid)
+                if lst and (slot, 0) in lst:
+                    lst.remove((slot, 0))
+                dp_sold += 1
+            if dp_sold:
+                # ★ 一次性兑现：`need_sell` 是「本次解算的箱压峰值超出物理空位
+                #   的张数」，卖完就归零 —— 否则计划跨 tick 复用时每 tick 都卖
+                #   need_sell 张（可卖卡还剩几张就多卖几张）。下次重解会按新的
+                #   箱位/容量重新算。
+                plan["need_sell"] = 0
         freed = self._box_compaction(ws, plan, due, actions, avail_slots,
-                                     protect)
+                                     protect, dp_sold=dp_sold)
+        freed += dp_sold
 
         def take_slot(cid: int):
             lst = avail_slots.get(cid)
@@ -2127,7 +2240,7 @@ class DPTickController:
         self.streak_max = max(self.streak_max, plan["streak"])
         self.opportunistic_total += n_early
         return {"refined": n_ref, "bought": n_buy, "emergency": n_emerg,
-                "early": n_early}
+                "early": n_early, "sold": dp_sold}
 
     def decide(self, ws: WorldState, active: List[int],
                completed_rounds: Counter, max_rounds: int = 0,
@@ -2154,7 +2267,14 @@ class DPTickController:
         # ---- 0) 预腾位：解开「提套要 ≥6 格 / 腾箱只在 ≤2 格触发」的互锁 ----
         #   只在「物理空位不足 pipe_min_free、但可达空位够」且箱内确有杂卡时
         #   动作；紧箱且无可腾杂卡时保持原行为（停手报告，不硬排）。
-        if (self.pipe_sets and ws.change_free < self.pipe_min_free
+        # ★ 2026-11-18：可直卖的 ≤10 面非本套卡已作为**有代价的额度**喂给 DP
+        #   （`_pool_caps` 把它们计入换卡箱可用容量），卖几张由 DP 按计划箱压
+        #   峰值决定（`_solve_plan` 的 `need_sell`）。所以这里只要存在可卖卡，
+        #   就不再按常量 `want` 抢在前面卖 —— 否则 DP 拿到的箱容已含额度、
+        #   额度又被预腾位提前兑现，两边口径互相打架（旧行为就是常量 want 与
+        #   DP 容量各说各话）。
+        if (self.pipe_sets and not (self.sell_plan and self._sellable_in_change(ws))
+                and ws.change_free < self.pipe_min_free
                 and self._reachable_free(ws) >= self.pipe_min_free):
             want = self.pipe_min_free - ws.change_free
             n_evict = self._pre_evict_junk(ws, actions, want)
@@ -2193,7 +2313,10 @@ class DPTickController:
                                                 credits=credits,
                                                 sets_fn=self.sets_fn,
                                                 free_main=self._main_cap(ws),
-                                                box_free=ws.change_free)
+                                                # ★ 2026-11-18：用 `_pool_caps` 口径
+                                                #   （含可直卖 ≤10 面杂卡额度），
+                                                #   额度会在 `_run_plan` 兑现成 sell
+                                                box_free=ch_cap, store_free=st_cap)
 
         # ---- 1) collect：整套在箱即上交（先于买卡，复用贪心语义）----
         # ★ collect_freed 只做统计，**不进买卡预算**（2026-10-26）：
@@ -2291,6 +2414,11 @@ class DPTickController:
                       "bought_now": run_stats["bought"],
                       "emergency_now": run_stats["emergency"],
                       "early_now": run_stats["early"],
+                      # DP 自己排出的卖杂卡张数（箱容额度已含这些格位的兑现）
+                      "sell_now": run_stats.get("sold", 0),
+                      # 解算时算出的卖卡需求（卖出后会归零，用 max 保留本 tick 实数）
+                      "need_sell": max(int(plan.get("need_sell") or 0),
+                                       int(run_stats.get("sold", 0))),
                       "jit_blocked_total": self.jit_blocked,
                       "compact_sold_total": self.compact_sold,
                       "compact_moved_total": self.compact_moved,
