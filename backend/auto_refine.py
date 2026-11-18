@@ -1824,16 +1824,32 @@ class AutoRefine:
         #   `_refine_all` 里用，DP 路径完全不知道「变卡环节马上要交 40 面卡」→
         #   于是 DP 又拿底卡现造同款 40 面（一炉一炉白烧），变卡等于白变。
         #   这里按与贪心同一个函数算，交给控制器并进净需求库存。
+        # ★★ 2026-11-18：DP 已经**原生知道**礼物卡张数（`inst["gift"]`，变卡
+        #   在模型里 = 那张 40 面卡当场做出来的），再叠一层「变卡即将产出的 40 面
+        #   当虚拟库存」的 credit 就是同一件事算两遍 → DP 以为 40 面无限充足，
+        #   少排炼次、实际变不出来（真机 4821992 就是这么空的）。所以只要本 tick
+        #   真的喂了礼物卡张数，credit 一律清零，回到「旧口径」只在 gift_n=0
+        #   （礼物卡用完了）时按缺口补，保证不会两头都指望。
+        gift_n = 0
+        if self.change_by_dp and (self.box_gift_change or self.gift_drain):
+            try:
+                gift_n = int(self._gift_cards_left(st) or 0)
+            except Exception:      # noqa: BLE001
+                gift_n = 0
         credits: dict[int, Counter] = {}
-        for t in self.queue:
-            cr = self._face40_credit(self.plans[t], st, stock, pending)
-            if cr:
-                credits[t] = cr
+        if gift_n <= 0:
+            for t in self.queue:
+                cr = self._face40_credit(self.plans[t], st, stock, pending)
+                if cr:
+                    credits[t] = cr
         self.face40_credit = credits or {t: Counter() for t in self.queue}
+        # ★★ 变卡张数喂给 DP（2026-11-18 用户定调）：DP 把「还能变几张 40 面」
+        #   当成可用素材来排计划，于是「变 N 张 + 投 M 炉」是同一个 tick 的一次
+        #   决策；执行层变失败只影响本 tick 后续动作，不重解。
         try:
             actions, dpstats = self._dp_ctrl.decide(
                 ws, list(self.queue), completed, self.max_rounds,
-                credits=credits)
+                credits=credits, gift_n=gift_n)
         except Exception as exc:  # noqa: BLE001  DP 异常不拖死生产循环
             # _log(ok=False) 自身会累加 stats["errors"]，这里别再 +1
             self._log("DP调度", False, f"decide 异常：{str(exc)[:120]}")
@@ -3040,24 +3056,14 @@ class AutoRefine:
             if cap <= 0:
                 return []              # 箱里没有礼物卡 = 变不出 40 面，不动
             if self._dp_ctrl._plan is not None:
-                # ★★ 上限还要按「马上能投的项目」收窄：变出来的卡如果没有空炉
-                #   可开工，就只是**占着箱位**（用户 2026-11-18 原话：「变好 3 个
-                #   卡就可以直接投炉了，为什么不投，这不占着箱位吗」）。
-                #   每条 150 链吃 3 张不同 40 面 → 上限 = 空主炉数 × 3。
-                #   空炉 0（全在炼）→ cap=0 → 本轮不变，等出炉那 tick 再变。
-                free_st = 0
-                if st is not None:
-                    try:
-                        from .engine_v2.world import WorldState
-                        ws0 = WorldState.from_parsed(
-                            st, now=int(st.get("now") or 0))
-                        free_st = int(self._dp_ctrl._main_cap(ws0) or 0)
-                    except Exception:      # noqa: BLE001  观测/预估绝不拖死
-                        free_st = 0
-                cap = min(cap, max(0, free_st) * 3)
-                if cap <= 0:
-                    return []
-                tg = self._dp_ctrl.gift_change_targets(cap)
+                # ★★ 2026-11-18 口径纠正（用户定调）：**「没空炉就不变」是 DP 解
+                #   出来的，不是执行层加的限制**。旧版在这里用「空主炉数 × 3」
+                #   收窄目标张数，等于用执行层的常量去改 DP 的计划 —— DP 排了
+                #   6 张、执行层只变 3 张，剩下 3 张永远凑不成那炉 150。
+                #   现在目标直接取 DP 计划里的 gift_ops（那几张 40 面卡会在
+                #   「有空主炉 + 只缺 40 面素材」的 tick 才出现），执行层只照做。
+                tg = self._dp_ctrl.gift_change_targets(
+                    cap, now=(int(st.get("now") or 0) if st else None))
                 specs: list[tuple[int, int, int]] = []
                 for cid, n in tg:
                     tid = self._owner_tid(cid)
@@ -3152,8 +3158,13 @@ class AutoRefine:
         # ★★ 2026-11-18：变出 40 面卡 = DP 计划里那几条 40 面 refine op 已经
         #   由变卡替它做掉了。旧计划若不重解，执行层会照着旧 op **再炼一张同款**
         #   （白烧一炉），所以这里标记 dirty 强制下一 tick 重解。
-        if ok and self._dp_ctrl is not None:
-            self._dp_ctrl._dirty = True
+        # ★★ 2026-11-18 用户定调：**变卡失败不回滚、不重解**。
+        #   「变卡投炉的安排在这个 tick 就已经做好了，变不成功只是这个 tick 的
+        #    某些后续动作执行不成功，重解是下个 tick 的事」。
+        #   所以这里只把这批 gift op 从计划里划掉（不重复变），
+        #   绝不置 `_dirty` 触发重解。
+        if self._dp_ctrl is not None and (r.get("tried") or 0) > 0:
+            self._dp_ctrl.gift_commit()
         # 轮转计数：本会话累计各 40 面卡被变出的张数（仍是兜底，防死盯一张）
         for d, c in (r.get("per_dst") or {}).items():
             self._change_rot[int(d)] += int(c)
@@ -3228,10 +3239,9 @@ class AutoRefine:
         if ok:                              # 轮转计数：本会话累计变出几张，防死盯一张
             for d, c in (r.get("per_dst") or {}).items():
                 self._change_rot[int(d)] += int(c)
-            # 同 `_drain_box_gift`：变出 40 面 = DP 计划里那几条 refine 已替它做掉，
-            # 不重解会照旧 op 再炼一张同款（白烧一炉）。
-            if self._dp_ctrl is not None:
-                self._dp_ctrl._dirty = True
+            # 同 `_drain_box_gift`：只划掉计划里这批变卡动作，**不重解**
+            if self._dp_ctrl is not None and (r.get("tried") or 0) > 0:
+                self._dp_ctrl.gift_commit()
         self._log("礼物变卡", ok, r.get("message") or "")
         steps.append({"action": "礼物变卡", "ok": ok,
                       "detail": r.get("message") or ""})

@@ -357,6 +357,7 @@ class DPTickController:
         #   这里用「真正投出一炉」作为事件（比每 tick 解便宜得多：60 次量级）。
         self.event_resolve = os.environ.get("MC_EVENT_RESOLVE", "1") == "1"
         self._dirty = False             # 上次解之后是否又投出过炉（需重解）
+        self._gift_batch = []           # 本 tick 已取出、待兑现的变卡动作
         self._left_rounds = None        # 各套剩余轮数最小值（多轮判定，_union_need0 写）
         self.dirty_resolves = 0         # 事件驱动重解次数
         # streak 重解退避（2026-10-24 紧箱实测教训）：头动作因物理短缺
@@ -1228,7 +1229,7 @@ class DPTickController:
         return peak
 
     def _solve_plan(self, ws, active, need0_map, buy0_map, box_cap, sk,
-                    rounds_sig):
+                    rounds_sig, gift_n=0):
         """承诺点解算：从当前真实状态（箱内 + 在炉）求剩余问题最优骨架。"""
         idx = sk["idx"]
         types = sk["types"]
@@ -1276,6 +1277,17 @@ class DPTickController:
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,
                 "cp": cpL, "init_stock": init_stockL,
                 "steal_cap": self._steal_cap}
+        # ★★ 变卡素材喂给 DP（2026-11-18 用户定调「变卡交给 dp 安排」）：
+        #   可被变出来的只有本套的 40 面卡（礼物卡变卡目标），张数上限 = 箱里
+        #   还剩几张礼物套 48 面卡。DP 把变卡当成「这几张 40 面卡当场做出来」
+        #   （零耗时/不占炉/箱格原地替换），于是它自己会在「有空主炉、且某个
+        #   上层 op 只缺 40 面素材」的那个 tick 排变卡，变完直接投炉。
+        if gift_n > 0:
+            _gt = [i for i, c in enumerate(live)
+                   if self._owner.get(c) is not None
+                   and self._owner[c].is_40(c)]
+            if _gt:
+                inst["gift"] = {"n": int(gift_n), "types": _gt}
         # ★ 三空位状态条件：合计口径不变（box_cap 由 decide 按两箱可用格传入），
         #   另把两个分箱空位与保险箱内计划底卡分布喂进 DP 状态。
         ch_cap, st_cap = self._pool_caps(ws)
@@ -1399,6 +1411,15 @@ class DPTickController:
                             "cp": float(cpL[live_idx[c]])})
         ops.sort(key=lambda o: (o["start"], 0 if o["kind"] == "buy" else 1,
                                 -cpL[live_idx[o["cid"]]], o["cid"]))
+        # 变卡动作（DP 排出来的）：(cid, start)，执行层在 start 那一 tick 发
+        # `/api/gift/change`，变出来的 40 面卡正好被同 tick 的 op 用掉。
+        _gops = []
+        for _gi, _gs in (stats.get("gift_ops") or []):
+            _gi = int(_gi)
+            if 0 <= _gi < nL:
+                _gt2 = (int(_gs / tick + (1 - EPS)) * tick) if _gs > EPS else 0.0
+                _gops.append({"cid": live[_gi], "start": _gt2})
+        _gops.sort(key=lambda o: (o["start"], o["cid"]))
         # 关键路径长度中位数：早发只给「长链」开口子（见 `_run_plan` 的 `_cp_ok`）
         _cps = sorted(o.get("cp", 0.0) for o in ops if o["kind"] == "refine")
         _cp_thr = _cps[len(_cps) // 2] if _cps else 0.0
@@ -1409,7 +1430,10 @@ class DPTickController:
                 "n_types": nL, "box_relaxed": bool(stats.get("box_relaxed")),
                 "cp_thr": _cp_thr,
                 # DP 自己排出的卖卡张数（执行层按此发 sell，排在买卡之前）
-                "need_sell": need_sell}
+                "need_sell": need_sell,
+                # DP 自己排出的变卡动作 [(cid, start)]：变卡 = 计划里那张 40 面
+                # 卡当场做出来，执行层照着发请求，失败不回滚、不重解
+                "gift_ops": _gops}
         return plan, stats
 
     def _busy_stoves(self, ws) -> int:
@@ -1461,54 +1485,82 @@ class DPTickController:
             return ws.main_free
         return max(0, min(ws.main_free, self.machines - self._busy_stoves(ws)))
 
-    def gift_change_targets(self, max_n: int = 0) -> List[Tuple[int, int]]:
-        """DP 计划里「本来要自己从底卡炼」的 40 面卡 → 变卡目标清单。
+    def gift_change_targets(self, max_n: int = 0,
+                            now: float | None = None) -> List[Tuple[int, int]]:
+        """DP 计划里「本 tick 该变哪几张 40 面卡」→ 变卡目标 [(cid, 张数)]。
 
-        用户 2026-11-18 定调：「把变卡也交给 dp 来安排，这样变出来的卡 dp 也能
-        直接安排投炉」。
+        ★★ 2026-11-18 用户定调（口径纠正）：变卡**不是**事后从计划里抠几条
+        40 面 refine op，更不是「变完重解」——变卡进模型，由 DP 在计划里直接
+        排：「这个 tick 变这几张 40 面卡 + 投这几炉」。理由是变卡物理上零耗时、
+        不占炉、箱格原地替换（源卡那格换成目标卡那格），对 DP 而言等价于
+        「计划里那张 40 面卡当场做出来了」。
 
-        变卡物理上是**零耗时、不占炉、箱位原地替换**（源卡消失、目标卡落同一格，
-        `boxes` 前后格数不变），所以在 DP 眼里它等价于「计划里那张 40 面卡直接
-        做出来」。因此目标不该再由执行层按「整套 35 张缺口」自己挑（那会一直盯
-        缺口最大的老冰棍/翻花绳，且口径是 `mid_collect=True`，比 DP 真实需要的
-        18 张多一倍），而应当**就是 DP 计划里 kind=refine 且面额 40 的那几条 op**：
+        执行层只做两件事：按计划变、按计划投。变失败（~50% 成功率、失败也烧
+        源卡）就是「这个 tick 的后续动作没做成」——少投一炉、变出的 40 面留箱，
+        下个 tick 重解时它自然变成「还差几个 40 面 → 排炼卡」。**不回滚计划、
+        不因为是变卡而强制重解**。
 
-          · 变出来 = DP 计划的这一步已就绪，下一 tick 重解就能直接拿它开 150 的炉；
-          · 按计划时刻升序取（先补最近要用的，不囤在后面占格）；
-          · 只取未 issued 的 op（已经投进炉的不必再变）；
-          · 同一张卡多次 refine → 合并成 (cid, n)；
-          · `max_n` > 0 截断（箱里礼物卡张数是硬上限，失败还烧源卡）。
-
-        返回 `[(cid, n), ...]`；无计划/无 40 面 refine 时返回空（执行层就不动礼物卡）。
+        取法：`plan["gift_ops"]` 里 start 最早的那一批（同一 tick 内），按 cid
+        合并；取走后从计划里划掉（同一批不会被重复变，失败也不重试 —— 烧卡的
+        代价由「下 tick 重解」消化）。`max_n` > 0 时截断（礼物卡张数是硬上限）。
         """
         plan = self._plan
-        if not plan or not plan.get("ops"):
+        if not plan:
             return []
-        issued = plan.get("issued") or []
+        gops = plan.get("gift_ops") or []
+        if not gops:
+            return []
+        tick = float(self.lag_secs)
+        # ★ 只兑现「计划里已经到点的那批」：`start` 是相对求解时刻的偏移，
+        #   DP 把变卡排在「有空主炉且只缺 40 面素材」的那个 tick；没到点就
+        #   提前变 = 白占箱位（用户原话：「变好 3 个卡就可以直接投炉了，
+        #   为什么不投，这不占着箱位吗」）。
+        if now is not None:
+            _rel = float(now) - float(plan.get("solved_at") or 0.0)
+            batch = [o for o in gops
+                     if float(o.get("start") or 0.0) <= _rel + tick + 1e-9]
+        else:
+            t0 = float(gops[0].get("start") or 0.0)
+            batch = [o for o in gops
+                     if float(o.get("start") or 0.0) <= t0 + tick - 1e-9]
+        if not batch:
+            return []
+        batch.sort(key=lambda o: (float(o.get("start") or 0.0), int(o["cid"])))
+        left = int(max_n) if int(max_n or 0) > 0 else 10 ** 9
         agg: Dict[int, int] = {}
         order: List[int] = []
-        for i, op in enumerate(plan["ops"]):
-            if op.get("kind") != "refine":
-                continue
-            if i < len(issued) and issued[i]:
-                continue
-            cid = int(op.get("cid") or 0)
-            m = self._owner.get(cid)
-            if m is None or not m.is_40(cid):
-                continue                      # 礼物卡只能变 40 面，其余面额无解
+        took = []
+        for o in batch:
+            if left <= 0:
+                break                     # 超额的留在计划里，等下一轮
+            cid = int(o["cid"])
             if cid not in agg:
                 order.append(cid)
                 agg[cid] = 0
             agg[cid] += 1
-        out: List[Tuple[int, int]] = []
-        left = int(max_n) if int(max_n or 0) > 0 else 10 ** 9
-        for cid in order:
-            if left <= 0:
-                break
-            take = min(agg[cid], left)
-            out.append((cid, take))
-            left -= take
-        return out
+            took.append(o)
+            left -= 1
+        # 只读：真正的划账在 `gift_commit()`（变卡执行完之后）。否则
+        # `_face40_credit` 之类的预读会把计划提前吃掉，变卡环节拿不到目标。
+        self._gift_batch = took
+        return [(cid, agg[cid]) for cid in order]
+
+    def gift_commit(self) -> int:
+        """变卡执行完（成功几张、烧几张都算）→ 把这一批从计划里划掉。
+
+        划掉的语义 = 「这几个变卡动作本 tick 已经做过」，不重试、不重解；
+        失败了就是后续 op 素材不齐、少投几炉，下个 tick 滚动重解时重新排。
+        """
+        b = list(getattr(self, "_gift_batch", None) or [])
+        self._gift_batch = []
+        if not b:
+            return 0
+        plan = self._plan
+        if plan and plan.get("gift_ops"):
+            drop = {id(o) for o in b}
+            plan["gift_ops"] = [o for o in plan["gift_ops"]
+                                if id(o) not in drop]
+        return len(b)
 
     def _run_plan(self, ws, plan, sk, actions, bought_this_tick,
                   album_bought: int, collect_freed: int,
@@ -2340,8 +2392,14 @@ class DPTickController:
 
     def decide(self, ws: WorldState, active: List[int],
                completed_rounds: Counter, max_rounds: int = 0,
-               credits: dict | None = None
+               credits: dict | None = None, gift_n: int = 0
                ) -> Tuple[List[Action], dict]:
+        """gift_n = 箱里还能用几张礼物卡（变卡素材）。
+
+        ★★ 2026-11-18 用户定调：**变卡交给 DP 安排**。把张数喂进求解器后，
+        DP 自己在计划里排「哪个 tick 变哪几张 40 面卡、变完投哪几炉」——
+        执行层只照着做，变失败就少做一步，不回头重解。
+        """
         actions: List[Action] = []
         box_stock = ws.stock
         pending = ws.pending
@@ -2474,7 +2532,8 @@ class DPTickController:
                     and (self._left_rounds or 0) >= 2)
                 or self.solve_every_tick):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
-                                           box_cap, self._skel, rounds_sig)
+                                           box_cap, self._skel, rounds_sig,
+                                           gift_n=gift_n)
             plan["state_sig"] = state_sig
             self._plan = plan
             self._plan_rounds_sig = rounds_sig
