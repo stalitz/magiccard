@@ -3602,6 +3602,27 @@ class AutoRefine:
         # 变卡目标按**最近一次读到的库存**实时挑（与 tick 里同一函数同一口径），
         # 面板就能显示「下一步会变哪张 40 面卡」，而不是写死的 dst。
         pick = self._pick_change_dst(self._stock)
+        # ★★ 2026-11-18：面板与决策**同源**——勾了 DP 时显示「DP 计划里接下来要炼
+        #   的 40 面卡」，而不是旧启发式按整套 35 张缺口挑出来的那张（用户看面板
+        #   会以为还在盯老冰棍/翻花绳，实际已经不是）。
+        if self.change_by_dp and getattr(self, "_dp_ctrl", None) is not None:
+            try:
+                _tg = self._dp_ctrl.gift_change_targets(3)
+            except Exception:      # noqa: BLE001  面板绝不拖死状态接口
+                _tg = []
+            if _tg:
+                _cid = int(_tg[0][0])
+                _tid = self._owner_tid(_cid) or self.queue[0]
+                _pl = self.plans[_tid]
+                pick = {"dst": _cid, "name": _pl.cname(_cid),
+                        "face": cards_price(_cid), "theme": _pl.name,
+                        "times": int(_tg[0][1]),
+                        "held": int(self._stock.get(_cid, 0)),
+                        "need_total": sum(int(n) for _c, n in _tg),
+                        "have": 0,
+                        "target": "DP 计划里的 40 面卡："
+                                  + "、".join(f"{_pl.cname(_c)}×{_n}"
+                                              for _c, _n in _tg)}
         # 队列里每一套都按**最近一次读到的库存**算净需求 —— 追加新套卡后
         # 也能立刻显示真实缺口，而不是「全套从零」的静态数字。
         if self._stock or self._pending:
