@@ -1007,6 +1007,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     GN0 = int(_gcfg.get("n") or 0)
     GSET = frozenset(int(x) for x in (_gcfg.get("types") or []))
     GIFT_ON = bool(GN0 > 0 and GSET)
+    # ★★ 2026-11-18：memo key 里的 gift 余额做**饱和归并**。
+    #   余额只要 ≥「这条链上加起来能被 gift 支付的料张数」，再多的余额对子问题
+    #   完全等价（用不完）。旧实现把 gl 原样进 key → 礼物卡不足档（gl 小于整套
+    #   40 面需求）时同一子问题被余额拆成多份，状态空间按 gl 倍膨胀、更常
+    #   bounded（真机单点偶有 +1h）。归并后等价且更小。
+    _gl_cap = 0
+    if GIFT_ON:
+        _gl_cap = sum(1 for i in range(n) for j, _k in mats[i] if j in GSET)
+        _gl_cap = max(1, _gl_cap)
 
     # ★ 向上 cp 在此预计算并注入 inst["ucp"]：供 vec_prio（搜索指路）复用，
     # 外部也可直接传 inst["ucp"] 覆盖。注意 UB 的 ready 排序**不用**它
@@ -1207,7 +1216,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         # gift 余额必须进 key：同一 (need, stock, running) 下余额不同，后续能
         # 变出几张 40 面就不同 → 不是同一子问题。GIFT_ON=False 时与旧 key 一致。
         if GIFT_ON:
-            return (need, stock, running_rel, gl)
+            return (need, stock, running_rel, gl if gl < _gl_cap else _gl_cap)
         return (need, stock, running_rel)
 
     # ★★ 2026-11-16 用户定调（第三处漏掉的动作）：**上交**。
