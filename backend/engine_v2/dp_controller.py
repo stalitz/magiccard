@@ -49,6 +49,14 @@ import time as _t
 from collections import Counter
 from typing import Dict, List, Tuple
 
+import logging
+
+# ★ 2026-11-18：本模块原先用 print 打诊断（[DP空计划]/[DP停手]/[buyblk]），
+#   绕过了 mc_api 的 uin filter → 全局日志里看不出是哪个账号、且不进
+#   <uin>.log。改用 mc.engine 同名 logger：handler 同一份，自动带 uin、
+#   自动按账号分流。
+_log = logging.getLogger("mc.engine")
+
 from backend.sched_cmp.sched_dp import solve, tb_of
 from .model import ThemeModel
 from .plan import Action
@@ -1929,30 +1937,31 @@ class DPTickController:
                 if cid not in jit_need:
                     self.jit_blocked += 1
                     if os.environ.get("MC_DBG_BUYBLOCK"):
-                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 不在jit_need "
-                              f"(n_wave={n_wave} got={got}) jit={dict(jit_need)} "
-                              f"box={box_stock.get(cid,0)} pend={pending.get(cid,0)}",
-                              flush=True)
+                        _log.info(
+                            "[buyblk] t=%.0f cid=%s 不在jit_need (n_wave=%s "
+                            "got=%s) jit=%s box=%s pend=%s", ws.now, cid,
+                            n_wave, got, dict(jit_need),
+                            box_stock.get(cid, 0), pending.get(cid, 0))
                     continue
                 in_sys = (box_stock.get(cid, 0) + pending.get(cid, 0)
                           + bought_this_tick.get(cid, 0))
                 if in_sys >= jit_need[cid]:
                     self.jit_blocked += 1
                     if os.environ.get("MC_DBG_BUYBLOCK"):
-                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 在箱已够 "
-                              f"in_sys={in_sys} need={jit_need[cid]}", flush=True)
+                        _log.info("[buyblk] t=%.0f cid=%s 在箱已够 in_sys=%s "
+                                  "need=%s", ws.now, cid, in_sys, jit_need[cid])
                     continue
                 if n_base >= base_quota:
                     self.jit_blocked += 1
                     if os.environ.get("MC_DBG_BUYBLOCK"):
-                        print(f"[buyblk] t={ws.now:.0f} cid={cid} base_quota "
-                              f"{n_base}>={base_quota}", flush=True)
+                        _log.info("[buyblk] t=%.0f cid=%s base_quota %s>=%s",
+                                  ws.now, cid, n_base, base_quota)
                     continue            # 无炉可投 → 买来只能躺箱（囤卡）
                 if bought_this_tick.get(cid, 0) >= 1:
                     self.jit_blocked += 1
                     if os.environ.get("MC_DBG_BUYBLOCK"):
-                        print(f"[buyblk] t={ws.now:.0f} cid={cid} 本tick已买过",
-                              flush=True)
+                        _log.info("[buyblk] t=%.0f cid=%s 本tick已买过",
+                                  ws.now, cid)
                     continue
                 n_base += 1
             actions.append(Action(kind="buy", cid=cid, n=1,
@@ -2457,8 +2466,8 @@ class DPTickController:
                 self._plan = None
                 if ws.now - self._last_deadlock_log >= 900:
                     self._last_deadlock_log = ws.now
-                    print(f"[DP停手] 箱位物理不足：{info} 需手动清卡箱/扩容",
-                          flush=True)
+                    _log.info("[DP停手] 箱位物理不足：%s 需手动清卡箱/扩容",
+                              info)
                 return actions, {
                     "skip_solve": True,
                     "reason": ("physical_deadlock_evicting" if n else
@@ -2593,12 +2602,13 @@ class DPTickController:
         if not plan["ops"] and ws.now - getattr(self, "_last_zero_log", 0) > 300:
             self._last_zero_log = ws.now
             try:
-                print(f"[DP空计划] sets={getattr(self, '_dbg_sets', None)} "
-                      f"need0={sum(need0_map.values())} "
-                      f"buy0={sum(buy0_map.values())} "
-                      f"free2={ws.change_free + ws.store_free} "
-                      f"note={stats.get('note')} ms={stats.get('solve_ms')} "
-                      f"sched={stats.get('n_sched')}", flush=True)
+                _log.info("[DP空计划] sets=%s need0=%s buy0=%s free2=%s "
+                          "note=%s ms=%s sched=%s",
+                          getattr(self, "_dbg_sets", None),
+                          sum(need0_map.values()), sum(buy0_map.values()),
+                          ws.change_free + ws.store_free,
+                          stats.get("note"), stats.get("solve_ms"),
+                          stats.get("n_sched"))
             except Exception:      # noqa: BLE001  观测绝不拖死调度
                 pass
         return actions, stats

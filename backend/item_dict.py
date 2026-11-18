@@ -46,9 +46,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from pathlib import Path
+
+# ★ 2026-11-18：原先 print 到 stdout，绕过了 mc_api 的 uin filter（看不出账号、
+#   也不落 <uin>.log）。用 mc.engine 同名 logger，handler 复用同一份。
+_log = logging.getLogger("mc.engine")
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DATA = _ROOT / "data" / "item_dict.json"
@@ -111,8 +116,8 @@ _cache: dict | None = None
 
 
 def _warn_missing() -> None:
-    print(f"[item_dict] 未找到 {_DATA}，编号将显示为「未知道具#大类_编号」。"
-          f"请联网重建：python -m backend.item_dict")
+    _log.warning("[item_dict] 未找到 %s，编号将显示为「未知道具#大类_编号」。"
+                 "请联网重建：python -m backend.item_dict", _DATA)
 
 
 # ---------------------------------------------------------------------
