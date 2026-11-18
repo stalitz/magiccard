@@ -923,11 +923,18 @@ class DPTickController:
                 + len(self._redundant_base_in_change(ws))
                 + min(movable, max(0, ws.store_free)))
 
-    def _deadlock_info(self, ws):
-        """物理箱位诊断：**可达空位**是否低于提套门槛，以及还能不能动一张卡。
+    def _deadlock_info(self, ws, need_n: int = 0, own_ids=None):
+        """物理箱位诊断：**还装得下一套吗**，以及还能不能动一张卡。
 
         ★ 用户定调「紧箱是物理事实、正确行为是停手报告」：这里只判物理，
           不判「DP 暂时排不出」——后者是调度问题，不该 pretend 成死锁。
+        ★★ 2026-11-18 修正判据：旧版拿 `reachable < pipe_min_free(6)` 当死锁，
+          那是**提套启发式**（pipe_sets 要多开一条线才要 6 格），不是「装不下一套」。
+          真机 10708702 因此被误判成死锁：换卡箱空 3~5 格、保险箱满，可达 5 < 6，
+          于是每 tick `skip_solve` 直接 return —— DP 根本没跑，连它自己排的卖卡
+          都不执行，炉全空。物理判据应是：
+              可腾出的换卡箱空位 + 保险箱空位 + 箱内本套卡 + 在炉本套卡  >= 一套张数
+          够就交给 DP 排（它自己会按计划卖卡腾位）；不够才是真死锁。
         """
         junk = self._junk_in_change(ws)
         sellable = sum(1 for face, _c, _s in junk if 0 < face <= 10)
@@ -936,13 +943,25 @@ class DPTickController:
         redundant = len(self._redundant_base_in_change(ws))
         can_move = min(movable, max(0, ws.store_free))
         reachable = (ws.change_free + sellable + redundant + can_move)
+        _own = set(own_ids or ())
+        inbox_own = inflight = 0
+        if _own:
+            inbox_own = sum(int(n) for c, n in ws.stock.items()
+                            if int(c) in _own and n)
+            inflight = sum(int(n) for c, n in ws.pending.items()
+                           if int(c) in _own and n)
+        cap1 = reachable + ws.store_free + inbox_own + inflight
         info = {
             "change_free": ws.change_free, "store_free": ws.store_free,
             "sellable": sellable, "redundant_base": redundant,
             "movable_high": movable, "can_move": can_move,
             "reachable_free": reachable, "min_free": self.pipe_min_free,
+            "inbox_own": inbox_own, "inflight": inflight,
+            "cap_one_set": cap1, "need": int(need_n or 0),
             "hard": (sellable + redundant + can_move == 0),
         }
+        if need_n and need_n > 0:
+            return cap1 < int(need_n), info      # 物理上一套都装不下 = 真死锁
         return reachable < self.pipe_min_free, info
 
     def _pre_evict_junk(self, ws, actions, want):
@@ -2318,7 +2337,11 @@ class DPTickController:
         #   并作废过期计划；箱位签名一变（用户清箱/扩容）下一 tick 自动恢复。
         # 短路：物理空位本就 ≥ 门槛时 reachable 必 ≥ 门槛，不必每 tick 扫箱。
         if self.deadlock_report and ws.change_free < self.pipe_min_free:
-            dead, info = self._deadlock_info(ws)
+            # 判据用「物理上还装得下一套吗」（见 `_deadlock_info` 的 2026-11-18 修正）
+            _m0 = self.models.get(active[0]) if active else None
+            _n0 = len(_m0.ids) if _m0 is not None else 0
+            dead, info = self._deadlock_info(
+                ws, need_n=_n0, own_ids=(set(_m0.ids) if _m0 is not None else None))
             if dead:
                 want = max(1, self.pipe_min_free - ws.change_free)
                 n = self._pre_evict_junk(ws, actions, want)
