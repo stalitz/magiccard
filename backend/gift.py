@@ -309,11 +309,33 @@ async def gift_inbox(session: LoginSession) -> dict:
             "cap": GIFT_BOX_CAP, "count": len(out), "gifts": out}
 
 
-async def gift_take(session: LoginSession, index_id: int, action: int = 2) -> dict:
+# 「系统繁忙」不是业务拒绝，是服务端限流/抖动 —— 2026-11-18 真机实测：
+#   连续收 20+ 条时后半段全部 code=-1002/-41002「系统繁忙，请稍后再试」，
+#   一次性放弃等于把当天礼物额度白扔（箱里 30 件只收到 5 件）。
+#   这里只对**明确的繁忙码/文案**重试；其它失败（礼物已失效、itemid=0）不重试。
+_BUSY_CODES = {-1, -1002, -41002}
+_BUSY_WORDS = ("系统繁忙", "繁忙", "稍后再试")
+
+
+def _is_busy(r: dict) -> bool:
+    if r.get("ok"):
+        return False
+    if int(r.get("code") or 0) in _BUSY_CODES:
+        return True
+    msg = str(r.get("message") or "")
+    return any(w in msg for w in _BUSY_WORDS)
+
+
+async def gift_take(session: LoginSession, index_id: int, action: int = 2,
+                    retries: int = 2, backoff: float = 0.6) -> dict:
     """收一条礼物（freegift_take）→ 得到一张 48 面礼物卡（itemid 由服务端决定）。
 
     产出哪个 itemid 取决于该礼物的 freegift_id 与 action（见 GIFT_ITEM_THEME 段注释），
     不再写死白名单；只要 code=0 且拿到 itemid 即算成功。默认 action=2。
+
+    ★ 2026-11-18：「系统繁忙」按指数退避重试（`retries` 次，间隔 backoff×2^k）。
+      只重试繁忙类失败；`index_id` 失效（收不到任何 itemid 且非繁忙）不重试 ——
+      重试也只会再失败一次。
     """
     payload = {
         "action": action,
@@ -322,15 +344,25 @@ async def gift_take(session: LoginSession, index_id: int, action: int = 2) -> di
         "r": round(time.time() * 1000),
         "qzreferrer": _QZ_REFERRER,
     }
-    r = await session.qzone("post", EP_FREEGIFT_TAKE, **payload)
-    d = r.get("data") or {}
-    bag = d.get("change", {}).get("bag", []) if isinstance(d.get("change"), dict) else []
-    item = bag[0] if bag else {}
-    itemid = int(item.get("itemid") or 0)
-    num = int(item.get("num") or 0)
-    ok = r.get("code") == 0 and itemid > 0
-    return {"ok": ok, "code": r.get("code"), "message": r.get("message") or "",
-            "itemid": itemid, "num": num, "action": action}
+    attempts = max(0, int(retries)) + 1
+    out: dict = {}
+    for k in range(attempts):
+        r = await session.qzone("post", EP_FREEGIFT_TAKE, **payload)
+        d = r.get("data") or {}
+        bag = (d.get("change", {}).get("bag", [])
+               if isinstance(d.get("change"), dict) else [])
+        item = bag[0] if bag else {}
+        itemid = int(item.get("itemid") or 0)
+        num = int(item.get("num") or 0)
+        ok = r.get("code") == 0 and itemid > 0
+        out = {"ok": ok, "code": r.get("code"), "message": r.get("message") or "",
+               "itemid": itemid, "num": num, "action": action, "tries": k + 1}
+        if ok or not _is_busy(out):
+            break
+        if k + 1 < attempts:
+            payload["r"] = round(time.time() * 1000)
+            await asyncio.sleep(min(4.0, backoff * (2 ** k)))
+    return out
 
 
 async def change_card(session: LoginSession, srcid: int, dstid: int,
@@ -394,18 +426,30 @@ async def locate_card(session: LoginSession, cid: int):
     return None, None
 
 
-async def change_any(session: LoginSession, srcid: int, dstid: int, prop: int = 0) -> dict:
+async def change_any(session: LoginSession, srcid: int, dstid: int, prop: int = 0,
+                     locate_retries: int = 0, locate_wait: float = 0.5) -> dict:
     """自动定位源卡槽位后变卡（推荐入口）。
 
     - prop>0：按 HAR 的「道具卡变卡」形态调用（slotid=0/slottype=0，prop=<道具 id>）
     - 否则先读 mainpage 定位该卡的真实 slotid/slottype；定位不到直接返回失败，
       不发必然 -32002 的请求。
+
+    ★ 2026-11-18：刚收的礼物卡要**等落箱**才能被 mainpage 读到（真机 18:39 实测
+      `卡 7773/7775 不在换卡箱/保险箱里`，而 take 是成功的）——收礼后立刻变卡会
+      定位失败、白丢一条礼物。`locate_retries>0` 时按 `locate_wait×2^k` 重读重试。
     """
     if prop:
         return await change_card(session, srcid, dstid, slotid=0, slottype=0, prop=prop)
-    slot, st = await locate_card(session, srcid)
+    slot = st = None
+    tries = max(0, int(locate_retries)) + 1
+    for k in range(tries):
+        slot, st = await locate_card(session, srcid)
+        if slot is not None:
+            break
+        if k + 1 < tries:
+            await asyncio.sleep(min(3.0, locate_wait * (2 ** k)))
     if slot is None:
-        return {"ok": False, "code": -32002,
+        return {"ok": False, "code": -32002, "not_in_box": True,
                 "message": f"卡 {srcid} 不在换卡箱/保险箱里（不在箱中或已被消耗）"}
     return await change_card(session, srcid, dstid, slotid=slot, slottype=st)
 
@@ -417,11 +461,13 @@ async def take_and_change(session: LoginSession, index_id: int,
     if not tk.get("ok"):
         return {"ok": False, "stage": "take", **tk}
     src = tk["itemid"]
-    ch = await change_any(session, src, dstid)
+    ch = await change_any(session, src, dstid, locate_retries=2, locate_wait=0.5)
     return {"ok": bool(ch.get("ok")), "stage": "change",
             "index_id": index_id, "itemid": src, "dstid": dstid,
             "code": ch.get("code"), "message": ch.get("message") or "",
-            "result": ch.get("result")}
+            "result": ch.get("result"),
+            # 卡还没落箱 → 调用方可把 src 记进待变队列，下一轮再变（不当失败处理）
+            "pending_locate": bool(ch.get("not_in_box"))}
 
 
 
@@ -710,6 +756,7 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
 
     gifts = sorted(inb["gifts"], key=lambda g: g.get("time") or 0)   # 最老的先收
     took = changed = failed = 0
+    pending = 0                 # 收到了卡但还没落箱（下轮再变，不算失败）
     last = ""
     attempts: list[dict] = []   # 逐张明细：收的礼物 → 变出的目标卡 + 成败
     per_dst: dict[int, int] = {}
@@ -749,15 +796,25 @@ async def drain_gift_box(session: LoginSession, dstid: int = DEFAULT_CHANGE_DST,
                 break                                  # 单目标：一件即停（旧行为）
         else:
             failed += 1
-            last = f"变卡失败（约 50% 概率）code={r.get('code')}"
-            attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
-                             "dst_id": d, "dst_name": _card_name_cached(d),
-                             "ok": False, "stage": "change", "code": r.get("code"),
-                             "msg": r.get("message") or ""})
+            if r.get("pending_locate"):
+                # 卡已经收到、只是 mainpage 还没同步到 → 不是失败，下轮再来
+                pending += 1
+                last = f"卡 #{src_id} 已收到但尚未落箱，下轮再变"
+                attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
+                                 "dst_id": d, "dst_name": _card_name_cached(d),
+                                 "ok": False, "stage": "locate", "code": r.get("code"),
+                                 "msg": r.get("message") or ""})
+            else:
+                last = f"变卡失败（约 50% 概率）code={r.get('code')}"
+                attempts.append({"src_id": src_id, "src_name": _face48_name(src_id or 0),
+                                 "dst_id": d, "dst_name": _card_name_cached(d),
+                                 "ok": False, "stage": "change", "code": r.get("code"),
+                                 "msg": r.get("message") or ""})
         await asyncio.sleep(0.4)
     dist = "、".join(f"{_card_name_cached(d)}×{per_dst[d]}" for d in dst_ids if per_dst.get(d))
     return {"ok": True, "skipped": False, "box_before": count, "box_after": count - took,
-            "took": took, "changed": changed, "failed": failed, "dstid": dst_ids,
+            "took": took, "changed": changed, "failed": failed, "pending": pending,
+            "dstid": dst_ids,
             "per_dst": per_dst, "last": last, "attempts": attempts,
             "message": f"礼物箱 {count}→{count - took}：收 {took} 件、变成功 {changed} 张"
                        + (f"（{dist}）" if dist else "")
