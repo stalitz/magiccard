@@ -1273,13 +1273,36 @@ class DPTickController:
         cpL = [sk["cp"][idx[c]] for c in live]
         # ★ init_stock 只用箱内（不含炉内 pending）；在炉由 init_running 记产出
         init_stockL = [box_stock.get(c, 0) for c in live]
-        running = []
+        running4 = []
         for f in ws.furnaces:
             if f.cid <= 0 or f.cid not in live_idx:
                 continue
             rem = max(0.0, float(f.endtime) - float(ws.now))
             cls = 2 if getattr(f, "steal", False) else 0
-            running.append((live_idx[f.cid], rem, cls))
+            running4.append((live_idx[f.cid], rem, cls,
+                             int(getattr(f, "stove", -1) or -1)))
+        # ★★ 2026-11-18：「一炉两卡位」——同一炉号下第 2 张是**排队**（还没开工），
+        #   只占卡位、不占炉位。而 sched_dp 的 `idle[0] = machines - Σclass0`，
+        #   同炉 2 张会被算成 2 台机器 → 在炉条数 > 炉台数 → idle 恒 0（甚至为负）
+        #   → 状态自相矛盾：每个作业完工都「立刻又能开一炉」，dfs 只能在推进里
+        #   打转（真机 4821992：change_free=7、stovenum=4 但炉内 5 条 Furnace、
+        #   其中炉 2 挂 1 炼 1 排队 → leaf=0、depth_hit=340220、每 tick 白跑 10s、
+        #   零动作；而 `_busy_stoves` 早按炉号去重了，两边口径不一致）。
+        #   表达：同炉按剩余时间升序，**最后一个**仍为 class 0（占炉到它完工），
+        #   其余降级 class 5（幽灵：不占任何机器容量，只按 rem 到点产出）。
+        #   class 5 在 sched_dp 里只参与「到点入 stock」和箱压，不进 idle。
+        _by_stove: Dict[int, List[int]] = {}
+        for _p, (_i2, _r2, _c2, _st2) in enumerate(running4):
+            if _c2 == 0 and _st2 >= 0:
+                _by_stove.setdefault(_st2, []).append(_p)
+        for _st2, _ps in _by_stove.items():
+            if len(_ps) <= 1:
+                continue
+            _ps.sort(key=lambda p: running4[p][1])
+            for _p in _ps[:-1]:        # 除最后完工那张，其余是排队 → 不占炉位
+                _i2, _r2, _c2, _st3 = running4[_p]
+                running4[_p] = (_i2, _r2, 5, _st3)
+        running = [(i2, r2, c2) for (i2, r2, c2, _s2) in running4]
         inst = {"machines": self.machines, "shop_cap": self.shop_cap,
                 "box_cap": box_cap, "mclass": mclassL, "types": live, "n": nL,
                 "dur": durL, "mats": matsL, "need0": need0L, "depth": depthL,

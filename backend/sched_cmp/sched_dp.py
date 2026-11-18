@@ -198,7 +198,12 @@ def _norm_running(init_running, n):
     """在炉作业规范化：(type_idx, 剩余秒, 机器类) 三元组、排序、越界剔除。
 
     兼容旧二元组 (type_idx, 剩余秒)（默认 class 0 = 主炉）。
-    class：0=主炉（占 M 池）1=买卡在途（占 shop 池）2=偷炉（占 steal_cap 池）。
+    class：0=主炉（占 M 池）1=买卡在途（占 shop 池）2=偷炉（占 steal_cap 池）
+           5=同炉排队的「幽灵」作业（**不占任何机器池**，只按剩余时间到点产出）。
+
+    ★ class 5（2026-11-18）：真机「一炉两卡位」里第 2 张是排队，只占卡位不占炉位。
+      调用方（DPTickController）负责把同炉多张折叠成「最后完工那张 class 0 +
+      其余 class 5」——否则在炉条数会大于炉台数，`idle[0]` 归零且状态自相矛盾。
     """
     out = []
     for e in (init_running or []):
@@ -680,13 +685,20 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
                 _full = False
                 break
         if _full:
-            if cur:
+            # ★ 2026-11-18：**全零向量必须丢弃**。主炉被占满（caps[0]=0）而
+            #   买卡/偷炉还有额度时，`not any(caps)` 不成立 → 继续枚举 →
+            #   每张都只能取 c=0 → 产出 `((i,0,ci),...)` 全零向量。
+            #   dfs 会把它当成「可行开工」：dt 只能靠旧在炉推进、状态完全不变，
+            #   于是原地递归到深度闸（真机 4821992 炉满 4/4：tail 连续 6 层都是
+            #   t=1547.0 同一全零向量，depth_hit 28 万、leaf=0、每 tick 白跑 10s）。
+            if cur and any(e[1] for e in cur):
                 res.append(tuple(cur))
                 if max_vecs is not None and len(res) >= max_vecs * 2:
                     raise _CapAbort
             return
         if p == ni:
-            if cur and (not maximal_only or maximal(cnt, used, st, gl)):
+            if (cur and any(e[1] for e in cur)
+                    and (not maximal_only or maximal(cnt, used, st, gl))):
                 res.append(tuple(cur))
                 if max_vecs is not None and len(res) >= max_vecs * 2:
                     raise _CapAbort
@@ -1381,13 +1393,22 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         #   让上层回退，绝不抛出 RecursionError 冒到执行层。
         if len(path) >= _max_depth:
             DIAG["depth_hit"] += 1
+            if DIAG["depth_hit"] == 1 and _os.environ.get("MC_DEPTH_DBG"):
+                _nd = {i: c for i, c in enumerate(need) if c > 0}
+                _tail = [(round(_tt, 1), [(int(v[0]), int(v[1]), int(v[2])) for v in _vv])
+                         for _tt, _vv in path[-6:]]
+                print(f"[DEPTH] len(path)={len(path)} t={t:.0f} need={_nd} "
+                      f"stock={sum(stock)} run={len(running_rel)}\n  tail={_tail}",
+                      flush=True)
             return INF, None, INF, None
         # ★ 三空位状态条件：在每次 dfs 入口统一判，覆盖买卡 / 收卡 / 精炼
         #   开工后的所有状态转移；违反「总箱（原有 box_cap 不变量）+
         #   换卡箱 + 保险箱」三条件之一的分支直接不可行，不再靠执行层兜底。
         if POOL_D is not None:
             _bi = sum(1 for _i, _f, _c in running_rel if _c == 1)
-            _ro = sum(1 for _i, _f, _c in running_rel if _c in (0, 2))
+            # ★ class 5（同炉排队 / 幽灵作业）不占机器，但产物一样要落箱 →
+            #   算进 run_out（箱压），否则箱位被低估、执行层会丢卡。
+            _ro = sum(1 for _i, _f, _c in running_rel if _c in (0, 2, 5))
             if not _pool_ok(POOL_D, stock, _bi, _ro):
                 POOL_REJECT[0] += 1
                 DIAG["inf_pool"] += 1
