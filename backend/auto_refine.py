@@ -1827,6 +1827,10 @@ class AutoRefine:
                               # 「需求窗口给资源上界 + 目标 ΣCi」，sets_used = 上的上界
                               "infinite": bool(dpstats.get("infinite")),
                               "sets_used": dpstats.get("sets_used"),
+                              # 非本套 ≤10 面杂卡：DP 计入箱容的额度
+                              # （need_sell）与本 tick 实际卖出张数（sell_now）
+                              "need_sell": dpstats.get("need_sell"),
+                              "sell_now": dpstats.get("sell_now"),
                               # 紧箱物理无解：把停手原因透传到 /api/auto/status
                               "reason": dpstats.get("reason"),
                               "deadlock": dpstats.get("deadlock")}
