@@ -2453,26 +2453,42 @@ class DPTickController:
         #   这里先把还能无损动的卡清掉，仍不够就明确回报「需手动清箱」，
         #   并作废过期计划；箱位签名一变（用户清箱/扩容）下一 tick 自动恢复。
         # 短路：物理空位本就 ≥ 门槛时 reachable 必 ≥ 门槛，不必每 tick 扫箱。
-        if self.deadlock_report and ws.change_free < self.pipe_min_free:
-            # 判据用「物理上还装得下一套吗」（见 `_deadlock_info` 的 2026-11-18 修正）
+        # ★★ 2026-11-18 修：旧短路只看 `change_free < pipe_min_free`，而
+        #   `pipe_min_free` 是**提套启发式**（多开一条线要几格），不是「装得下
+        #   一套」。于是「换卡箱 6 格、保险箱 0 空位、一套 46 张（5★）」这种
+        #   物理必然装不下的状态，因为 `6 < 6` 为假 → 整段死锁判定被跳过 →
+        #   直接进 dfs → 炼成卡出炉无处可放被标 held → 炉里全是 held 后
+        #   `inf_dead` 判死 → 搜 10s 才报 `pure_no_solution`（真机 4821992
+        #   实测 inf_dead=7794 / leaf=0 / ms=10010，而 `_deadlock_info` 自己
+        #   算出 cap_one_set=17 < need=46，本该立刻停手报告）。
+        #   改为「两箱物理空位 + 箱内本套 + 在炉本套 < 一套张数」也进判定。
+        if self.deadlock_report:
             _m0 = self.models.get(active[0]) if active else None
             _n0 = len(_m0.ids) if _m0 is not None else 0
-            dead, info = self._deadlock_info(
-                ws, need_n=_n0, own_ids=(set(_m0.ids) if _m0 is not None else None))
-            if dead:
-                want = max(1, self.pipe_min_free - ws.change_free)
-                n = self._pre_evict_junk(ws, actions, want)
-                self.deadlock_reports += 1
-                self._plan = None
-                if ws.now - self._last_deadlock_log >= 900:
-                    self._last_deadlock_log = ws.now
-                    _log.info("[DP停手] 箱位物理不足：%s 需手动清卡箱/扩容",
-                              info)
-                return actions, {
-                    "skip_solve": True,
-                    "reason": ("physical_deadlock_evicting" if n else
-                               "physical_deadlock"),
-                    "deadlock": info, "n_types": self._skel["n"]}
+            _own = set(_m0.ids) if _m0 is not None else set()
+            _own_in = 0
+            if _own:
+                _own_in = (sum(int(n) for c, n in ws.stock.items()
+                               if int(c) in _own and n)
+                           + sum(int(n) for c, n in ws.pending.items()
+                                 if int(c) in _own and n))
+            if (ws.change_free < self.pipe_min_free
+                    or (_n0 and ws.box_free + _own_in < _n0)):
+                dead, info = self._deadlock_info(ws, need_n=_n0, own_ids=_own)
+                if dead:
+                    want = max(1, self.pipe_min_free - ws.change_free)
+                    n = self._pre_evict_junk(ws, actions, want)
+                    self.deadlock_reports += 1
+                    self._plan = None
+                    if ws.now - self._last_deadlock_log >= 900:
+                        self._last_deadlock_log = ws.now
+                        _log.info("[DP停手] 箱位物理不足：%s 需手动清卡箱/扩容",
+                                  info)
+                    return actions, {
+                        "skip_solve": True,
+                        "reason": ("physical_deadlock_evicting" if n else
+                                   "physical_deadlock"),
+                        "deadlock": info, "n_types": self._skel["n"]}
 
         # ---- 净需求（非底卡炼几次 / 底卡买几张）----
         need0_map, buy0_map = self._union_need0(box_stock, pending, active,
