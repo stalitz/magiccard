@@ -14,7 +14,7 @@ PORT="${2:-8000}"
 # 第 3 个参数是「旧版单文件会话」，已废弃：现在一个目录装所有账号（文件名=token）。
 # 仅多实例兼容场景才需要显式传它，不传就走多账号目录。
 SESS="${3:-}"
-ACCOUNTS="${MC_SESSIONS_DIR:-/tmp/mc_sessions}"
+ACCOUNTS="${MC_SESSIONS_DIR:-$(pwd)/backend/sessions}"
 LOG="/tmp/mc_${PORT}.log"
 MC_HOST="${MC_HOST:-0.0.0.0}"
 

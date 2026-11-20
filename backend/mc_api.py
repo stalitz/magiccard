@@ -114,7 +114,16 @@ from .constants import (  # noqa: F401
 SESSION_FILE = Path(os.environ.get("MC_SESSION_FILE", "/tmp/mc_session.json"))
 # 同端口多账号：每个账号一个独立文件，落在 SESSIONS_DIR 下，按 token 命名。
 # 单账号（无 token）仍退化为 SESSION_FILE，完全向后兼容。
-SESSIONS_DIR = Path(os.environ.get("MC_SESSIONS_DIR", "/tmp/mc_sessions"))
+#
+# ★2026-11-20 会话改落项目内 backend/sessions/：此前默认 /tmp/mc_sessions，
+#   /tmp 会被系统定期清理（实测 17:42 还在的会话到 22:05 已消失），
+#   导致每次都要重新扫码。项目目录随代码一起备份/部署，才是登录态的持久位置。
+#   仍可用 MC_SESSIONS_DIR 覆盖（多开实例各用各的目录）。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SESSIONS_DIR = Path(os.environ.get("MC_SESSIONS_DIR")
+                    or (PROJECT_ROOT / "backend" / "sessions"))
+# 旧路径：仅用于启动时一次性迁移，之后不再写入。
+LEGACY_SESSIONS_DIR = Path("/tmp/mc_sessions")
 
 # 连接层可重试异常：keep-alive 死连接、服务端提前断连、连接超时等。
 RETRYABLE = (

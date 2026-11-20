@@ -13,6 +13,7 @@ import html
 import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from collections import Counter
@@ -25,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse, HTMLResponse, RedirectResponse
 
 from .auth_qr import QRLogin
-from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, LOG_DIR
+from .mc_api import LoginSession, LOG_UIN, SESSIONS_DIR, LEGACY_SESSIONS_DIR, LOG_DIR
 import json
 from collections import deque
 from . import card_query as cq
@@ -96,6 +97,29 @@ class SessionProxy:
         return _current_session.get()
 
 
+def _migrate_legacy_sessions() -> None:
+    """把旧目录（/tmp/mc_sessions）里的会话文件一次性搬到项目内 backend/sessions/。
+
+    只在「新目录里还没有同名文件」时复制，搬迁后旧文件保留不动（回滚方便，
+    也不会因为 /tmp 被清而丢）。任何异常都只记日志，不影响启动。
+    """
+    try:
+        if not LEGACY_SESSIONS_DIR.is_dir():
+            return
+        moved = 0
+        for f in LEGACY_SESSIONS_DIR.glob("*.json"):
+            dst = SESSIONS_DIR / f.name
+            if dst.exists():
+                continue
+            shutil.copy2(f, dst)
+            moved += 1
+        if moved:
+            logger.info("migrate %d 个会话文件: %s -> %s",
+                        moved, LEGACY_SESSIONS_DIR, SESSIONS_DIR)
+    except Exception as e:  # noqa: BLE001 - 迁移失败不能阻断启动
+        logger.warning("会话迁移失败（忽略）: %r", e)
+
+
 def _load_sessions() -> None:
     """启动时扫描 SESSIONS_DIR，每个 *.json 即一个账号（文件名=token）。
 
@@ -107,6 +131,7 @@ def _load_sessions() -> None:
     """
     global SESSIONS
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_sessions()
     for f in SESSIONS_DIR.glob("*.json"):
         token = f.stem
         s = LoginSession(token=token)
