@@ -1321,7 +1321,9 @@ async def exchange_scan(body: dict):
                         theme_ids=extra,
                         peers_capped=peers_capped,
                         concurrency=int(body.get("concurrency") or 5),
-                        stop_after=int(body.get("stop_after") or 0)):
+                        stop_after=int(body.get("stop_after") or 0),
+                        pay_card_ids=[int(x) for x in (body.get("pay_card_ids") or [])
+                                      if str(x).strip().isdigit()]):
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
             except Exception as e:  # noqa: BLE001
                 yield f"data: {json.dumps({'type': '__error__', 'message': f'扫描异常：{e}'}, ensure_ascii=False)}\n\n"

@@ -457,10 +457,15 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
         #   - 对方未设想收套（exch 为空）→ 不限制，任何同面额卡都能换；
         #   - 下架/绝版套（如纸寿千年、名家）商店买不到 → 不受限，同面额即可换；
         #   - 商店可买的套卡 → 其主题必须在对方 exch 里。
+        # 2026-11-20：列出**全部**同面额可付卡（此前 srcs[:6] 硬截断导致
+        # 「自己的卡只有几张、选不到想换的」）。两箱都算：box_type=1 保险箱、
+        # 0 换卡箱（=do_exchange 的 src_type）；换卡箱被锁的卡已在 my_payable 剔除。
         srcs = [] if locked else [
             {"slot": s["slot"], "id": s["id"], "name": s["name"],
              "price": s["price"],
-             "theme_name": s.get("theme_name", "")}
+             "theme_id": s.get("theme_id", 0),
+             "theme_name": s.get("theme_name", ""),
+             "box_type": s.get("box_type", 1)}
             for s in my_payable
             if s["price"] == pr
             and not (exch_set and s["theme_id"] in buyable
@@ -480,7 +485,7 @@ def _hit_from_box(p, opuin, theme_ids, price, card_ids, my_payable,
             "want_theme_name": theme_names.get(want_theme, f"主题{want_theme}") if want_theme else "",
             "want_themes": [{"tid": t, "name": theme_names.get(t, f"主题{t}")}
                             for t in exch_list],
-            "srcs": srcs[:6],
+            "srcs": srcs,  # 全列：按面额筛选后不截断（前端按套分组展示）
         }
         hits.append(hit)
     if not hits:
@@ -501,7 +506,8 @@ async def _scan_iter(session, theme_id: int, peers: list[str],
                      card_ids: list | None = None,
                      theme_ids: list | None = None,
                      peers_capped: list | None = None,
-                     concurrency: int = 1, stop_after: int = 0):
+                     concurrency: int = 1, stop_after: int = 0,
+                     pay_card_ids: list | None = None):
     """逐人扫描的异步生成器：每扫完一个人就 yield 一个事件 dict（用于 SSE 流式输出）。
 
     事件类型：
@@ -522,13 +528,22 @@ async def _scan_iter(session, theme_id: int, peers: list[str],
     picked = normalize_picked(idx, targets, card_id, card_ids)
     picked_names = [str(idx["card_by_id"][c][2]).strip()
                     for c in sorted(picked) if c in idx["card_by_id"]]
-    # 我方可付出的卡 = 保险箱全部（storebox 无锁概念，可直接换出）
+    # 我方可付出的卡 = 保险箱 + 换卡箱（换卡箱被锁的不能付出）。
+    # 2026-11-20 修：此前只取 storebox，换卡箱里的卡在扫描结果里完全选不到。
     mp = await session.post(EP_MAINPAGE, code="", opuin=session.uin)
     my = parse_my_boxes(mp.get("raw", "")) if mp.get("code") == 0 else {}
-    my_payable = [
-        {**c, "theme_name": theme_names.get(c.get("theme_id", 0), "")}
-        for c in my.get("storebox", []) if c["id"] > 0
-    ]
+    pay_ids = {int(x) for x in (pay_card_ids or []) if str(x).strip().isdigit()}
+    my_payable = []
+    for box_name, box_type in (("storebox", 1), ("changebox", 0)):
+        for c in my.get(box_name, []):
+            if c["id"] <= 0 or (box_name == "changebox" and c.get("locked")):
+                continue
+            if pay_ids and c["id"] not in pay_ids:
+                continue  # 用户在付出卡面板勾选了卡 → 只列这些
+            my_payable.append({
+                **c, "theme_name": theme_names.get(c.get("theme_id", 0), ""),
+                "box_type": box_type,
+            })
     stats: dict = {"retries": 0}
     t0 = time.time()
     rows: list = []
@@ -601,14 +616,16 @@ async def scan_peers(session, theme_id: int, peers: list[str],
                      price: int = 0, card_id: int = 0,
                      card_ids: list | None = None,
                      theme_ids: list | None = None,
-                     concurrency: int = 1, stop_after: int = 0) -> dict:
+                     concurrency: int = 1, stop_after: int = 0,
+                     pay_card_ids: list | None = None) -> dict:
     """兼容封装：收集 _scan_iter 的全部事件，返回与旧版同构的完整 dict。
 
     保留给不需要流式的调用方（如单卡友重扫、脚本）。主扫卡接口已改用 SSE 流式。
     """
     async for ev in _scan_iter(
             session, theme_id, peers, price, card_id, card_ids,
-            theme_ids, concurrency, stop_after):
+            theme_ids, concurrency, stop_after,
+            pay_card_ids=pay_card_ids):
         if ev["type"] == "done":
             return ev["summary"]
     return {}

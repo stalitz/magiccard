@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 // 前端版本：与 index.html 里 <script src="/app.js?v=..."> 保持一致。
 // 启动时打进操作日志，便于一眼确认浏览器有没有吃到新 JS（排查「改了没生效」）。
-const APP_VER = "20261117a";
+const APP_VER = "20261120a";
 
 // 多账号：登录 token 存 sessionStorage（按标签页隔离——刷新/重开同标签仍在，关掉标签即清），
 // 因此同域名开多个普通标签页可各登各号、互不干扰（与 Yearning 一致）。
@@ -2591,6 +2591,8 @@ async function doScan(manualOnly = false) {
         price: Number(exState.price) || 0,
         // 指定卡（可多张、可跨套）：只列出换卡箱里正放着这些卡的人；空数组 = 目标套全部卡
         card_ids: [...exState.pickCards],
+        // 付出卡面板勾选的卡：手动扫描结果里也只列这些（两种箱都算）
+        pay_card_ids: exPaySelected(),
         peers: manualOnly ? manual : [],
         use_api: !manualOnly,
         manual_peers: manual,
@@ -2724,10 +2726,22 @@ function exHitHtml(row, h, tNames) {
   // 锁：h.locked 由后端标注（锁定卡 srcs 必为空）；unlock 兜底兼容旧响应
   const lockedNow = !!h.locked || h.unlock > Math.floor(Date.now() / 1000);
   const hasSrc = !lockedNow && (h.srcs || []).length > 0;
+  // 付出卡全列（后端已不截断、含保险箱+换卡箱），按套 optgroup 分组；
+  // value 第三位是 src_type：1=保险箱、0=换卡箱，交换时原样带给后端。
+  const payGroups = new Map();
+  for (const s of (h.srcs || [])) {
+    const t = s.theme_name || "其他";
+    if (!payGroups.has(t)) payGroups.set(t, []);
+    payGroups.get(t).push(s);
+  }
   const srcOpts = hasSrc
     ? `<select data-friend="${row.uin}" data-dst="${h.id}_${h.slot}" data-src="">
-         <option value="">选择付出的卡…</option>
-         ${h.srcs.map((s) => `<option value="${s.id}_${s.slot}_1">${esc(s.name)}（面值 ${s.price}，${esc(s.theme_name)}）</option>`).join("")}
+         <option value="">选择付出的卡…（共 ${h.srcs.length} 张同面额）</option>
+         ${[...payGroups.entries()].map(([tn, cs]) =>
+           `<optgroup label="${esc(tn)}（${cs.length}）">`
+           + cs.map((s) => `<option value="${s.id}_${s.slot}_${s.box_type === 0 ? 0 : 1}">`
+             + `${esc(s.name)}（面值 ${s.price}，${s.box_type === 0 ? "换卡箱" : "保险箱"} 第 ${s.slot} 格）</option>`).join("")
+           + `</optgroup>`).join("")}
        </select>
        <button class="btn sm primary ex-swap" data-friend="${row.uin}"
                data-dst-id="${h.id}" data-dst-slot="${h.slot}">交换</button>`
@@ -2787,12 +2801,12 @@ async function onSwapClick(btn) {
     exMsg("请先选择要付出的卡", "err");
     return;
   }
-  const [srcId, srcSlot] = sel.value.split("_");
+  const [srcId, srcSlot, srcType] = sel.value.split("_");
   if (!confirm(`确认用这张卡交换？\n付出：${sel.options[sel.selectedIndex].text}\n换入：${hit.querySelector(".cnm").textContent.trim()}\n\n交换会真实消耗付出卡。`)) return;
   const dstId = Number(btn.dataset.dstId), dstSlot = Number(btn.dataset.dstSlot);
   btn.disabled = true; sel.disabled = true;
   if (res) { res.className = "ex-res"; res.textContent = "交换中…"; }
-  const d = await doSwap(btn.dataset.friend, dstId, dstSlot, Number(srcId), Number(srcSlot));
+  const d = await doSwap(btn.dataset.friend, dstId, dstSlot, Number(srcId), Number(srcSlot), Number(srcType));
   if (d && d.code === 0) {
     if (res) { res.className = "ex-res ok"; res.textContent = "✅ 已换入"; }
     hit.classList.add("dead");
@@ -2821,6 +2835,7 @@ async function rescanPeer(btn) {
         theme_id: tids[0] || 0, theme_ids: tids,
         price: Number(exState.price) || 0,
         card_ids: [...exState.pickCards],
+        pay_card_ids: exPaySelected(),
         peers: [uin], use_api: false, include_friends: false, concurrency: 1,
       }),
     });
@@ -2848,13 +2863,13 @@ async function rescanPeer(btn) {
   }
 }
 
-async function doSwap(friend, dstId, dstSlot, srcId, srcSlot) {
+async function doSwap(friend, dstId, dstSlot, srcId, srcSlot, srcType = 1) {
   exMsg(`正在与 QQ ${friend} 交换…`, "info");
   try {
     const d = await (await fetch("/api/exchange/do", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ friend, dst_slot: dstSlot, dst_id: dstId,
-                             src_slot: srcSlot, src_id: srcId, src_type: 1 }),
+                             src_slot: srcSlot, src_id: srcId, src_type: srcType }),
     })).json();
     if (d.code === 0) {
       exMsg(`✅ 交换成功！换入 ${dstId}`, "ok");
