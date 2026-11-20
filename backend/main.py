@@ -12,6 +12,7 @@ import base64
 import html
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -145,24 +146,119 @@ def _default_session() -> LoginSession | None:
     return SESSIONS.get(DEFAULT_TOKEN)
 
 
+_UI_LOG_ACC_RE = re.compile(r"当前账号\s*o(\d{6,12})")
+
+
+def _norm_uin(uin: str) -> str:
+    """统一账号键：去掉前导 o（会话里的 uin 有/无 o 两种写法都出现过）。"""
+    return uin[1:] if uin[:1] in ("o", "O") else uin
+
+
+def _ui_log_owner(token: str) -> str:
+    """界面日志按「账号」归集，而不是按登录 token。
+
+    ★2026-11-20：重新扫码登录会拿到新 token，若日志文件按 token 命名，
+    重新登录后界面日志就变成「全空」——旧文件仍在磁盘上，只是挂在新 token 下读不到。
+    有 uin 就用 uin，没有（未登录态）才退回 token。
+    """
+    s = SESSIONS.get(token)
+    uin = getattr(s, "uin", "") if s else ""
+    return _norm_uin(uin) or token
+
+
+def _read_ui_log(path: Path) -> list[dict]:
+    out: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+_TOKEN_UIN_RE = re.compile(r"load session token=(\S+) uin=(\d{6,12})")
+
+
+def _token_uin_map() -> dict[str, str]:
+    """从主服务日志里恢复「token → uin」映射（会话文件被清后唯一的来源）。
+
+    只读日志尾部 8MB，够覆盖最近几天的登录记录。
+    """
+    p = Path(os.environ.get("MC_LOG", "/tmp/mc_8000.log"))
+    out: dict[str, str] = {}
+    try:
+        with p.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 8 * 1024 * 1024))
+            text = f.read().decode("utf-8", "ignore")
+        for tok, uin in _TOKEN_UIN_RE.findall(text):
+            out[tok] = "o" + uin
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _migrate_ui_logs_to_uin() -> None:
+    """把历史「按 token 命名」的界面日志改名成「按 uin 命名」，重新登录后历史不丢。
+
+    账号归属：活跃 token 直接用会话里的 uin；历史 token 先看日志里
+    「已进入主面板，当前账号 o<uin>」，再看主服务日志的 token→uin 映射。
+    都取不到的文件原样保留。目标已存在时按 ts 合并，合并成功才删源文件。
+    """
+    if not LOG_DIR.is_dir():
+        return
+    tmap = _token_uin_map()
+    moved = 0
+    for kind in ("op", "match"):
+        for p in sorted(LOG_DIR.glob(f"*_{kind}.log")):
+            stem = p.name[: -len(f"_{kind}.log")]
+            uin = _ui_log_owner(stem) if stem in SESSIONS else ""
+            if not uin and re.fullmatch(r"[oO]?\d{6,12}", stem):   # 已是 uin 命名（可能带 o 前缀）
+                uin = _norm_uin(stem)
+            if not uin:
+                for ent in _read_ui_log(p):      # 全量扫：合并后首屏可能没有标记行
+                    m = _UI_LOG_ACC_RE.search(str(ent.get("msg", "")))
+                    if m:
+                        uin = "o" + m.group(1)
+                        break
+            if not uin:
+                uin = tmap.get(stem, "")
+            uin = _norm_uin(uin)
+            if not uin or uin == stem:      # 已经是按 uin 命名的，跳过
+                continue
+            dst = LOG_DIR / f"{uin}_{kind}.log"
+            try:
+                if not dst.exists():
+                    os.replace(p, dst)
+                else:
+                    merged = sorted(_read_ui_log(dst) + _read_ui_log(p),
+                                    key=lambda e: str(e.get("ts", "")))
+                    # 落盘不截断（界面只显示最近 _UI_LOG_MAX 条，磁盘保留全部）
+                    dst.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n"
+                                           for e in merged), encoding="utf-8")
+                    p.unlink()
+                moved += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning("界面日志改名失败 %s: %r", p.name, e)
+    if moved:
+        logger.info("界面日志按账号归集：迁移 %d 个文件", moved)
+
+
 def _load_ui_logs() -> None:
-    """启动时按 token 加载各账号的界面日志（与 SESSIONS 一一对应），落盘于 LOG_DIR/<token>_<kind>.log。"""
+    """启动时按账号加载界面日志（每个账号一份，不随重新登录的 token 变化）。"""
     for token in SESSIONS:
         for kind, store in (("op", _UI_LOGS), ("match", _MATCH_LOGS)):
             dq: "deque" = deque(maxlen=_UI_LOG_MAX)
-            p = LOG_DIR / f"{token}_{kind}.log"
+            p = LOG_DIR / f"{_ui_log_owner(token)}_{kind}.log"
             if p.exists():
-                try:
-                    for line in p.read_text(encoding="utf-8").splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            dq.append(json.loads(line))
-                        except Exception:  # noqa: BLE001
-                            pass
-                except Exception:  # noqa: BLE001
-                    pass
+                for ent in _read_ui_log(p):
+                    dq.append(ent)
             store[token] = dq
 
 
@@ -187,6 +283,7 @@ def _cur_token() -> str:
 _qr = QRLogin()
 _session = SessionProxy()
 _load_sessions()
+_migrate_ui_logs_to_uin()
 _load_ui_logs()
 
 # 礼物箱→变卡 自动循环（单例）
@@ -396,7 +493,7 @@ async def ui_log_post(request: Request):
     entry = {"ts": ts, "msg": msg, "cls": cls}
     dq.append(entry)
     try:
-        with (LOG_DIR / f"{token}_{kind}.log").open("a", encoding="utf-8") as f:
+        with (LOG_DIR / f"{_ui_log_owner(token)}_{kind}.log").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:  # noqa: BLE001
         pass
