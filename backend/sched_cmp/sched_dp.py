@@ -786,21 +786,24 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
     except _CapAbort:
         complete = False
     if res:
-        if prio is not None:
-            if prio2 is not None and prio2_first:
-                # CP 顺序作主序（2026-10-25 option 2）：先让「更该早上炉」的
-                # 卡型占位，同分再按 cp。仅改尝试顺序/截断保留，不改可行性。
-                res.sort(key=lambda v: (
-                    sum(ev[1] * prio2[ev[0]] for ev in v),
-                    -sum(ev[1] * prio[ev[0]] for ev in v)))
-            elif prio2 is not None:
-                res.sort(key=lambda v: (
-                    -sum(ev[1] * prio[ev[0]] for ev in v),
-                    sum(ev[1] * prio2[ev[0]] for ev in v)))
+        # ★ A/B 开关 MC_DP_VEC_NOSORT=1：跳过启发式排序，保留纯枚举顺序
+        # （验证「张数×向上cp」排序是否把关键路径饿死）。默认关，生产不变。
+        if _os.environ.get("MC_DP_VEC_NOSORT", "0") != "1":
+            if prio is not None:
+                if prio2 is not None and prio2_first:
+                    # CP 顺序作主序（2026-10-25 option 2）：先让「更该早上炉」的
+                    # 卡型占位，同分再按 cp。仅改尝试顺序/截断保留，不改可行性。
+                    res.sort(key=lambda v: (
+                        sum(ev[1] * prio2[ev[0]] for ev in v),
+                        -sum(ev[1] * prio[ev[0]] for ev in v)))
+                elif prio2 is not None:
+                    res.sort(key=lambda v: (
+                        -sum(ev[1] * prio[ev[0]] for ev in v),
+                        sum(ev[1] * prio2[ev[0]] for ev in v)))
+                else:
+                    res.sort(key=lambda v: -sum(ev[1] * prio[ev[0]] for ev in v))
             else:
-                res.sort(key=lambda v: -sum(ev[1] * prio[ev[0]] for ev in v))
-        else:
-            res.sort(key=lambda v: -sum(ev[1] for ev in v))
+                res.sort(key=lambda v: -sum(ev[1] for ev in v))
         if max_vecs is not None and len(res) > max_vecs:
             res = res[:max_vecs]
             complete = False
@@ -922,7 +925,7 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None,
 
 
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
-          maximal_only=True, init_stock=None, init_running=None,
+          maximal_only=None, init_stock=None, init_running=None,
           init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000):
     """求解 RCPSP 实例。
 
@@ -958,6 +961,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     """
     global DUR, MATS, MACHINES, N, BASEFREE, BASESET, _CLS_PRE
     global DIVE, DIVE_W, DIVE_PICK
+    # ★★ 2026-11-20：「极大性」（有空炉 + 有素材就必须把炉开满）是**人给的先验**，
+    #   不是问题本身的约束。顶层卡要等关键中层素材时，「故意留炉 / 只开一部分」
+    #   可能严格更优 —— 实测 954 套卡（16 类型、157 op、5 主炉+1 偷炉）冷启：
+    #   极大 17.474h → 非极大 16.925h（顶层卡 486.8min → 452.4min 开工）。
+    #   真机 7 个真实快照（warm 0.3s）累计 66.58h → 65.33h（大实例 21.238→19.991h，
+    #   小实例逐位一致；cold 2s 差 ≤0.02h）。`MC_DP_MAXIMAL=0` 关闭极大性。
+    #   缺省（None）= 读环境变量，再缺省保持旧行为（开极大）—— 不改动既有调用方。
+    if maximal_only is None:
+        maximal_only = _os.environ.get("MC_DP_MAXIMAL", "1") != "0"
     # 候选实验：有界搜索（避免 dfs 复活后打满 2s 预算）
     _nb = _os.environ.get("MC_DP_NODE_BUDGET")
     if _nb:
