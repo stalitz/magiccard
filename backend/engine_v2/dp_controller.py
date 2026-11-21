@@ -116,6 +116,19 @@ class DPTickController:
         self.cp_budget = float(os.environ.get("MC_CP_BUDGET") or cp_budget)
         self._cp_used = False
         self.cp_stats: dict = None
+        # ★★ 倒排冷启骨架（2026-11-21，实验开关 MC_BWD_FIRST=1）：与 cp_first 同定位
+        # （冷启首个承诺点），但算法是「反向 deadline 传播」——顶层 deadline=T，
+        # 子卡 deadline=父卡开工，逐层往左填。用户炼法的直接实现；自带箱容 +
+        # 商店串行校验（倒排建模了箱容，不是事后复核），不依赖 ortools。
+        # 实测（离线，见 dp_backward 与 tests/test_dp_backward.py）：
+        #   954(2★) 905min（CP 最优 898.13，+0.8%）/ 4★ 203.91h（生产 217.95h）
+        #   / 5★ 233.33h（生产 243.12h）。构造单次 <100ms。
+        self.bwd_first = os.environ.get("MC_BWD_FIRST") == "1"
+        self._bwd_used = False
+        self.bwd_stats: dict = None
+        if os.environ.get("MC_BWD_DBG") == "1":
+            print("[BWD] controller init bwd_first=%s machines=%s steal=%s"
+                  % (self.bwd_first, machines, steal_enabled), flush=True)
         # ★ CP 顺序 tie-break（2026-10-25 option 2）：离线从 CP 最优轨迹抽出
         # 「谁该早上炉」的静态优先级（sched_dp.tb_hints），只改列表调度/向量
         # 的选卡顺序，**不动时刻口径**（执行层仍保留容差）。
@@ -163,6 +176,16 @@ class DPTickController:
         #   到期且料齐的 4h 关键卡只能等它 1h 出炉（2★ 实测 +0.97h）。
         #   消融入口：MC_MAIN_RESERVE=0 关。
         self.main_reserve = os.environ.get("MC_MAIN_RESERVE", "1") == "1"
+        # ★ 2026-11-20 用户定调「执行层只管执行」的 A/B 开关（默认关）：
+        #   关掉所有执行层局部决策——提前发 / 向上合并 / 主炉让位 / 应急买 /
+        #   向后扫描 / 死锁兜底，只按 DP 的 op 顺序与 start 到期执行。
+        #   买卡 JIT、腾箱、炉位物理绑定（主炉/偷炉）仍保留——那是物理可行性，
+        #   不是编排决策。用 A/B 仿真验证「去掉所有门」是否真的更快。
+        self.exec_literal = os.environ.get("MC_EXEC_LITERAL") == "1"
+        if self.exec_literal:
+            self.order_only = False
+            self.merge_ready = False
+            self.main_reserve = False
         # ★ 排队位（真机每炉 2 个卡位：1 在炼 + 1 排队，`<stovebox cur="7"
         #   stovenum="3">` = 3×2 + 偷炉 1）。
         #   ★★「能排队」≠「该排队」：提前投会把素材锁死在排队卡上（换卡箱 18 格
@@ -1376,11 +1399,59 @@ class DPTickController:
                     mk = sched = stats = None
             else:
                 self.cp_stats = self.cp_stats or dict(stats or {})
+        _hint_kw = {}
+        if sched is None:
+            # ---- ★★ 倒排冷启骨架（2026-11-21，实验开关 MC_BWD_FIRST=1）----
+            # 与 cp_first 同定位：只在冷启首个承诺点用一次（倒排模型也只支持冷启）。
+            # 区别：倒排把箱容/商店串行/素材时序全部建模进构造，不需要事后
+            # `_box_peak` 复核；也不依赖 ortools（CP 在 4★/5★ 要 180s+，倒排 <100ms）。
+            # ★★ 2026-11-21 用户定调：「贴近度」只是**搜索倾向**，求解仍然是 DP。
+            #   所以倒排不直接交付，只作为 solve() 的两个引导量：
+            #     `ub_hint`     —— 收紧 BOUND（剪枝上界）
+            #     `hint_sched`  —— (a) 排序键：越早开工的卡型越先试；(b) incumbent：
+            #                      DFS 走不出更优路径时保留它（from=HINT），绝不劣化。
+            _hint_kw = {}
+            if (self.bwd_first and not self._bwd_used and self.solve_count == 0
+                    and not running and not any(init_stockL)):
+                self._bwd_used = True
+                if os.environ.get("MC_BWD_DBG") == "1":
+                    print("[BWD] try: n=%d need0=%d machines=%d steal=%d chg=%s store=%s cp_max=%.1fmin"
+                          % (nL, sum(need0L), self.machines, self._steal_cap,
+                             inst.get("change_cap"), inst.get("store_cap"),
+                             (max(cpL) / 60.0 if cpL else 0.0)), flush=True)
+                try:
+                    from backend.sched_cmp.dp_backward import solve_backward
+                    _mk_b, _sch_b, _meta_b, _st_b = solve_backward(inst)
+                    if _sch_b:
+                        _buys_b = (_meta_b or {}).get("buys") or []
+                        _hint = sorted(
+                            [(int(i), float(t)) for i, t in _sch_b] +
+                            [(int(i), float(t)) for i, t in _buys_b],
+                            key=lambda x: x[1])
+                        _hint_kw = {"ub_hint": float(_mk_b), "hint_sched": _hint}
+                        self.bwd_stats = {"hint_mk": _mk_b / 60.0,
+                                          "hint_ops": len(_hint)}
+                    else:
+                        self.bwd_stats = {"rejected": "no_plan"}
+                    if os.environ.get("MC_BWD_DBG") == "1":
+                        print("[BWD] hint: %r" % (self.bwd_stats,), flush=True)
+                except Exception as exc:      # noqa: BLE001 — 任何异常都回退
+                    self.bwd_stats = {"status": "ERROR:%s" % type(exc).__name__,
+                                      "err": str(exc)[:200]}
+                    if os.environ.get("MC_BWD_DBG") == "1":
+                        import traceback
+                        print("[BWD] EXC %r" % (exc,), flush=True)
+                        traceback.print_exc()
         if sched is None:
             mk, sched, stats = solve(inst, time_budget=_tb,
                                      node_budget=self.node_budget,
                                      init_stock=init_stockL, init_running=running,
-                                     memo=self._memo, max_vecs=self.max_vecs)
+                                     memo=self._memo, max_vecs=self.max_vecs,
+                                     **(_hint_kw or {}))
+            if _hint_kw and stats:
+                self.bwd_stats = dict(self.bwd_stats or {})
+                self.bwd_stats["used_from"] = stats.get("from")
+                self.bwd_stats["dp_mk"] = (stats.get("best_v") or 0) / 60.0
         # 箱容兜底：回退 UB 可能超容（DP 搜不到可行解）→ relax 重解。
         # ⚠️ relax 必须用全新 memo：箱容约束下的 INF/有限值会毒化无约束重解
         # （LB 剪枝与箱容无关仍有效，但「落箱超容」分支在 relax 后变可行）。
@@ -2138,6 +2209,9 @@ class DPTickController:
             _t_dbg = round(elapsed / 3600, 3)
             early = False
             _not_due = op["start"] > elapsed + EPS
+            # 字面执行：DP 的 start 是硬到期时刻，未到就等（不提前发）。
+            if self.exec_literal and _not_due:
+                break
             if not self.order_only and _not_due:
                 if first_refine and early_ok(i, op["cid"]):
                     # 头动作提前发（有限偏差③）。仅限头动作——实测：放过窗口内
@@ -2161,6 +2235,9 @@ class DPTickController:
                     if (self._owner[f].is_base(f) and pending.get(f, 0) < 1
                             and not _excl and f not in protected):
                         miss_buy.append(f)
+            # 字面执行：缺料就地停，不向后扫描抢别的 op（那属于执行层重排）。
+            if self.exec_literal and blocked:
+                break
             # ★ 2026-10-28 纯顺序模式下的早发安全检查：
             #   绕过 start 门后，若直接发炉就会**抢走未到期前序 op 的喂料**（`early_ok`
             #   的 reserved 段本就是为了防这个，旧路径只有头动作才走到它）。实测漏掉
@@ -2303,7 +2380,7 @@ class DPTickController:
                                         tuple(miss_buy)))
                 i += 1
                 continue
-            if (miss_buy
+            if (not self.exec_literal and miss_buy
                     and box_free_local >= len(miss_buy)
                     and n_base + len(miss_buy) <= base_quota_emerg
                     and n_buy + n_emerg + len(miss_buy) <= buy_cap):
@@ -2349,7 +2426,7 @@ class DPTickController:
         # 个「到期 + 喂料齐 + 有空炉」的 refine op 发掉：消耗 trio 净腾 2
         # 格 → 箱闸松 → buy 恢复流动。语义安全：发的是计划内合法 op（只改
         # 时机不改序），每 tick 最多 1 个（防打乱 DP 顺序），记 discrepancy。
-        if n_ref == 0 and n_emerg == 0:
+        if n_ref == 0 and n_emerg == 0 and not self.exec_literal:
             for j in range(plan["cursor"], len(ops)):
                 opj = ops[j]
                 if issued[j] or opj["kind"] != "refine":

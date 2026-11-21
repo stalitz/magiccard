@@ -253,6 +253,14 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
     返回 (mk, sched, meta, stats)，与 dp_plan3.solve 同口径：
       sched=[(type,start)]，meta={"buys":[(type,t)], "pools":[...]}，mk=校验后 makespan
     """
+    # dp_plan3 用的是同目录裸 import（`from dp_plan2 import ...`），生产进程的
+    # sys.path 里通常没有 sched_cmp 目录，这里补一下（重复不会加载第二份：
+    # 已有 sys.modules 命中就用现有的）。
+    import os as _os
+    import sys as _sys
+    _here = _os.path.dirname(_os.path.abspath(__file__))
+    if _here not in _sys.path:
+        _sys.path.insert(0, _here)
     from dp_plan3 import validate_pools
 
     dur = [float(x) for x in inst["dur"]]
@@ -270,7 +278,10 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
         tries += 1
         r = backward_at(inst, T)
         if r is not None:
-            pools = _assign_pools(inst, r["sched"])
+            # ★ 必须用倒排自己的机位（`_assign_pools` 是另一次贪心重分配，
+            #   和倒排实际占的机器不一致 → validate 会报 machine_full，把可行
+            #   解判死；4 台口径下曾因此 40 次试探全失败返回 None）。
+            pools = r["pools"]
             v = validate_pools(inst, r["sched"], pools, r["buys"])
             if v["ok"]:
                 best = (v["makespan"], r, pools, v)
@@ -296,7 +307,7 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
         rr = backward_at(inst, mid)
         ok = False
         if rr is not None:
-            pp = _assign_pools(inst, rr["sched"])
+            pp = rr["pools"]
             vv = validate_pools(inst, rr["sched"], pp, rr["buys"])
             if vv["ok"]:
                 ok = True

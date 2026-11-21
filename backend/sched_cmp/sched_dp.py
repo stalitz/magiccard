@@ -926,7 +926,8 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None,
 
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           maximal_only=None, init_stock=None, init_running=None,
-          init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000):
+          init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000,
+          ub_hint=None, hint_sched=None):
     """求解 RCPSP 实例。
 
     ⚠️ **不可重入、非线程安全**：实例数据是按约定写进模块级全局（`DUR/MATS/
@@ -1040,6 +1041,19 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # （更好的静态序让头动作更少被卡 → 重解 5→2 次 → 少掉执行层自适应修正），
     # 故默认关闭，由 dp_controller 按 MC_TB=1 显式注入。
     ub_sched = _ub_schedule(inst, init_stock, init_running, init_machine_free)
+    # ★★ 2026-11-21 用户定调：「齐套贴近」只是搜索策略倾向，**还是 DP**。
+    #   所以倒排（dp_backward）不替代求解，只把它的可行解当作初始上界喂进来：
+    #     · ub_sched 换成 hint 的调度 → UB 从贪心值降到「倒排可行值」，
+    #       BOUND_V / `t + lb >= best` 的剪枝全部收紧，搜索被逼进紧区域；
+    #     · 交付解仍由 DFS 自己走出来的链给出（from=DP）；
+    #     · 只有当 DFS 一条完整路径都没走通时，才退回交付 hint（from=HINT），
+    #       保证「给了更好上界反而变无解」不会发生。
+    _hint_val = None
+    if hint_sched:
+        ub_sched = [(int(_i), float(_t)) for _i, _t in hint_sched]
+        ub_sched.sort(key=lambda _x: _x[1])
+        if ub_hint is not None:
+            _hint_val = float(ub_hint)
     _buyfree = bool(inst.get("buy_free"))
     if _buyfree:
         # 底卡不耗时 → 它的「完成时刻」不构成 makespan（否则 UB 白多 45s 尾巴）
@@ -1047,6 +1061,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                   for i, s in ub_sched), default=0.0)
     else:
         ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
+    if _hint_val is not None and _hint_val < ub - 1e-9:
+        ub = _hint_val
     # ★★ 纯 DP（MC_DP_PURE=1）：交付解**只允许来自 dfs 自己搜出来的后缀链**，
     #   UB 降级为纯剪枝上界（`BOUND_V`），永远不进交付。
     #   旧行为的退化点（2026-11-15 实测 408 冷启 35/35 次交付=贪心表）：
@@ -1093,8 +1109,15 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         # 只是把可行域边界放宽（PURE 下本来就允许打平解），最终答案仍来自 dfs。
         BOUND_V[0] *= _INF_RELAX
     if PURE:
-        best = {"val": INF, "sched": None, "from": None,
-                "deliv": None, "gift": None}
+        if _hint_val is not None and hint_sched:
+            # ★★ 倒排解作为 **incumbent**（不是替代求解）：DFS 只在严格优于它时
+            #   改写交付物；走不出更好路径就保留它。这样 DP 的交付永不劣于外部
+            #   可行解，也不会因为「上界比 DFS 能构造的更紧」而白跑两遍。
+            best = {"val": _hint_val, "sched": list(hint_sched), "from": "HINT",
+                    "deliv": None, "gift": None}
+        else:
+            best = {"val": INF, "sched": None, "from": None,
+                    "deliv": None, "gift": None}
     else:
         best = {"val": ub, "sched": list(ub_sched), "from": "UB",
                 "deliv": None, "gift": None}
@@ -1152,6 +1175,25 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # 向量截断/排序与 UB ready 排序（搜索指路），不影响 DP 正确性。
     # 实测：4★ 引擎级 84.08h → 77.45h；2★ 关键链开工提前（见 _up_cp 注释）。
     vec_prio = _up
+    # ★★ 2026-11-21 用户定调：「子卡贴着父卡开工」是**搜索策略倾向**，不是另起
+    #   一个贪心求解器。落地方式 = 把倒排解的开工时刻表变成向量的排序键：
+    #   hint 里越早开工的卡型，prio 越大 → `_vectors` 排序 / 截断时优先保留它们，
+    #   dfs 仍自己枚举可行向量、自己推进 dt、自己记叶子。可行性完全不受影响，
+    #   只是「先试哪条路」变了。`MC_DP_HINT_PRIO=0` 可关（A/B）。
+    if hint_sched and _os.environ.get("MC_DP_HINT_PRIO", "1") == "1":
+        _n0 = len(vec_prio) if vec_prio else n
+        _hmin = [float("inf")] * _n0
+        for _hi, _hv in hint_sched:
+            _hi = int(_hi)
+            if 0 <= _hi < _n0:
+                _hmin[_hi] = min(_hmin[_hi], float(_hv))
+        _fin = [(i, x) for i, x in enumerate(_hmin) if x < float("inf")]
+        if _fin:
+            _T = max(x for _i, x in _fin) or 1.0
+            _hp = [0.0] * _n0
+            for _i, _x in _fin:
+                _hp[_i] = 1.0 + (_T - _x) / _T      # 早开工 → 大
+            vec_prio = _hp
     # ★★ 2026-11-09 字典序目标（用户 11-09 定调 / 11-09 模型复核结论）：
     #   31 个 op 存在大量 makespan 相同的排列，DP 只按 makespan 择优 → 挑中了
     #   库存峰值最大的那个，真机 200 格被铺开的 40 面中间卡吃满。改为
@@ -2077,7 +2119,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 允许打平），第二遍就一定走得到叶子，并在其内继续改进。
             # `MC_DP_DIVE_BOUND=0` 保持 UB 上界（诊断 lb 是否高估用）。
             if _os.environ.get("MC_DP_DIVE_BOUND", "1") == "1":
-                BOUND_V[0] = best["val"] * (_INF_RELAX if INF_SUM else 1.0)
+                _bvd = best["val"] * (_INF_RELAX if INF_SUM else 1.0)
+                # ★★ 2026-11-21：外部 hint（倒排可行值）比 dive 解更紧时必须保留。
+                #   旧实现无条件用 dive 的 incumbent 覆盖 BOUND，于是调用方传进来的
+                #   `ub_hint` 在 PURE 路径上被静默吃掉（实测 954：hint 15.08h、
+                #   dive 17.55h，交付仍是 16.85h，与不给 hint 逐位相同）。
+                BOUND_V[0] = min(_bvd, _bv0) if _bv0 < INF else _bvd
             else:
                 BOUND_V[0] = min(_bv0, best["val"])
         else:
@@ -2096,6 +2143,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #   5★ 实测：dive + 0.3s B&B 走不到叶子，必须靠冷启 retry 才拿到
     #   102.45h/1 轮的完整解（禁 retry 会退回 312.5h/0 轮）。
     if PURE and v >= INF \
+            and not (_hint_val is not None and best["sched"] is not None) \
             and time_budget >= float(_os.environ.get(
                 "MC_DP_PURE_RETRY_MIN_TB", "1.0") or 1.0) \
             and _os.environ.get("MC_DP_PURE_RETRY", "1") == "1":
@@ -2183,11 +2231,33 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         # 注意：根返 INF 只表示「搜不到优于 UB 的路径」（含被 LB 剪枝），
         # **不是**模型不可行；可行性由调用方模拟调度箱占用判定。
         if PURE and best["sched"] is not None:
-            # 根链没走通（abort 时回卷），但途中已有叶子记下完整调度：
-            # 交付它，且明确标成 DP（旧代码会留 from=None，调用方无法区分）。
-            best["from"] = "DP_LEAF"
+            # ★ 只有「best 来自 dfs 自己的叶子」才标 DP_LEAF；外部 hint 原样保留
+            #   from=HINT，不能冒充成 DP 搜出来的解（954 实测 sched 与 hint 逐位相同
+            #   却被标成 DP_LEAF）。
+            if best.get("from") != "HINT":
+                best["from"] = "DP_LEAF"
             stats["pure_leaf"] = True
         elif PURE and best["sched"] is None:
+            # ★ 纯 DP 且两遍搜索都没走通任何完整路径：若调用方给了可行 hint
+            #   （倒排解），退回它而不是报无解 —— hint 是双校验过的真实调度。
+            if hint_sched and _hint_val is not None:
+                stats["no_solution"] = False
+                stats["peak"] = sched_peak(inst, list(hint_sched), init_occ0)
+                stats["lex_peak"] = lex_peak
+                stats["lex_deliv"] = None
+                stats["infinite"] = INF_SUM
+                stats["deliv"] = None
+                stats["diag"] = dict(DIAG)
+                stats["eq_left"] = EQ_LEFT[0]
+                stats["from"] = "HINT"
+                stats["root_peak"] = None
+                stats["root_v"] = None
+                stats["best_v"] = _hint_val
+                stats["gift_ops"] = []
+                stats["gift_used"] = 0
+                stats["gift_n"] = GN0
+                stats["note"] = "hint_fallback"
+                return _hint_val, list(hint_sched), stats
             # 纯 DP 且两遍搜索都没走通任何完整路径：如实报无解，不交贪心表。
             stats["no_solution"] = True
             stats["peak"] = None
