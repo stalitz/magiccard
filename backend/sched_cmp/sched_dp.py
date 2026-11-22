@@ -797,7 +797,25 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
         # ★ A/B 开关 MC_DP_VEC_NOSORT=1：跳过启发式排序，保留纯枚举顺序
         # （验证「张数×向上cp」排序是否把关键路径饿死）。默认关，生产不变。
         if _os.environ.get("MC_DP_VEC_NOSORT", "0") != "1":
-            if prio is not None:
+            if DIVE and _os.environ.get("MC_DP_DIVE_STEAL", "0") == "1":
+                # ★★ 2026-11-22 `MC_DP_DIVE_STEAL=1`：偷炉是「40 面专用机」，
+                #   主炉是通用机 → **专用机优先喂给 40 面卡，通用机留给只能
+                #   上主炉的卡**（经典瓶颈资源优先）。
+                #   实测依据（3 套 73 类型/547 op 首解）：dfs 主炉空炉 2.1 台h、
+                #   偷炉空炉 **60.1 台h**（49h 之后全程闲置 58.8h）；贪心
+                #   12.0 / 19.7 → makespan 108.04 vs 100.76。差 7.3h 全部是
+                #   「24 个 40 面类型被前置做完，后段偷炉无活可干」。
+                #   key 只改候选顺序，不动可行性/极大性。
+                def _st_ok(i):
+                    c = mclass[i]
+                    return (2 in c) if isinstance(c, (list, tuple)) else (c == 2)
+                res.sort(key=lambda v: (
+                    -sum(ev[1] for ev in v if ev[2] != -1),
+                    -sum(ev[1] for ev in v if ev[2] == 2),
+                    -sum(ev[1] for ev in v
+                         if ev[2] == 0 and not _st_ok(ev[0])),
+                    -(sum(ev[1] * prio[ev[0]] for ev in v) if prio else 0)))
+            elif prio is not None:
                 if prio2 is not None and prio2_first:
                     # CP 顺序作主序（2026-10-25 option 2）：先让「更该早上炉」的
                     # 卡型占位，同分再按 cp。仅改尝试顺序/截断保留，不改可行性。
