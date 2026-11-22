@@ -797,7 +797,21 @@ def _vectors(items, caps, mclass, mats, stock, need, maximal_only=True,
         # ★ A/B 开关 MC_DP_VEC_NOSORT=1：跳过启发式排序，保留纯枚举顺序
         # （验证「张数×向上cp」排序是否把关键路径饿死）。默认关，生产不变。
         if _os.environ.get("MC_DP_VEC_NOSORT", "0") != "1":
-            if DIVE and _os.environ.get("MC_DP_DIVE_STEAL", "0") == "1":
+            if _os.environ.get("MC_DP_VEC_SOLO", "0") == "1":
+                # ★★ 2026-11-22：**主炉上「只能上主炉的卡」绝对优先**。
+                #   40 面卡是双栖（主炉/偷炉都能做），专用卡只有主炉能做。
+                #   dive 以前按张数排序 → t=0 只有 40 面可开工就全投 40 面，
+                #   主炉被 40 面占住，专用卡料齐了也没炉位 → 40 面一直填到 48h。
+                #   这里把「本层投的主炉专用卡张数」提到首序（只改试路顺序）。
+                def _st_ok2(i):
+                    c = mclass[i]
+                    return (2 in c) if isinstance(c, (list, tuple)) else (c == 2)
+                res.sort(key=lambda v: (
+                    -sum(ev[1] for ev in v if ev[2] == 0 and not _st_ok2(ev[0])),
+                    -sum(ev[1] for ev in v if ev[2] == 2),
+                    -sum(ev[1] for ev in v if ev[2] != -1),
+                    -(sum(ev[1] * prio[ev[0]] for ev in v) if prio else 0)))
+            elif DIVE and _os.environ.get("MC_DP_DIVE_STEAL", "0") == "1":
                 # ★★ 2026-11-22 `MC_DP_DIVE_STEAL=1`：偷炉是「40 面专用机」，
                 #   主炉是通用机 → **专用机优先喂给 40 面卡，通用机留给只能
                 #   上主炉的卡**（经典瓶颈资源优先）。
@@ -1258,6 +1272,36 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     # 向量截断/排序与 UB ready 排序（搜索指路），不影响 DP 正确性。
     # 实测：4★ 引擎级 84.08h → 77.45h；2★ 关键链开工提前（见 _up_cp 注释）。
     vec_prio = _up
+    # ★★ 2026-11-22 用户定调：「最优解一定不会空炉——只要空炉，就说明某张卡
+    #   被推迟了」。3 套实例的炉时账：总工作量 371.2h ÷ 4 台 = 92.8h 下界，此时
+    #   **零空炉**；PURE 实测空 60.9 台h（=7.3h），贪心空 31.8 台h。
+    #   根因：`vec_prio = 向上 cp`（有多少活等我）。一张 40 面卡被 70 张次的
+    #   专用卡共享 → 向上 cp 极大 → dive 永远抢先把 94 张 40 面在 48h 内清空，
+    #   此后偷炉（40 面专用机）空转 58.8h，主炉独自背完 269h 专用卡。
+    #   `MC_DP_PRIO_KIT=1`：40 面卡的权重改成**它下游卡里最不富裕的那个**
+    #   （min 向上 cp）—— 只做「马上能解锁专用卡 / 能继续往上游走」的那几张，
+    #   而不是把整批料一次性清空。等价于物料齐套（kitting）优先。
+    #   只影响枚举顺序/截断保留，不动可行性、不动 make 计算。
+    if _os.environ.get("MC_DP_PRIO_KIT", "0") == "1":
+        _mck = inst.get("mclass") or []
+        _nP = len(vec_prio)
+        _down = [[] for _ in range(_nP)]
+        for _i in range(min(_nP, n)):
+            for _j, _k in mats[_i]:
+                if _j < _nP:
+                    _down[_j].append(_i)
+        _np = list(vec_prio)
+        _KW = float(_os.environ.get("MC_DP_PRIO_KIT_W", "0.5") or 0.5)
+        for _i in range(_nP):
+            _c = _mck[_i] if _i < len(_mck) else None
+            _cc = _c if isinstance(_c, (list, tuple)) else (_c,)
+            if 2 not in _cc:
+                continue
+            _ds = [vec_prio[_j] for _j in _down[_i] if _j < _nP and vec_prio[_j]]
+            if _ds:
+                # 40 面卡不是终点，终点在专用卡后面 → 只取下游最急的那个，再压一档
+                _np[_i] = min(_ds) * _KW
+        vec_prio = _np
     # ★★ 2026-11-21 用户定调：「子卡贴着父卡开工」是**搜索策略倾向**，不是另起
     #   一个贪心求解器。落地方式 = 把倒排解的开工时刻表变成向量的排序键：
     #   hint 里越早开工的卡型，prio 越大 → `_vectors` 排序 / 截断时优先保留它们，
