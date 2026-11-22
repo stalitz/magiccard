@@ -173,8 +173,15 @@ def backward_at(inst, T, pool_tie="cp", debug=False):
     if n_ok != len(ops):
         return None
 
-    # ---- 底卡下单：单机串行 45s，尽量晚（JIT），每张只需 到货 = 下单 + LAG <= dl
-    sfree = [[(0.0, BIG)]]
+    # ---- 底卡下单：尽量晚（JIT），每张只需 到货 = 下单 + LAG <= dl ----
+    # ★★ 2026-11-22 口径修正：旧版把商店建成**单机串行**（一次只能买 1 张），
+    #   而 DP/真机口径是 `shop_cap=15`（每 tick 最多买 15 张并行）→ 倒排的
+    #   买卡时刻被凭空推迟、料到得更晚。makespan 不受影响（下单时刻只是
+    #   「最晚可下单」，提前下不影响 sched），但 buys 时刻表整体偏晚，于是
+    #   「让 DFS 按 hint 时刻买卡」的闸门把人卡死（实测 BUY_FOLLOW 下
+    #   954 的 leaf 4→0）。这里改成 shop_cap 台并行机，与 DP 模型同口径。
+    SHOP = max(1, int(inst.get("shop_cap") or 1))
+    sfree = [[(0.0, BIG)] for _ in range(SHOP)]
     buys_sorted = sorted(buys, key=lambda x: -x[1])
     buys_out = []
     for i, arr in buys_sorted:
