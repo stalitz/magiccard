@@ -220,6 +220,14 @@ _CLS_PRE = None   # solve() 入口预计算的「类型→机器类元组」表
 DIVE = False      # solve() 内的 dive 阶段标志：不剪枝、只沿首个向量单路径下潜
 DIVE_W = 1        # dive 时每层保留的候选向量数（1 = 纯单路径）
 DIVE_PICK = 0     # dive 起手偏移：multi-start 时换第 k 个候选向量开头
+# ★ 2026-11-22 GRASP 多起点：`DIVE_SALT=0` 是旧的确定性 dive（每层取同一个
+#   排序偏移）；>0 时每层在前 `DIVE_RCL` 个候选向量里按 (salt, 访问序号) 取一个，
+#   同一 salt 完全可复现。大实例（73 类型/547 op）实测 B&B 60s 只多 13 个叶子、
+#   交付值等于 dive 值 —— 交付质量就是 dive 质量，故起手多样性直接决定结果。
+DIVE_SALT = 0
+DIVE_RCL = 8
+DIVE_SEQ = [0]
+DIVE_SINGLE = False   # dive 只走「单张卡」向量（= 逐台投炉的列表调度粒度）
 
 
 def _cls_of(mclass, i):
@@ -961,7 +969,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
       · steal_cap int       偷炉容量（缺省：有 class-2 类型/在炉→1，否则 0=不可用）
     """
     global DUR, MATS, MACHINES, N, BASEFREE, BASESET, _CLS_PRE
-    global DIVE, DIVE_W, DIVE_PICK
+    global DIVE, DIVE_W, DIVE_PICK, DIVE_SALT, DIVE_RCL, DIVE_SEQ, DIVE_SINGLE
     # ★★ 2026-11-20：「极大性」（有空炉 + 有素材就必须把炉开满）是**人给的先验**，
     #   不是问题本身的约束。顶层卡要等关键中层素材时，「故意留炉 / 只开一部分」
     #   可能严格更优 —— 实测 954 套卡（16 类型、157 op、5 主炉+1 偷炉）冷启：
@@ -1996,7 +2004,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # _SearchAbort（deadline）直接向上抛到 solve 顶层；截断（max_vecs/
             # rec_budget）在 _vectors 内部消化、返回 partial + complete=False。
             vecs, complete = _vectors(items, caps, mclass, mats, stock, need,
-                                      maximal_only, deadline=t0 + time_budget,
+                                      maximal_only and not (DIVE and DIVE_SINGLE), deadline=t0 + time_budget,
                                       max_vecs=max_vecs, rec_budget=rec_budget,
                                       # ★ 每层动态打分：按当前 t 与 hint 开工
                                       #   时刻的偏差重排候选向量（无 hint 时退回
@@ -2123,6 +2131,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # ★ dive：只沿排序后的前 DIVE_W 个向量一路到底（单路径下潜）。
             if DIVE and len(vecs) > DIVE_W:
                 _pk = DIVE_PICK
+                if DIVE_SINGLE:
+                    _one = [v for v in vecs
+                            if sum(e[1] for e in v if e[2] != -1) == 1]
+                    if _one:
+                        vecs = _one
+                if DIVE_SALT:
+                    # GRASP：每层在 RCL（前 DIVE_RCL 个）里按 (salt, 序号) 取一个
+                    DIVE_SEQ[0] += 1
+                    _m = min(len(vecs), DIVE_RCL)
+                    _pk = ((DIVE_SALT * 2654435761 + DIVE_SEQ[0] * 40503)
+                           & 0x7FFFFFFF) % _m
                 vecs = vecs[_pk:_pk + DIVE_W] or vecs[:DIVE_W]
             for vec in vecs:
                 DIAG["vec"] += 1
@@ -2292,11 +2311,31 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             _starts = 1              # warm 重解（0.1s 级）只够一站
         _dmv = max(2, int(_os.environ.get("MC_DP_PURE_DIVE_MV", "8") or 8))
         _drb = max(500, int(_os.environ.get("MC_DP_PURE_DIVE_RB", "4000") or 4000))
+        # ★★ 2026-11-22 GRASP 多起点（`MC_DP_PURE_DIVE_SAMPLES`，0 = 旧行为）：
+        #   大实例实测 B&B 从 3s 到 60s 只多 13 个叶子、值不变 → 交付质量 = dive
+        #   质量。旧 multi-start 只是「每层固定取第 k 个向量」，起手多样性极低
+        #   （3 套 4 起手 109.09→108.04）。改成每层在 RCL 内按 (salt, 序号) 取，
+        #   同一 salt 完全可复现；采样数按时间预算自适应，不占 B&B 的份。
+        #   ★ 实测结论：解质量确实变好（3 套 3s 108.04→105.77；2 星 warm
+        #   16.25→15.64 且耗时不变），**但引擎级端到端无改善、3 套反而
+        #   104.96→106.80（+1.84h）** —— 与 hint / CP 序同源的「更好首解 →
+        #   滚动重解变少 → 少掉执行层自适应修正」。故默认 0（不改变生产行为）。
+        _samples = int(_os.environ.get("MC_DP_PURE_DIVE_SAMPLES", "0") or 0)
+        _rcl = max(1, int(_os.environ.get("MC_DP_PURE_DIVE_RCL", "8") or 8))
+        _dfr = float(_os.environ.get("MC_DP_PURE_DIVE_FRAC", "0.45") or 0.0)
+        _dive_dl = time_budget * _dfr
+        # ★ 单张粒度 dive（`MC_DP_PURE_DIVE_SINGLE=1`）：把每层的动作收窄成
+        #   「就投一张最该投的卡」，即列表调度的粒度。极大性向量会一次开满
+        #   炉位、顺带把底卡一次性买进来（3 套箱峰 99 vs 列表调度 84），
+        #   这是 dive 落后贪心的直接来源，先做成可选策略测有没有用。
+        _single = _os.environ.get("MC_DP_PURE_DIVE_SINGLE", "0") == "1"
         try:
             DIVE = True
             DIVE_W = _dw
+            DIVE_SINGLE = _single
             for _k in range(max(1, _starts)):
                 DIVE_PICK = _k
+                DIVE_SALT = 0
                 max_vecs, rec_budget = _dmv, _drb
                 memo = {}
                 BOUND_V[0] = INF      # dive 不剪枝
@@ -2306,12 +2345,35 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     stats["bounded"] = True
                     break
                 stats["dive_starts"] = _k + 1
+            # ---- GRASP 采样：只在剩余预算还有富余时做，绝不挤占 B&B ----
+            if _samples > 0 and stats.get("dive_starts"):
+                _ns = 0
+                for _s in range(1, _samples + 1):
+                    if _t.perf_counter() - t0 > _dive_dl:
+                        break
+                    DIVE_SALT = _s
+                    DIVE_PICK = 0
+                    DIVE_RCL = _rcl
+                    DIVE_SEQ[0] = _s * 7919
+                    max_vecs, rec_budget = _dmv, _drb
+                    memo = {}
+                    BOUND_V[0] = INF
+                    try:
+                        dfs(need0, st0, rg, 0.0, (), GN0)
+                    except _SearchAbort:
+                        stats["bounded"] = True
+                        break
+                    _ns += 1
+                stats["dive_samples"] = _ns
         finally:
             memo = _memo0
             max_vecs, rec_budget = _mv0, _rb0
             DIVE = False
             DIVE_W = 1
             DIVE_PICK = 0
+            DIVE_SALT = 0
+            DIVE_RCL = 8
+            DIVE_SINGLE = False
         if best["val"] < INF:
             stats["dive_v"] = best["val"]
             stats["dive_from"] = best["from"]
