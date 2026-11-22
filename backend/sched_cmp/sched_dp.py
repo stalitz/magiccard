@@ -1048,10 +1048,29 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #     · 交付解仍由 DFS 自己走出来的链给出（from=DP）；
     #     · 只有当 DFS 一条完整路径都没走通时，才退回交付 hint（from=HINT），
     #       保证「给了更好上界反而变无解」不会发生。
+    # hint 的 per-type 开工时刻表（打分与 follow 诊断共用）
+    _hint_ts: dict = {}
+    if hint_sched:
+        for _hi, _hv in hint_sched:
+            _hi = int(_hi)
+            if 0 <= _hi < n:
+                _hint_ts.setdefault(_hi, []).append(float(_hv))
+        for _k in _hint_ts:
+            _hint_ts[_k].sort()
+    # ★ 诊断开关：严格跟 hint 单路径走，判定「hint 形状在 dfs 状态机里是否可达」
+    HINT_FOLLOW = bool(hint_sched) and _os.environ.get("MC_DP_HINT_FOLLOW") == "1"
+    FOLLOW_FAIL: list = []
+    FOLLOW_WAIT = [0]
+
     _hint_val = None
     if hint_sched:
-        ub_sched = [(int(_i), float(_t)) for _i, _t in hint_sched]
-        ub_sched.sort(key=lambda _x: _x[1])
+        # ★ 2026-11-22：`MC_DP_HINT_NOUB=1` → hint 只做「打分倾向」，不接管 UB。
+        #   两者耦合时无法分辨「是打分指对了路」还是「剪枝把路剪没了」
+        #   （954 实测：接管 UB 后 BOUND=15.08h，DFS 的叶子从 1 万个掉到 **4 个**、
+        #   最好叶值 18.76h —— 全是 dive 走的，B&B 一个叶子都没到）。
+        if _os.environ.get("MC_DP_HINT_NOUB") != "1":
+            ub_sched = [(int(_i), float(_t)) for _i, _t in hint_sched]
+            ub_sched.sort(key=lambda _x: _x[1])
         if ub_hint is not None:
             _hint_val = float(ub_hint)
     _buyfree = bool(inst.get("buy_free"))
@@ -1061,7 +1080,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                   for i, s in ub_sched), default=0.0)
     else:
         ub = max((s + dur[i] for i, s in ub_sched), default=0.0)
-    if _hint_val is not None and _hint_val < ub - 1e-9:
+    if (_hint_val is not None and _hint_val < ub - 1e-9
+            and _os.environ.get("MC_DP_HINT_NOUB") != "1"):
         ub = _hint_val
     # ★★ 纯 DP（MC_DP_PURE=1）：交付解**只允许来自 dfs 自己搜出来的后缀链**，
     #   UB 降级为纯剪枝上界（`BOUND_V`），永远不进交付。
@@ -1109,13 +1129,19 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
         # 只是把可行域边界放宽（PURE 下本来就允许打平解），最终答案仍来自 dfs。
         BOUND_V[0] *= _INF_RELAX
     if PURE:
-        if _hint_val is not None and hint_sched:
+        if _hint_val is not None and hint_sched \
+                and _os.environ.get("MC_DP_HINT_NOUB") != "1":
             # ★★ 倒排解作为 **incumbent**（不是替代求解）：DFS 只在严格优于它时
             #   改写交付物；走不出更好路径就保留它。这样 DP 的交付永不劣于外部
             #   可行解，也不会因为「上界比 DFS 能构造的更紧」而白跑两遍。
             best = {"val": _hint_val, "sched": list(hint_sched), "from": "HINT",
                     "deliv": None, "gift": None}
         else:
+            # ★ 2026-11-22 `MC_DP_HINT_NOUB=1`：hint **只当打分倾向**，不进
+            #   incumbent。原因：best 初值 = hint 值会让 dive 后的
+            #   `BOUND_V = min(dive, _bv0, best)` 收敛到 hint 值 → 剪枝照样收紧，
+            #   「只打分」无从验证（954 实测 leaf 从 1 万掉到 4 个）。
+            #   诊断跑法：NOUB=1 + DYN，看 DFS 自搜能不能走到 hint 附近。
             best = {"val": INF, "sched": None, "from": None,
                     "deliv": None, "gift": None}
     else:
@@ -1123,6 +1149,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 "deliv": None, "gift": None}
     stats = {"nodes": 0, "time": 0.0, "bounded": False, "ub0": ub,
              "memo_hits": 0, "opt": None, "capped": 0, "pure": PURE}
+    if HINT_FOLLOW:
+        stats["follow"] = {"fail": FOLLOW_FAIL, "wait": FOLLOW_WAIT[0]}
     _occ0 = float(sum(init_stock) if init_stock is not None else 0) + len(run_norm)
     stats["ub_peak0"] = sched_peak(inst, list(ub_sched), _occ0)
     # ★ 候选（默认关 = 与生产逐位一致）：让 dfs 真正搜索「同 makespan」的
@@ -1194,6 +1222,62 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             for _i, _x in _fin:
                 _hp[_i] = 1.0 + (_T - _x) / _T      # 早开工 → 大
             vec_prio = _hp
+
+    # ★★ 2026-11-22 用户定调：「贴近度要做成**每层动态打分**」。
+    #   静态 prio（上面那段）只回答「整盘里谁更早」，DFS 走到时刻 t 时仍是同一张
+    #   排序表 —— 于是它无法知道「hint 在 t 这一刻打算开哪几张」，大实例上只能
+    #   一路走回 base 形状，最终交付的其实还是 hint 本身。
+    #   这里把 hint 的完整开工时刻表变成 **t 的函数**：
+    #     h_i(t) = hint 中类型 i 的「下一个 >= t 的开工时刻」
+    #     score_i(t) = 1 / (1 + max(0, h_i(t)-t) / τ)
+    #   越接近此刻该开工 → 分越高；hint 里该类型已全部开工过（此刻本不该再开）
+    #   → 给弱分 0.05，让 CP 决定。
+    #   τ = hint 相邻开工时刻差的中位数（自适应批次粒度），退化时用 T/20。
+    #   与 cp 叠加：prio = cpn + W*score，cpn∈[1,2]（保留关键路径信息，
+    #   不至于让 hint 把关键链饿死）。只影响枚举顺序/截断保留，不影响可行性。
+    HINT_DYN = bool(hint_sched) and _os.environ.get("MC_DP_HINT_DYN", "1") == "1"
+    _dyn_sc_cache: dict = {}
+    _dyn_prio_fn = None
+    if HINT_DYN:
+        from bisect import bisect_left as _bisect_l
+        _starts = sorted(set(round(float(_x), 3) for _i, _x in hint_sched))
+        _diffs = [_b - _a for _a, _b in zip(_starts, _starts[1:]) if _b - _a > 1e-6]
+        if _diffs:
+            _diffs.sort()
+            _tau = max(1.0, _diffs[len(_diffs) // 2])
+        else:
+            _tau = max(1.0, (_starts[-1] if _starts else 1.0) / 20.0)
+        _hu = list(_up) if _up else [0.0] * n
+        _hi_max = max(_hu) if _hu else 0.0
+        _hi_min = min(_hu) if _hu else 0.0
+        _hspan = max(1e-9, _hi_max - _hi_min)
+        _cpn = [1.0 + (x - _hi_min) / _hspan for x in _hu]
+        _dyn_w = float(_os.environ.get("MC_DP_HINT_DYN_W", "2.0") or 2.0)
+
+        def _dyn_prio_fn(t):
+            """t 时刻的每层打分（带缓存；同 t 同分 → 与 need 无关，缓存安全）。"""
+            key = round(t, 3)
+            got = _dyn_sc_cache.get(key)
+            if got is not None:
+                return got
+            out = [0.0] * n
+            for i in range(n):
+                ts = _hint_ts.get(i)
+                if not ts:
+                    out[i] = _cpn[i]                       # hint 没这个类型 → 纯 cp
+                    continue
+                k = _bisect_l(ts, t - 1e-6)
+                if k >= len(ts):
+                    s = 0.05                            # hint 里已开完 → 不催
+                else:
+                    gap = ts[k] - t
+                    s = 1.0 / (1.0 + (gap if gap > 0.0 else 0.0) / _tau)
+                out[i] = _cpn[i] + _dyn_w * s
+            _dyn_sc_cache[key] = out
+            return out
+
+        stats["hint_dyn"] = {"tau": round(_tau, 3), "w": _dyn_w,
+                             "types": len(_hint_ts)}
     # ★★ 2026-11-09 字典序目标（用户 11-09 定调 / 11-09 模型复核结论）：
     #   31 个 op 存在大量 makespan 相同的排列，DP 只按 makespan 择优 → 挑中了
     #   库存峰值最大的那个，真机 200 格被铺开的 40 面中间卡吃满。改为
@@ -1533,6 +1617,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                     DIAG["inf_dead"] += 1
                     return INF, None, INF, None
                 fin = max([0.0] + [f for _i, f, _c in running_rel if _c != 3])
+                if t + fin < DIAG.get("leaf_best", INF):
+                    DIAG["leaf_best"] = t + fin      # 诊断：本解走出的最好叶子值
                 _dl = _dv(row_deliv, 0.0, None)
                 if INF_SUM:
                     # 无限：先比 ΣCi（每套尽早上交），再比 makespan
@@ -1868,12 +1954,63 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             vecs, complete = _vectors(items, caps, mclass, mats, stock, need,
                                       maximal_only, deadline=t0 + time_budget,
                                       max_vecs=max_vecs, rec_budget=rec_budget,
-                                      prio=vec_prio,
+                                      # ★ 每层动态打分：按当前 t 与 hint 开工
+                                      #   时刻的偏差重排候选向量（无 hint 时退回
+                                      #   静态 cp 权重，与旧行为逐位一致）。
+                                      prio=(_dyn_prio_fn(t)
+                                            if _dyn_prio_fn is not None
+                                            else vec_prio),
                                       prio2=inst.get("tb"),
                                       prio2_first=bool(inst.get("tb_first")),
                                       gift=None)
             if not complete:
                 stats["capped"] += 1
+            # ★★ 2026-11-22 诊断（默认关）：让 dfs 严格**跟着 hint 的时刻表**走
+            #   单路径，用来回答「hint 的调度在 dfs 状态机里到底可不可达」。
+            #   打分只影响「先试哪条」，若 hint 形状本身不可达，再怎么打分也没用
+            #   （954 实测：BOUND 收紧后 dfs 只能到 4 个叶子、最好叶值 18.76h，
+            #   而 hint 是 15.08h —— 必须分清是「搜不到」还是「不可达」）。
+            #   走法：已开工张数（need0-need）决定 hint 里「下一张该开的是哪张」，
+            #   到点就把必须开工的类型锁定为一个向量；不到点则推进时间。
+            if HINT_FOLLOW and _hint_ts:
+                _want = {}
+                for _i3, _ts3 in _hint_ts.items():
+                    if 1 in _cls_of(mclass, _i3):
+                        continue          # 底卡由 lazy 买卡决定，不对齐
+                    _k3 = need0[_i3] - need[_i3]
+                    if 0 <= _k3 < len(_ts3):
+                        _want[_i3] = _ts3[_k3]
+                _must = set(_i3 for _i3, _tt3 in _want.items() if _tt3 <= t + 0.5)
+                if _must:
+                    _pick = None
+                    for _v3 in vecs:
+                        _got3 = {}
+                        for _e3 in _v3:
+                            _got3[_e3[0]] = _got3.get(_e3[0], 0) + _e3[1]
+                        if all(_got3.get(_i4, 0) >= 1 for _i4 in _must):
+                            _sz3 = sum(_got3.values())
+                            if _pick is None or _sz3 < _pick[0]:
+                                _pick = (_sz3, _v3)
+                    if _pick is not None:
+                        vecs = [_pick[1]]
+                    else:
+                        # 到点了却开不出来：记下缺什么（素材 / 机位 / 箱位）
+                        _miss3 = []
+                        for _i4 in sorted(_must):
+                            for _j4, _k4 in mats[_i4]:
+                                if stock[_j4] < _k4:
+                                    _miss3.append((_i4, _j4, _k4, stock[_j4]))
+                        FOLLOW_FAIL.append({
+                            "t": round(t / 60.0, 2), "must": sorted(_must),
+                            "need": {i: need[i] for i in sorted(_must)},
+                            "miss": _miss3[:6],
+                            "idle": list(idle), "stock": sum(stock)})
+                else:
+                    # 还不到 hint 的下一张开炉时刻 → 本层不选向量，推进时间
+                    _act3 = [f for _i5, f, _c5 in running_rel if _c5 != 3]
+                    if _act3:
+                        FOLLOW_WAIT[0] += 1
+                        vecs = []
             if not vecs:
                 # 无可行开工向量：炉满/素材未到 → 必须推进到下一个完工
                 # （买卡已在上面确定性执行，running_rel 非空即可推进）。
