@@ -964,6 +964,39 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None,
     return max(lb_main, lb_steal)
 
 
+def _strip_base_ops(inst):
+    """把 10 面底卡从 DP 的作业集里彻底剔除（`base_inf` 口径）。
+
+    用户定调（2026-11-22）：「10 面底卡就是可以随便买，**用的时候才买** ——
+    投一个炉买 1 次，而不是一次买齐再去炼。**dp 根本不用排 10 面的卡**，
+    这个交给执行层去买，买了直接炼上。不管是哪一层的卡，需要 10 面的，
+    dp 都可以认为有了。」
+
+    实现两件事（其余字段原样透传）：
+      ① `need0[b] = 0`（b 为底卡类型）→ dfs / UB 不再把「买第 k 张 b」当成 op；
+      ② 所有 `mats[i]` 剔除条目 `j ∈ 底卡` → 精炼开工不再检查底卡库存。
+
+    ★ 为什么这不是「给条件」而是「对齐执行层」：`dp_controller` 在
+      `buy_free and not buy_keepop`（生产默认）下**本来就把买卡 op 从计划里
+      剥掉**，改按 `jit_need`（头 n_wave 炉的配方缺口）即买即投。所以 DP
+      排出来的买卡时刻从来没被执行过，只污染 makespan（3 套实测：547 op 里
+      389 个是买卡，makespan 108.044h 的尾部 0.012h 就是尾批买卡）。
+    ★ 箱位：`buy_free` 下买卡即时落箱、同一 t 的精炼立刻消耗 → 喂料底卡
+      「同 tick 投炉净占 0 格」（铁律 `4347fdc`），故不建模腾挪代价。
+    """
+    mc = inst.get("mclass") or []
+    n = int(inst["n"])
+    is_base = [1 in (v if isinstance(v, (list, tuple)) else (v,)) for v in mc]
+    if not any(is_base):
+        return inst
+    out = dict(inst)
+    out["need0"] = [0 if is_base[i] else int(inst["need0"][i]) for i in range(n)]
+    out["mats"] = [[(int(j), int(k)) for j, k in (m or ()) if not is_base[int(j)]]
+                   for m in inst["mats"]]
+    out["base_inf"] = True
+    return out
+
+
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           maximal_only=None, init_stock=None, init_running=None,
           init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000,
@@ -1015,6 +1048,20 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     _nb = _os.environ.get("MC_DP_NODE_BUDGET")
     if _nb:
         node_budget = int(_nb)
+    # ★★ 2026-11-22 用户定调：「10 面底卡就是可以随便买，用的时候才买 ——
+    #   投一个炉买 1 次，而不是一次买齐再去炼。**dp 根本不用排 10 面的卡**，
+    #   这个交给执行层：dp 排 40 面，执行层去买对应的 10 面卡，买了直接炼上。
+    #   不管是哪一层的卡，需要 10 面的，dp 都可以认为有了。」
+    #   落地：底卡 `need0` 归零（不进 op 集）、并从所有 `mats` 配方里剔除 →
+    #   dfs / UB / LB 都不再为底卡排时序，也不再受「买底卡抢箱位」的假约束。
+    #   实测（3 套 73 类型）：op 数 547 → 158（底卡占 71%），makespan
+    #   108.044h → 105.942h；**且预测精度从 −3.08h 修正到 +0.26h**（旧口径
+    #   把执行层不做的买卡算进 makespan，生成的水分让计划"看起来慢、实际快"）。
+    #   env `MC_BASE_INF=0/1` 可强制开关（A/B 对照用）。
+    _bi_env = _os.environ.get("MC_BASE_INF")
+    _BASE_INF = (bool(inst.get("base_inf")) if _bi_env is None else _bi_env == "1")
+    if _BASE_INF:
+        inst = _strip_base_ops(inst)
     DUR = inst["dur"]
     MATS = inst["mats"]
     MACHINES = inst["machines"]
