@@ -141,6 +141,16 @@ def backward_at(inst, T, pool_tie="cp", debug=False):
 
     buys = []
     n_ok = 0
+    # ★ 2026-11-22「取卡延迟」诊断开关（默认 0，**实测无效，保留作反例**）：
+    #   立论 = 炼成卡要下一 tick 取出才能投新炉，倒排把「完工」当「可用」，
+    #   每层少一个 tick → ops 越多越乐观。加 DRAW 后子卡 deadline 提前一个
+    #   tick（寿司 hint 48.63→49.50h、蜻蜓 3.14→3.17h）。
+    #   实测（451 引擎级，DRAW=45 vs 0）：执行 **79.06h → 79.06h 逐位相同**。
+    #   → 「延迟累积」不是寿司劣化的主因（hint 只决定冷启首解的前几个动作，
+    #     之后每 tick 滚动重解都与 hint 无关）。真因是首解的开炉节奏：
+    #     倒排是 JIT 尽量晚开，执行层却需要「有空炉就开满」才追得上。
+    import os as _os
+    DRAW = float(_os.environ.get("MC_BWD_DRAW") or 0.0)
     while heap:
         _ndl, _ncp, _nd, k = heapq.heappop(heap)
         op = ops[k]
@@ -165,7 +175,7 @@ def backward_at(inst, T, pool_tie="cp", debug=False):
             cop = ops[c]
             if cop["dl"] is not None:
                 continue
-            cop["dl"] = s
+            cop["dl"] = s - DRAW
             cj = cop["i"]
             heapq.heappush(heap, (-s, -float(cp[cj]), -dur[cj], c))
         n_ok += 1
