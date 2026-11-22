@@ -1157,6 +1157,10 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     #     · `best` 从 INF/None 起，叶子把 `<= BOUND` 的打平解也记下来，
     #       交付 dfs 链 → `from` 恒为 "DP"。
     PURE = _os.environ.get("MC_DP_PURE", "1") == "1"
+    # ★★ 2026-11-22 `MC_DP_NOMAX=1`：放开「极大向量」限制（诊断可行域用）。
+    #   见 dfs 里 `_vec_of` 处的注释：dfs 缺「开一部分、留一部分」的中间态。
+    #   必须在 solve 内现读（模块级常量在 import 时固化，A/B 改 env 无效）。
+    _NOMAX = _os.environ.get("MC_DP_NOMAX", "0") == "1"
     # ★★ 2026-11-17 用户定调「0 = 无限」：`sets=0` 不是「做 0 套」，是
     #   「一直炼、做几套由你（DP）自己按卡炉/卡箱决定」。
     #   DP 表达「无限」的方式只能是换目标 —— 「做完 N 套的最短总时间」是
@@ -2065,8 +2069,17 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             caps = [max(0, idle[0]), max(0, idle[1]), max(0, idle[2])]
             # _SearchAbort（deadline）直接向上抛到 solve 顶层；截断（max_vecs/
             # rec_budget）在 _vectors 内部消化、返回 partial + complete=False。
+            # ★★ 2026-11-22 `MC_DP_NOMAX=1`：**放开极大性**（诊断/可行域用）。
+            #   背景（3 套 inst 实测）：dfs 只有两种动作 ——
+            #     ① 极大向量：所有空闲炉都开；
+            #     ② WAIT 分支：所有空闲炉都停、等下一次完工。
+            #   **缺「开一部分、留一部分」这个中间态**。而真正更优的调度
+            #   （贪心 100.75h）恰恰是「主炉留空等专用卡料、偷炉继续炼 40 面」
+            #   —— 一开一停。所以上界从 100.76h 放宽到 109.76h，dfs 的
+            #   leaf 最优恒为 108.044：**可行域里根本不含那条路径**。
             vecs, complete = _vectors(items, caps, mclass, mats, stock, need,
-                                      maximal_only and not (DIVE and DIVE_SINGLE), deadline=t0 + time_budget,
+                                      (maximal_only and not (DIVE and DIVE_SINGLE)
+                                       and not _NOMAX), deadline=t0 + time_budget,
                                       max_vecs=max_vecs, rec_budget=rec_budget,
                                       # ★ 每层动态打分：按当前 t 与 hint 开工
                                       #   时刻的偏差重排候选向量（无 hint 时退回
