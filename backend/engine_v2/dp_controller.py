@@ -124,6 +124,14 @@ class DPTickController:
         #   954(2★) 905min（CP 最优 898.13，+0.8%）/ 4★ 203.91h（生产 217.95h）
         #   / 5★ 233.33h（生产 243.12h）。构造单次 <100ms。
         self.bwd_first = os.environ.get("MC_BWD_FIRST") == "1"
+        # ★★ 2026-11-22 自动开关（用户定调「按你说的做」）：
+        #   倒排的多 deadline 错峰只在**顶层卡有多个型别**（k>1，即多主题 / 一主题
+        #   多顶卡）时才有意义；k=1 的实例错峰恒等于旧口径，hint 本身有害或无用
+        #   （451 +2.9%、1652 逐位相同）。所以默认按 k 自动判断，不再要人工开关：
+        #     k>1 → 跑倒排（hint_sched + incumbent 保底，仍是纯启发）
+        #     k=1 → 不跑（等价 MC_BWD_FIRST=0）
+        #   MC_BWD_AUTO=0 关掉自动判断（回到只看 MC_BWD_FIRST）。
+        self.bwd_auto = os.environ.get("MC_BWD_AUTO", "1") == "1"
         self._bwd_used = False
         self.bwd_stats: dict = None
         if os.environ.get("MC_BWD_DBG") == "1":
@@ -387,6 +395,24 @@ class DPTickController:
         #   （每 tick 解 21.29h，留 buy op 22.51h，基线 23.80h）。
         #   这里用「真正投出一炉」作为事件（比每 tick 解便宜得多：60 次量级）。
         self.event_resolve = os.environ.get("MC_EVENT_RESOLVE", "1") == "1"
+        # ★★ 2026-11-22：事件重解必须带「真实偏离」判据（用户定调：dp 记状态，
+        #   排序没被干扰就不用重解）。1 = 只有 `plan["discrepancy"] > 0`
+        #   （等料打不开/应急买/腾箱/提前合并）才按 `_dirty` 重解；0 = 旧口径。
+        #   ⚠ **默认 0（保守）**：无扰动链路实测 4/4 场景不劣（1652 流水 10h
+        #   4→5 套、20h 10→11 套且 ΣCi 1280→7740、954 17.5h 产出逐位相同
+        #   且 CPU −62%、3 套固定窗逐位相同），但**扰动注入档 A/B
+        #   （`_bench_perturb` STRESS）尚未跑完**。用户明确担心「漏检扰动 →
+        #   永不重解 → 卡死」，故在拿到扰动档数据前不默认开。
+        #   开启：`MC_RESOLVE_DRIFT=1`（务必与下面的心跳一起用）。
+        self.resolve_on_drift = os.environ.get("MC_RESOLVE_DRIFT", "0") == "1"
+        # ★★ 心跳（安全网）：不管有没有检测到偏离，距上次解算超过这么久就强制重解。
+        #   用户 2026-11-23 明确担心「看错状态 → 永远不重解 → 卡死」。任何
+        #   「扰动没被 discrepancy 记到」的漏网情形（外部取卡/箱格被别人占/
+        #   变卡/炉被取消……）都由这条兜底，代价是每 45min 一次解算（~0.3s）。
+        #   MC_RESOLVE_HB=0 关闭（仅 A/B）。
+        self.resolve_hb = float(os.environ.get("MC_RESOLVE_HB") or 2700.0)
+        self.hb_resolves = 0            # 心跳强制重解次数
+        self.resolve_skipped = 0        # 因「无真实偏离」而跳过的重解次数
         self._dirty = False             # 上次解之后是否又投出过炉（需重解）
         self._gift_batch = []           # 本 tick 已取出、待兑现的变卡动作
         self._left_rounds = None        # 各套剩余轮数最小值（多轮判定，_union_need0 写）
@@ -472,7 +498,13 @@ class DPTickController:
         for i in range(n):
             cpf(i)
         return {"types": ut, "idx": idx, "n": n, "dur": dur,
-                "mats": mats, "mclass": mclass, "depth": depth, "cp": cp}
+                "mats": mats, "mclass": mclass, "depth": depth, "cp": cp,
+                # 顶层卡**型别数**（depth 最大那层、非底卡有多少种）：
+                # 倒排错峰只在 k>1（多主题 / 一主题多顶卡）时有意义，k=1 恒等于
+                # 旧口径 → 用来自动决定是否跑倒排（见 `_solve_plan` 的 `_bwd_on`）。
+                "tops": (sum(1 for i in range(n)
+                             if depth[i] >= (max(depth) if depth else 0)
+                             and 1 not in mclass[i]))}
 
     @staticmethod
     def _pipe_consumes_set(m, avail, pending) -> bool:
@@ -1400,6 +1432,17 @@ class DPTickController:
             else:
                 self.cp_stats = self.cp_stats or dict(stats or {})
         _hint_kw = {}
+        # ★★ 2026-11-22 倒排自动开关：顶层型别数 k>1 才跑（用户「按你说的做」）。
+        #   k=1 时错峰恒等于旧口径，而旧倒排本身在「顶层只有一种卡」的实例上
+        #   有害（451 +2.9%）或无用（1652 / 单套逐位相同）→ 直接不跑。
+        #   纯启发层开关，不改 dfs 可行域。
+        _bwd_k = int(sk.get("tops") or 0)
+        _bwd_on = bool(self.bwd_first or (self.bwd_auto and _bwd_k > 1))
+        if sched is None and self.bwd_auto and not self.bwd_first:
+            self.bwd_stats = {"auto": _bwd_k > 1, "tops": _bwd_k}
+        if os.environ.get("MC_BWD_DBG") == "1":
+            print("[BWD] auto tops=%d on=%s solve=%d"
+                  % (_bwd_k, _bwd_on, self.solve_count), flush=True)
         if sched is None:
             # ---- ★★ 倒排冷启骨架（2026-11-21，实验开关 MC_BWD_FIRST=1）----
             # 与 cp_first 同定位：只在冷启首个承诺点用一次（倒排模型也只支持冷启）。
@@ -1422,7 +1465,7 @@ class DPTickController:
             #   在第一个承诺点跑一次，之后 100+ 次滚动重解完全没有方向。实测
             #   单套 50h（首解权重大）49.98→48.75h、600 面长卡 26.7→14.2h 开工、
             #   投炉时箱存 33→18 张；3 套 105h（首解被淹没）104.96→106.41h。
-            if (self.bwd_first and os.environ.get("MC_BWD_EVERY") == "1"
+            if (_bwd_on and os.environ.get("MC_BWD_EVERY") == "1"
                     and not _hint_kw):
                 _rem = [max(0, int(x)) for x in need0L]
                 for _i5 in range(len(_rem)):
@@ -1458,7 +1501,7 @@ class DPTickController:
                             self.bwd_stats = {"every_no_plan": True}
                     except Exception as _e5:      # noqa: BLE001 — 启发失败就退回无方向
                         self.bwd_stats = {"every_err": type(_e5).__name__}
-            if (self.bwd_first and not self._bwd_used and self.solve_count == 0
+            if (_bwd_on and not self._bwd_used and self.solve_count == 0
                     and not running and not any(init_stockL)):
                 self._bwd_used = True
                 if os.environ.get("MC_BWD_DBG") == "1":
@@ -2703,10 +2746,39 @@ class DPTickController:
                      and plan["discrepancy"] > max(12, len(plan["ops"]) // 4))
         by_streak = plan is not None and plan["streak"] >= self.streak_limit
         streak_over = by_streak and self._no_progress_resolves < self.streak_resolve_cap
+        # ★★ 2026-11-22 用户定调：「dp 是记录状态的算法（空间换时间），当每个 tick
+        #   发现和上个 tick 算出的排序**没有被干扰**（提前取卡 / 箱被别的卡占 /
+        #   变了子卡……）其实不需要重解」。
+        #   旧口径的 `_dirty` 是「本 tick 投出过炉」，那是**计划内的事**（计划自己
+        #   就排了这一炉），拿它当重解理由 = 用「照计划执行」去否定计划本身 →
+        #   每投一炉就把后续骨架推倒重排，静态序越"好"反而越吃亏（这就是
+        #   `MC_TB_FIRST` 那次「更好的序 → 重解变少 → 反而更慢」的镜像）。
+        #   新判据 = **真实偏离** `plan["discrepancy"]`（自本计划生成以来累计）：
+        #     · 计划 op 被卡住/等料打不开 → +1
+        #     · 应急买料 / 腾箱卖卡     → +1
+        #     · 向上合并提前发           → +1
+        #   这些全部是「现实与计划不符」的信号；而 cursor 正常推进、料齐即投
+        #   根本不计 discrepancy → 不重解、继续按原骨架走。
+        #   箱容变化（杂卡占位/扩容）另有更硬的通道：`box_cap` 变了 →
+        #   `decide` 里已经把 `self._plan` 置 None（见骨架缓存段）→ 必然重解。
+        #   MC_RESOLVE_DRIFT=0 可回到旧口径（只看 `_dirty`）做 A/B。
+        _drift = (plan is not None and int(plan["discrepancy"]) > 0)
+        dirty_pending = (self.event_resolve and self._dirty
+                         and (self._left_rounds or 0) >= 2)
+        dirty_resolve = dirty_pending and (_drift or not self.resolve_on_drift)
+        # 「本该重解但因无真实偏离而跳过」的 tick 数（观测：这条就是省下的算力）
+        if dirty_pending and not dirty_resolve:
+            self.resolve_skipped += 1
+        # ★ 心跳安全网：偏离检测可能漏网（外部取卡/箱被占/变卡/炉取消……都未必
+        #   产生 discrepancy）。超过 `resolve_hb` 秒必重解一次，保证任何漏检的
+        #   扰动最多被拖一个心跳周期，不会「永远不重解」。
+        _hb_due = (self.resolve_on_drift and self.resolve_hb > 0
+                   and plan is not None
+                   and (ws.now - float(plan.get("solved_at") or ws.now))
+                   >= self.resolve_hb)
         if (plan is None or self._plan_rounds_sig != rounds_sig
                 or exhausted or empty_stale or disc_over or streak_over
-                or (self.event_resolve and self._dirty
-                    and (self._left_rounds or 0) >= 2)
+                or dirty_resolve or _hb_due
                 or self.solve_every_tick):
             plan, stats = self._solve_plan(ws, active, need0_map, buy0_map,
                                            box_cap, self._skel, rounds_sig,
@@ -2715,6 +2787,8 @@ class DPTickController:
             self._plan = plan
             self._plan_rounds_sig = rounds_sig
             self.resolves += 1
+            if _hb_due:
+                self.hb_resolves += 1
             if self._dirty:
                 self._dirty = False
                 self.dirty_resolves += 1
@@ -2746,6 +2820,8 @@ class DPTickController:
                       "streak": plan["streak"],
                       "discrepancy": plan["discrepancy"],
                       "resolves": self.resolves,
+                      "resolve_skipped": self.resolve_skipped,
+                      "hb_resolves": self.hb_resolves,
                       "refined_now": run_stats["refined"],
                       "bought_now": run_stats["bought"],
                       "emergency_now": run_stats["emergency"],
