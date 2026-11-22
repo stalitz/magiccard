@@ -927,7 +927,7 @@ def _cum_lb(need, stock, running_rel, t, mclass, steal_cap=0, fins_by=None,
 def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
           maximal_only=None, init_stock=None, init_running=None,
           init_machine_free=None, memo=None, max_vecs=96, rec_budget=50000,
-          ub_hint=None, hint_sched=None):
+          ub_hint=None, hint_sched=None, hint_buys=None):
     """求解 RCPSP 实例。
 
     ⚠️ **不可重入、非线程安全**：实例数据是按约定写进模块级全局（`DUR/MATS/
@@ -1061,6 +1061,29 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
     HINT_FOLLOW = bool(hint_sched) and _os.environ.get("MC_DP_HINT_FOLLOW") == "1"
     FOLLOW_FAIL: list = []
     FOLLOW_WAIT = [0]
+    # ★★ 2026-11-22 `MC_DP_BUY_FOLLOW=1`：底卡也按 hint 的下单时刻买。
+    #   诊断依据（954）：`MC_DP_HINT_FOLLOW` 的 8.3 万次失配**全是底卡 stock=0**
+    #   —— hint 是倒排 JIT（父卡开工前 LAG 才下单），DFS 是 readyish 批量买
+    #   （素材一凑齐就把该类型底卡全买进来）。两者买卡轨迹不同 → DFS 走到
+    #   hint 打算开炉的那一刻，箱里根本没有那张底卡 → hint 形状**不可达**，
+    #   动态打分再准也指不动路。
+    #   这里把 hint 的 buys 时刻表变成买卡的**时间闸**：第 k 张 b 类底卡只在
+    #   hint 的下单时刻之后才允许买（更晚不限）。DFS 的 stock 轨迹被迫贴着
+    #   hint 走 → hint 形状可达 → 打分才有意义。
+    #   ⚠️ 这是搜索向导而不是模型约束（hint 张数用尽后放开，让 DFS 自决），
+    #   默认关，A/B 用。
+    _hint_buy_ts: dict = {}
+    if hint_buys:
+        for _bi2, _bt2 in hint_buys:
+            _bi2 = int(_bi2)
+            if 0 <= _bi2 < n:
+                _hint_buy_ts.setdefault(_bi2, []).append(float(_bt2))
+        for _k2 in _hint_buy_ts:
+            _hint_buy_ts[_k2].sort()
+    BUY_FOLLOW = bool(_hint_buy_ts) and _os.environ.get("MC_DP_BUY_FOLLOW") == "1"
+    _st_init = tuple(init_stock) if init_stock is not None else tuple([0] * n)
+    BUY_WAIT = [0]
+    BUY_DROP: list = []
 
     _hint_val = None
     if hint_sched:
@@ -1151,6 +1174,12 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
              "memo_hits": 0, "opt": None, "capped": 0, "pure": PURE}
     if HINT_FOLLOW:
         stats["follow"] = {"fail": FOLLOW_FAIL, "wait": FOLLOW_WAIT[0]}
+    if BUY_FOLLOW:
+        # wait 存**可变引用**（[次数]）：solve 有多个 early-return 出口，
+        # 快照 int 会在返回前就被冻结成 0（实测 954 明明闸了 4 次却报 wait=0）。
+        stats["buy_follow"] = {"wait": BUY_WAIT, "drop": BUY_DROP,
+                               "types": len(_hint_buy_ts),
+                               "n": sum(len(v) for v in _hint_buy_ts.values())}
     _occ0 = float(sum(init_stock) if init_stock is not None else 0) + len(run_norm)
     stats["ub_peak0"] = sched_peak(inst, list(ub_sched), _occ0)
     # ★ 候选（默认关 = 与生产逐位一致）：让 dfs 真正搜索「同 makespan」的
@@ -1839,6 +1868,7 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
             # 后缀时只取本迭代的 op（相对迭代顶状态 delta 归零）；前序迭代
             # 的 op 属于更早的状态，混入会在 memo 命中时重放更早的买卡。
             iter_start = len(own_ops)
+            _blocked = []          # 本决策点被 BUY_FOLLOW 闸住的 (底卡, 允许买时刻)
             # ★★ buy_free：买卡不占 shop 槽（容量视为无限，真实上限是箱位/金币），
             #   且**当场入箱**（不建 45s 的 class-1 任务）。这样「买卡」不再是排期
             #   节点，solver 的决策变量只剩精炼顺序 —— 正是用户要的口径。
@@ -1875,6 +1905,20 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 for b in range(n):
                     if 1 in _cls_of(mclass, b) and dem.get(b, 0) > 0:
                         caps[b] = min(need[b], dem[b])
+                        if BUY_FOLLOW:
+                            # hint 里第 k 张 b 类底卡的下单时刻还没到 → 本决策点
+                            # 不许买（k = 已买张数，底卡不开工，故由 need 反推）。
+                            # hint 张数用尽（k 越界）→ 放开，让 DFS 自决。
+                            _kb = need0[b] - need[b] - _st_init[b]
+                            _ts_b = _hint_buy_ts.get(b) or ()
+                            if _kb < len(_ts_b) and _ts_b[_kb] > t + 0.5:
+                                caps[b] = 0
+                                _blocked.append((b, _ts_b[_kb]))
+                                BUY_WAIT[0] += 1
+                                if len(BUY_DROP) < 4:
+                                    BUY_DROP.append({"b": b, "k": _kb,
+                                                     "at": round(_ts_b[_kb] / 60, 2),
+                                                     "t": round(t / 60, 2)})
                 bv = []
                 # ★★ 2026-11-16：本次已买张数必须累加进 `_pool_ok` 的投影。
                 #   旧版固定 `_bi + 1`（只投影「再多 1 张」）→ 一个决策点可以
@@ -2018,7 +2062,24 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                 # S>0：主炉满+有可开工精炼+无买卡需求时 idle[1]>0 条件不成立 → 进分支 →
                 # _vectors 返回空 → best_v=INF 假死路，父节点被迫回溯到「少开工」次优解。
                 _act = [f for _i2, f, _c2 in running_rel if _c2 != 3]
+                # ★ BUY_FOLLOW：等 hint 的下一个下单时刻也是一种「合法推进」——
+                #   否则「底卡按 hint 还没到点买」会被误判死路（_act 为空即
+                #   inf_dead），而现实里就是等到商店那一刻买料再投炉。
+                _gapq = INF
+                if BUY_FOLLOW:
+                    # ★ 只对本决策点**确实被闸住**的底卡算等待窗口。旧写法遍历
+                    #   全部 hint 买卡时刻 → 那些「DFS 本来就不需要买」的远期
+                    #   下单时刻也被当成推进目标，dfs 白等 → 时间凭空变长、
+                    #   全被 BOUND 剪掉（实测 954 leaf 4→0、神蛇 1564→0）。
+                    for _bq, _tq in _blocked:
+                        _gq = _tq - t
+                        if 1e-6 < _gq < _gapq:
+                            _gapq = _gq
                 if not _act:
+                    if _gapq < INF:
+                        t = t + _gapq
+                        t_rel += _gapq
+                        continue
                     DIAG["inf_dead"] += 1
                     if len(DEAD_LOG) < DEAD_LOG_MAX:
                         DEAD_LOG.append({"need": tuple(need),
@@ -2030,6 +2091,8 @@ def solve(inst, time_budget=120.0, node_budget=8_000_000, use_memo=True,
                                          "run": tuple(running_rel)})
                     return INF, None, INF, None    # 死路：无机在炉也无卡可开
                 dt = min(_act)
+                if _gapq < dt - 1e-6:
+                    dt = _gapq
                 running_rel = tuple((i, f - dt, c) if c != 3 else (i, f, c)
                                     for i, f, c in running_rel)
                 t = t + dt

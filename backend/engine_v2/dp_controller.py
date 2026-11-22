@@ -1428,7 +1428,9 @@ class DPTickController:
                             [(int(i), float(t)) for i, t in _sch_b] +
                             [(int(i), float(t)) for i, t in _buys_b],
                             key=lambda x: x[1])
-                        _hint_kw = {"ub_hint": float(_mk_b), "hint_sched": _hint}
+                        _hint_kw = {"ub_hint": float(_mk_b), "hint_sched": _hint,
+                                    "hint_buys": [(int(i), float(t))
+                                                  for i, t in _buys_b]}
                         self.bwd_stats = {"hint_mk": _mk_b / 60.0,
                                           "hint_ops": len(_hint)}
                     else:
