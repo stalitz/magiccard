@@ -56,6 +56,208 @@ def _best_slot(free, d, deadline, allowed=None):
     return best
 
 
+def _earliest_slot(free, d, ready, deadline, allowed=None):
+    """找「start 最早、start>=ready、finish<=deadline」的位置（前向压实用）。
+
+    与 `_best_slot` 相反：那个是 latest-fit（尽量晚开工 → 前段留空），
+    这个是 earliest-fit（能开就开 → 不空炉），deadline 仍是硬上界。
+    """
+    best = None
+    rng = allowed if allowed is not None else range(len(free))
+    for mi in rng:
+        for li, (ls, le) in enumerate(free[mi]):
+            s = ls if ls > ready + EPS else ready
+            if s + d <= le + EPS and s + d <= deadline + EPS:
+                if best is None or s < best[0] - EPS:
+                    best = (s, mi, li)
+                break          # 该机器区间升序，第一个放得下的就是最早
+    return best
+
+
+def _idle_area(free, horizon):
+    """[0, horizon] 内的机位空闲面积（秒·台），越小 = 炉越满。"""
+    tot = 0.0
+    for ivs in free:
+        for ls, le in ivs:
+            a = max(ls, 0.0)
+            b = min(le, horizon)
+            if b > a:
+                tot += b - a
+    return tot
+
+
+def _fwd_once(inst, ops, is_base, T, arr, wait=0.0, force=None):
+    """一次前向 ASAP：底卡按 arr 到货，非底卡 EDF + earliest-fit。
+
+    与倒排相反 —— 倒排的 `_best_slot` 是 latest-fit（尽量晚开工，前段留空炉），
+    前向是「能开就开」。deadline 仍取倒排链，只当上界。
+    wait>0 时允许「等到 deadline 前 wait 秒再开」（给箱位留余量）。
+    force = {op: 最早开工时刻}，箱位闸要求被推迟的那几张。
+    """
+    n, dur, mats, need, _ib = _prep(inst)
+    M = int(inst["machines"])
+    S = int(inst.get("steal_cap") or 0)
+    NM = max(1, M + S)
+    cls = [tuple(c) for c in inst["mclass"]]
+
+    def _allowed(i):
+        if S and 2 in cls[i]:
+            return range(NM)
+        return range(M)
+
+    free = [[(0.0, BIG)] for _ in range(NM)]
+    end = [None] * len(ops)
+    start = [None] * len(ops)
+    for k, a in arr.items():
+        end[k] = a
+        start[k] = a
+    late_n = [0]
+    todo = [k for k, op in enumerate(ops) if not is_base[op["i"]]]
+    while todo:
+        pick = None
+        for k in todo:
+            op = ops[k]
+            r = 0.0
+            ok = True
+            for c in op["kids"]:
+                e = end[c]
+                if e is None:
+                    ok = False
+                    break
+                if e > r:
+                    r = e
+            if not ok:
+                continue
+            dl = op["dl"] if op["dl"] is not None else T
+            f = r + dur[op["i"]]
+            key = (dl, f, k)            # EDF：deadline 紧的先排
+            if pick is None or key < pick[0]:
+                pick = (key, k, r, dl)
+        if pick is None:
+            LAST_FAIL.clear(); LAST_FAIL.update(where="fwd_cycle")
+            return None
+        _, k, r, dl = pick
+        i = ops[k]["i"]
+        d = dur[i]
+        if wait > 0.0:
+            r = max(r, dl - wait)
+        if force:
+            r = max(r, force.get(k, 0.0))
+        got = _earliest_slot(free, d, r, dl, _allowed(i))
+        if got is None:                 # deadline 顶不住 → 放宽（记为 late）
+            late_n[0] += 1
+            got = _earliest_slot(free, d, r, BIG, _allowed(i))
+            if got is None:
+                LAST_FAIL.clear(); LAST_FAIL.update(where="fwd_slot", i=i, r=r / 60)
+                return None
+        s, mi, li = got
+        _take(free, mi, li, s, d)
+        end[k] = s + d
+        start[k] = s
+        ops[k]["s"] = s
+        ops[k]["m"] = mi
+        todo.remove(k)
+    mk = max([e for k, e in enumerate(end) if not is_base[ops[k]["i"]]], default=0.0)
+    return {"start": start, "end": end, "mk": mk, "late": late_n[0],
+            "idle": _idle_area(free, mk)}
+
+
+def _chg_conflict(ops, buys_idx, start, CHG, is_base):
+    """换卡箱闸：底卡从「下单」到「父卡开工消耗」一直占格（与 validate 同口径）。
+
+    返回超限时刻里**父卡开工最晚**的那张底卡的父卡 op（推迟它最省），
+    不超限返回 None。
+    """
+    seg = []
+    for k, t in buys_idx:
+        par = ops[k]["par"]
+        if not par:
+            # 纯交付的底卡：买来就常驻换卡箱直到上交 → 一直占格
+            seg.append((t, BIG, k))
+            continue
+        if start[par[0]] is None:
+            continue
+        seg.append((t, max(t, start[par[0]]), par[0]))
+    if not seg:
+        return None
+    pts = sorted(set([a for a, _b, _p in seg] + [b for _a, b, _p in seg if b < BIG / 2]))
+    for tt in pts:
+        cur = [(b, p, is_base[ops[p]["i"]]) for a, b, p in seg if a <= tt < b]
+        if len(cur) > CHG:
+            cand = [x for x in cur if not x[2]]      # 只能推迟父卡（常驻底卡挪不动）
+            if not cand:
+                return None
+            cand.sort(key=lambda x: -x[0])
+            return cand[0][1]
+    return None
+
+
+def _forward_fill(inst, ops, is_base, T, iters=5, wait=0.0, rounds=40):
+    """前向压实：把倒排算出的 deadline 链当上界，重排成「不空炉」的 ASAP 排程。
+
+    两层迭代：
+      内层 = 底卡到货与父卡开工的不动点（下单 JIT，受 shop_cap 排队）；
+      外层 = 换卡箱 18 格闸（ASAP 会让十几个父卡挤在同一时刻要底卡 →
+             同时到货爆箱），把冲突父卡推迟一个 tick 后重跑。
+    """
+    n, dur, mats, need, _ib = _prep(inst)
+    LAG = float(inst.get("shop_lag") or 45.0)
+    SHOP = max(1, int(inst.get("shop_cap") or 1))
+    CHG = int(inst.get("change_cap") or 18)
+    base_ids = [k for k, op in enumerate(ops) if is_base[op["i"]]]
+    if not base_ids:
+        return None
+    force = {}
+    best = None
+    for _r in range(rounds):
+        arr = {k: LAG for k in base_ids}
+        for _it in range(iters):
+            r = _fwd_once(inst, ops, is_base, T, arr, wait, force)
+            if r is None:
+                return None
+            start = r["start"]
+            want = {}
+            for k in base_ids:
+                par = ops[k]["par"]
+                if par:
+                    # 底卡最早到货 = LAG（t=0 下单），父卡开工再早也快不过它
+                    want[k] = max([start[p] for p in par] + [LAG])
+                else:
+                    # 纯交付底卡：买来常驻换卡箱 → 尽量晚买（卡在交付时刻）
+                    want[k] = max(float(ops[k]["dl"] or T), LAG)
+            sfree = [[(0.0, BIG)] for _ in range(SHOP)]
+            buys = []
+            buys_idx = []
+            new_arr = {}
+            for k in sorted(base_ids, key=lambda x: -want[x]):
+                got = _best_slot(sfree, LAG, want[k])   # 下单尽量晚（JIT）
+                if got is None:                          # 这批排不下 → 顺延
+                    got = _earliest_slot(sfree, LAG, 0.0, BIG)
+                    if got is None:
+                        LAST_FAIL.clear(); LAST_FAIL.update(where="buy_slot",
+                                                            want=want[k] / 60)
+                        return None
+                t, mi, li = got
+                _take(sfree, mi, li, t, LAG)
+                buys.append((ops[k]["i"], t))
+                buys_idx.append((k, t))
+                new_arr[k] = t + LAG
+            best = {"mk": r["mk"], "buys": buys, "late": r["late"],
+                    "idle": r["idle"], "ops": len(base_ids), "chg_rounds": _r}
+            if all(abs(new_arr[k] - arr[k]) < 1e-6 for k in base_ids):
+                break
+            arr = new_arr
+        conf = _chg_conflict(ops, buys_idx, start, CHG, is_base)
+        if conf is None:
+            return best
+        prev = force.get(conf)
+        nxt = float(start[conf] or 0.0) + LAG
+        if prev is not None and abs(nxt - prev) < 1e-6:
+            nxt = prev + LAG
+        force[conf] = nxt
+    return best
+
+
 def _take(free, mi, li, s, d):
     """占用 [s, s+d]，切割该机器的空闲区间。"""
     ivs = free[mi]
@@ -131,13 +333,47 @@ def backward_at(inst, T, pool_tie="cp", debug=False):
         return range(M)
 
     # 初始待排：没有父卡的 op（顶层 + 纯交付的收藏卡），deadline = T
+    # ★★ 2026-11-22「多 deadline / 按套错峰」（第二版，承接「倒排是启发」定调）：
+    #   旧版所有根 op 共用同一个 deadline T → 每套都压到同一条末尾链上，N 套
+    #   在时间轴上完全重叠，箱里同时躺着 N 套的半成品。
+    #   `MC_BWD_STAGGER=f`（f∈(0,1]）→ **按「顶层卡的型别」错峰**：depth 最大的
+    #   那批根 op，每个**型别**一个 deadline（同型多张 = 同一主题的多套，共用
+    #   同一个 dl），型别按关键路径降序（最长链先开工）取
+    #   `dl = T - (k-1-o) * STAG`，STAG = f * max(cp) / k（k = 顶层型别数）。
+    #   其余根 op（纯交付余料、收藏卡）仍取 dl = T。
+    #   ⚠ 两处口径坑（都实测过）：
+    #     ① 「全部无父 op 数」当 k 不行：3 主题实例 roots=73（= 类型数），
+    #        错峰被摊到 73 个无关 op 上（STAG 11.6min），等于没按主题错峰；
+    #     ② 「按 op 数」不行：同主题 3 套会把它三张顶层卡错成三个 deadline
+    #        （954 三套 18.79→19.41h），同主题同配方没有错峰的必要。
+    #   k=1（单主题）时 STAG 无意义 → 与旧口径逐位一致。f=0（默认）= 旧行为。
+    _F = float(inst.get("_bwd_stag_f") or 0.0)
+    _roots = [k for k, op in enumerate(ops) if not op["par"]]
+    _depth = [int(x) for x in (inst.get("depth") or [0] * n)]
+    _maxd = max(_depth) if _depth else 0
+    _top_types = sorted({ops[k]["i"] for k in _roots
+                         if _depth[ops[k]["i"]] >= _maxd})
+    _stag = 0.0
+    _wave: dict = {}
+    if _F > 0.0 and len(_top_types) > 1:
+        _top_types.sort(key=lambda i: (-float(cp[i]), -dur[i], i))
+        _cp_max = max([float(x) for x in cp] or [0.0])
+        _stag = _F * _cp_max / float(len(_top_types))
+        for _o, _i in enumerate(_top_types):
+            _wave[_i] = _o
     heap = []
     for k, op in enumerate(ops):
         if not op["par"]:
-            op["dl"] = T
             i = op["i"]
+            if _stag > 0.0 and i in _wave and _depth[i] >= _maxd:
+                dl = T - (len(_top_types) - 1 - _wave[i]) * _stag
+                if dl < float(cp[i]):       # 不早于这张自己的关键路径
+                    dl = float(cp[i])
+            else:
+                dl = T
+            op["dl"] = dl
             # 同 deadline 时先排「关键路径长 / 工期长」的，减少碎片
-            heapq.heappush(heap, (-T, -float(cp[i]), -dur[i], k))
+            heapq.heappush(heap, (-dl, -float(cp[i]), -dur[i], k))
 
     buys = []
     n_ok = 0
@@ -207,12 +443,32 @@ def backward_at(inst, T, pool_tie="cp", debug=False):
         _take(sfree, mi, li, t, 45.0)
         buys_out.append((i, t))
 
+    # ★★ 2026-11-22「前向压实」：倒排的 latest-fit 会把活儿全推到 deadline 前
+    #   一刻 → 前段大量空炉（451 首解 t<90s 只开 6 张，生产 DP 开 22 张），
+    #   执行层随即重解、计划漂移、反而慢 3.8%。空炉是**我的实现**造成的，
+    #   不是「等子卡齐套」的必然 —— 人炼卡从不空炉，只在子卡快到期时才让位。
+    #   `MC_BWD_FWD=1` → 拿倒排的 deadline 链当前向上界，重排成 ASAP。
+    if _os.environ.get("MC_BWD_FWD") == "1":
+        _wait = float(_os.environ.get("MC_BWD_WAIT") or 0.0)
+        fw = _forward_fill(inst, ops, is_base, T, wait=_wait)
+        if fw is not None:
+            rows2 = sorted([(op["s"], op["i"], op.get("m", 0)) for op in ops
+                            if not is_base[op["i"]]], key=lambda x: x[0])
+            return {"sched": [(i, s) for s, i, _m in rows2],
+                    "pools": [("main" if m < M else "steal", i, s)
+                              for s, i, m in rows2],
+                    "buys": fw["buys"], "mk": fw["mk"],
+                    "_ops": ops, "_is_base": is_base,
+                    "n_roots": len(_roots), "n_tops": len(_top_types), "stag": _stag,
+                    "_fwd": {"late": fw["late"], "idle": fw["idle"]}}
+
     rows = sorted([(op["s"], op["i"], op.get("m", 0)) for op in ops
                    if not is_base[op["i"]]], key=lambda x: x[0])
     sched = [(i, s) for s, i, _m in rows]
     pools = [("main" if m < M else "steal", i, s) for s, i, m in rows]
     return {"sched": sched, "pools": pools, "buys": buys_out, "mk": T,
-            "_ops": ops, "_is_base": is_base}
+            "_ops": ops, "_is_base": is_base, "n_roots": len(_roots),
+            "n_tops": len(_top_types), "stag": _stag}
 
 
 def _assign_pools(inst, sched):
@@ -287,29 +543,60 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
     hi = float(T_hi or 0.0) or None
     step = float(step or max(60.0, lo * 0.02))
 
-    best = None
-    fails = []
-    T = lo
-    tries = 0
-    while tries < max_try:
-        tries += 1
-        r = backward_at(inst, T)
-        if r is not None:
-            # ★ 必须用倒排自己的机位（`_assign_pools` 是另一次贪心重分配，
-            #   和倒排实际占的机器不一致 → validate 会报 machine_full，把可行
-            #   解判死；4 台口径下曾因此 40 次试探全失败返回 None）。
-            pools = r["pools"]
-            v = validate_pools(inst, r["sched"], pools, r["buys"])
-            if v["ok"]:
-                best = (v["makespan"], r, pools, v)
+    # 前向压实模式下，ASAP 会挤爆换卡箱（底卡同时到货/消耗）→ 从 wait=0 起
+    # 逐步放宽「等到 deadline 前多少秒再开」，取第一个过校验的。
+    FWD = _os.environ.get("MC_BWD_FWD") == "1"
+    WAITS = [0.0, 45.0, 90.0, 180.0, 360.0, 720.0, 1440.0, 2880.0] if FWD else [0.0]
+
+    def _scan(F):
+        """扫一个错峰系数 F（写 inst["_bwd_stag_f"]），返回 (best, fails, tries)。"""
+        inst["_bwd_stag_f"] = float(F)
+        best = None
+        fails = []
+        T = lo
+        step_ = step
+        tries = 0
+        while tries < max_try:
+            tries += 1
+            r = None
+            for w in WAITS:
+                _os.environ["MC_BWD_WAIT"] = str(w)
+                rr = backward_at(inst, T)
+                if rr is None:
+                    continue
+                vv = validate_pools(inst, rr["sched"], rr["pools"], rr["buys"])
+                if vv["ok"]:
+                    r = rr
+                    best = (vv["makespan"], rr, rr["pools"], vv)
+                    break
+                fails.append((T, "w%.0f:%s" % (w, vv["viol"][:1])))
+            if best is not None:
                 break
-            fails.append((T, v["viol"][:2]))
-        else:
-            fails.append((T, "construct_fail"))
-        if hi and T >= hi:
-            break
-        T = T + step
-        step *= 1.15
+            if r is None and not any(t == T for t, _ in fails):
+                fails.append((T, "construct_fail"))
+            if hi and T >= hi:
+                break
+            T = T + step_
+            step_ *= 1.15
+        return best, fails, tries
+
+    # ★ 2026-11-22 错峰（多 deadline）总开关：`MC_BWD_STAGGER=f`。
+    #   默认 **0.5**（f=0 复现旧「全根共用 T」口径）。构造失败就退回 f=0。
+    #   实测（同 sim / 同 seed，MC_BWD_FIRST=1）：
+    #     · 3 主题（60/59/62）：f=0 106.41h → 0.25 104.75 → 0.5 **103.65** → 1.0 102.85；
+    #       顶层投炉 25.9h→14.2h，投炉时箱存 59→17 张，40 面 avg 34.2→26.7；
+    #     · 954 三套：f=0 18.79h → 0.25 **18.18** → 0.5 19.38 → 1.0 19.41（无 hint 20.01）；
+    #     · 单套：逐位不变（48.75h）；1652 流水：逐位不变（ΣCi 1280.1）。
+    #   → 0.25~1.0 在每个场景都不劣于 f=0，取中值 0.5 作默认。
+    _F = float(_os.environ.get("MC_BWD_STAGGER") or 0.5)
+    best, fails, tries = _scan(_F)
+    stag_used = _F
+    if best is None and _F > 0.0:
+        b2, f2, t2 = _scan(0.0)
+        fails = fails + f2
+        tries += t2
+        if b2 is not None:
+            best, stag_used = b2, 0.0
     if best is None:
         return None, None, {"fails": fails}, {"ok": False, "fails": fails}
 
@@ -321,14 +608,17 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
         if hi_f - lo_f <= 1.0:
             break
         mid = (lo_f + hi_f) / 2.0
-        rr = backward_at(inst, mid)
         ok = False
-        if rr is not None:
-            pp = rr["pools"]
-            vv = validate_pools(inst, rr["sched"], pp, rr["buys"])
+        for w in WAITS:
+            _os.environ["MC_BWD_WAIT"] = str(w)
+            rr = backward_at(inst, mid)
+            if rr is None:
+                continue
+            vv = validate_pools(inst, rr["sched"], rr["pools"], rr["buys"])
             if vv["ok"]:
                 ok = True
-                mk_ok, r_ok, pools_ok, v_ok = vv["makespan"], rr, pp, vv
+                mk_ok, r_ok, pools_ok, v_ok = vv["makespan"], rr, rr["pools"], vv
+                break
         if ok:
             hi_f = mid
         else:
@@ -337,7 +627,9 @@ def solve_backward(inst, T_lo=None, T_hi=None, step=None, max_try=40,
     st = _spread_stats(ops, dur, r_ok["_is_base"])
     st.update({"ok": True, "makespan": mk_ok, "tries": tries,
                "peak_chg": v_ok["peak_chg"], "peak_ref": v_ok["peak_ref"],
-               "T_target": hi_f, "buys": len(r_ok["buys"]),
+               "T_target": hi_f, "buys": len(r_ok["buys"]), "stagger": stag_used,
+               "roots": r_ok.get("n_roots"), "tops": r_ok.get("n_tops"),
+               "stag_s": r_ok.get("stag"),
                "ops": len(r_ok["sched"])})
     if verbose:
         print("[BWD] mk=%.2fmin  spread_med=%.2f  wait_area=%.1f格·min  peak_chg=%d"

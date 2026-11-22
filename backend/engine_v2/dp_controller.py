@@ -1411,6 +1411,53 @@ class DPTickController:
             #     `hint_sched`  —— (a) 排序键：越早开工的卡型越先试；(b) incumbent：
             #                      DFS 走不出更优路径时保留它（from=HINT），绝不劣化。
             _hint_kw = {}
+            # ★★ 2026-11-22 `MC_BWD_EVERY=1`：倒排**每 tick** 都跑。
+            #   定位（用户 2026-11-22 定调）：「倒排是一种启发，是告诉 DP 向这个
+            #   方向搜索更有可能有最优解」—— 不是约束、不是闸门、不替代求解。
+            #   所以这里只喂 `hint_sched`（现有的三个通道：vec_prio 排序键、
+            #   `_dyn_prio_fn(t)` 每层动态打分、以及 DFS 走不出来时的 incumbent
+            #   保底），**绝不喂 ub_hint**：剩余需求的 makespan 是「从现在算」，
+            #   当全局上界会把 BOUND 剪死。
+            #   为什么必须每 tick：旧版条件 `solve_count==0 且空箱空炉` 只让倒排
+            #   在第一个承诺点跑一次，之后 100+ 次滚动重解完全没有方向。实测
+            #   单套 50h（首解权重大）49.98→48.75h、600 面长卡 26.7→14.2h 开工、
+            #   投炉时箱存 33→18 张；3 套 105h（首解被淹没）104.96→106.41h。
+            if (self.bwd_first and os.environ.get("MC_BWD_EVERY") == "1"
+                    and not _hint_kw):
+                _rem = [max(0, int(x)) for x in need0L]
+                for _i5 in range(len(_rem)):
+                    if _i5 < len(init_stockL):
+                        _rem[_i5] = max(0, _rem[_i5] - int(init_stockL[_i5]))
+                for _i5, _r5, _c5 in running:
+                    if 0 <= _i5 < len(_rem):
+                        _rem[_i5] = max(0, _rem[_i5] - 1)
+                if any(_rem):
+                    if os.environ.get("MC_BWD_DBG") == "1":
+                        print("[BWD] every try solve=%d rem=%d stk=%d run=%d"
+                              % (self.solve_count, sum(_rem),
+                                 sum(int(x) for x in init_stockL), len(running)),
+                              flush=True)
+                    try:
+                        from backend.sched_cmp.dp_backward import solve_backward
+                        _inst_b = dict(inst)
+                        _inst_b["need0"] = _rem
+                        _mk_b, _sch_b, _meta_b, _st_b = solve_backward(_inst_b)
+                        if _sch_b:
+                            _buys_b = (_meta_b or {}).get("buys") or []
+                            _hint_kw = {"hint_sched": sorted(
+                                [(int(i), float(t)) for i, t in _sch_b] +
+                                [(int(i), float(t)) for i, t in _buys_b],
+                                key=lambda x: x[1])}
+                            self.bwd_stats = {
+                                "every": True,
+                                "hint_mk": round(_mk_b / 60.0, 2),
+                                "hint_ops": len(_hint_kw["hint_sched"]),
+                                "rem_need": sum(_rem),
+                                "solve": self.solve_count}
+                        else:
+                            self.bwd_stats = {"every_no_plan": True}
+                    except Exception as _e5:      # noqa: BLE001 — 启发失败就退回无方向
+                        self.bwd_stats = {"every_err": type(_e5).__name__}
             if (self.bwd_first and not self._bwd_used and self.solve_count == 0
                     and not running and not any(init_stockL)):
                 self._bwd_used = True
@@ -1432,7 +1479,10 @@ class DPTickController:
                                     "hint_buys": [(int(i), float(t))
                                                   for i, t in _buys_b]}
                         self.bwd_stats = {"hint_mk": _mk_b / 60.0,
-                                          "hint_ops": len(_hint)}
+                                          "hint_ops": len(_hint),
+                                          "roots": _st_b.get("roots"),
+                                          "stag_s": _st_b.get("stag_s"),
+                                          "stagger": _st_b.get("stagger")}
                     else:
                         self.bwd_stats = {"rejected": "no_plan"}
                     if os.environ.get("MC_BWD_DBG") == "1":
